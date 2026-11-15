@@ -1,0 +1,97 @@
+From 97d371f5ef7710f1a4fec5712aea3a1dcb2dd222 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 11:35:04 +0100
+Subject: [PATCH 3/6] Test ciphertext allocation across chunk and record
+ boundaries
+
+---
+ crates/tlsn/src/transcript_internal/auth.rs | 73 +++++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+
+diff --git a/crates/tlsn/src/transcript_internal/auth.rs b/crates/tlsn/src/transcript_internal/auth.rs
+index c71834b93..726599abd 100644
+--- a/crates/tlsn/src/transcript_internal/auth.rs
++++ b/crates/tlsn/src/transcript_internal/auth.rs
+@@ -663,6 +663,79 @@ mod tests {
+         assert_eq!(keystream, expected);
+     }
+ 
++    #[rstest]
++    #[case::single_block([16], [0..16])]
++    #[case::partial_blocks([40], [3..7, 9..38])]
++    #[case::one_chunk_exactly([XOR_CHUNK], [0..XOR_CHUNK])]
++    #[case::crosses_chunk([XOR_CHUNK + 40], [0..XOR_CHUNK + 40])]
++    #[case::gap_at_chunk_boundary([3 * XOR_CHUNK], [5..XOR_CHUNK - 3, XOR_CHUNK + 1..2 * XOR_CHUNK + 9])]
++    #[case::records_straddle_chunks([XOR_CHUNK - 7, 33, XOR_CHUNK + 5, 15], [1..XOR_CHUNK + 20, XOR_CHUNK + 30..2 * XOR_CHUNK + 46])]
++    #[tokio::test]
++    async fn test_alloc_ciphertext(
++        #[case] record_lens: impl IntoIterator<Item = usize>,
++        #[case] ranges: impl IntoIterator<Item = Range<usize>>,
++    ) {
++        let mut rng = StdRng::seed_from_u64(0);
++        let mut key = [0u8; 16];
++        let mut iv = [0u8; 4];
++        rng.fill(&mut key);
++        rng.fill(&mut iv);
++
++        let mut total_len = 0;
++        let records = record_lens
++            .into_iter()
++            .map(|len| {
++                let mut explicit_nonce = [0u8; 8];
++                rng.fill(&mut explicit_nonce);
++                total_len += len;
++                RecordParams {
++                    explicit_nonce: explicit_nonce.to_vec(),
++                    len,
++                }
++            })
++            .collect::<Vec<_>>();
++        let mut plaintext = vec![0u8; total_len];
++        rng.fill(&mut plaintext[..]);
++
++        let ranges = RangeSet::from(ranges.into_iter().collect::<Vec<_>>());
++
++        let (mut ctx, _) = test_st_context(1024);
++        let (mut vm, key_ref, iv_ref) = build_vm(key, iv);
++
++        let plaintext_refs = alloc_plaintext(&mut vm, &ranges).unwrap();
++        for (range, slice) in plaintext_refs.iter() {
++            vm.mark_public(*slice).unwrap();
++            vm.assign(*slice, plaintext[range].to_vec()).unwrap();
++            vm.commit(*slice).unwrap();
++        }
++
++        let ciphertext =
++            alloc_ciphertext(&mut vm, key_ref, iv_ref, plaintext_refs, &records).unwrap();
++
++        vm.execute(&mut ctx).await.unwrap();
++
++        // Every piece is at its transcript position and together they cover
++        // exactly the requested ranges.
++        let mut full_ciphertext = plaintext.clone();
++        let mut record_start = 0;
++        for record in &records {
++            let record_range = record_start..record_start + record.len;
++            aes_ctr_apply_keystream(
++                &key,
++                &iv,
++                &record.explicit_nonce,
++                &mut full_ciphertext[record_range],
++            );
++            record_start += record.len;
++        }
++
++        assert_eq!(RangeSet::from(ciphertext.keys().collect::<Vec<_>>()), ranges);
++        for (range, slice) in ciphertext.iter() {
++            let piece: Vec<u8> = vm.get(*slice).unwrap().unwrap();
++            assert_eq!(piece, full_ciphertext[range.clone()], "{range:?}");
++        }
++    }
++
+     #[rstest]
+     #[case::single_record_empty([0])]
+     #[case::single_record([32])]
+-- 
+2.56.0
+

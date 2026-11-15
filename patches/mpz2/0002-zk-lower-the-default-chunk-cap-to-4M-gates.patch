@@ -1,0 +1,25 @@
+From 3c184f93e46de834017c959b5d98499313fe718b Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 11:05:44 +0100
+Subject: [PATCH 2/4] zk: lower the default chunk cap to 4M gates
+
+---
+ crates/zk/src/config.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/crates/zk/src/config.rs b/crates/zk/src/config.rs
+index 31b5662..dcf3531 100644
+--- a/crates/zk/src/config.rs
++++ b/crates/zk/src/config.rs
+@@ -9,7 +9,7 @@ const DEFAULT_BATCH_SIZE: usize = 200_000;
+ /// `execute` tops the window up during execution. The consistency check still
+ /// fires every `batch_size` gates *within* a chunk, so this only bounds the OT
+ /// materialization window, not the check cadence.
+-const DEFAULT_CHUNK_CAP: usize = 15_000_000;
++const DEFAULT_CHUNK_CAP: usize = 4_000_000;
+ 
+ /// Prover configuration.
+ #[derive(Debug, Clone, Builder)]
+-- 
+2.56.0
+

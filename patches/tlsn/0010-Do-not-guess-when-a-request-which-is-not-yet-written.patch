@@ -1,0 +1,98 @@
+From ef97f588a4a029d56199bb12cfe918ae828aba8e Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 22:11:31 +0100
+Subject: [PATCH] Do not guess when a request which is not yet written reached
+ the server
+
+A prefix whose last application data had not been written to the server
+gave the amount received so far as its mark, which a caller could keep
+after the write was made and more had arrived before it. It now says the
+write had not been made. A record of application data which carries none
+no longer moves the mark.
+---
+ crates/tlsn/src/proxy.rs | 28 +++++++++++++++++-----------
+ 1 file changed, 17 insertions(+), 11 deletions(-)
+
+diff --git a/crates/tlsn/src/proxy.rs b/crates/tlsn/src/proxy.rs
+index 2c72f1690..f6b2f1e2c 100644
+--- a/crates/tlsn/src/proxy.rs
++++ b/crates/tlsn/src/proxy.rs
+@@ -269,14 +269,15 @@ fn whole_records(mut tls: &[u8]) -> (Vec<(u8, usize)>, Option<u8>) {
+     (records, None)
+ }
+ 
+-/// Where the last whole record of application data in the raw TLS stream
+-/// `tls` ends, if there is one.
++/// Where the last whole record which carries application data in the raw
++/// TLS stream `tls` ends, if there is one. A record of that type which
++/// carries none does not count: it gives the server nothing to answer.
+ fn last_application_data_end(tls: &[u8]) -> Option<usize> {
+     let mut end = 0;
+     let mut last = None;
+     for (typ, len) in whole_records(tls).0 {
+         end += len;
+-        if typ == APPLICATION_DATA {
++        if typ == APPLICATION_DATA && len > 5 + GCM_RECORD_OVERHEAD {
+             last = Some(end);
+         }
+     }
+@@ -318,8 +319,9 @@ pub struct TapPrefix {
+     pub sent_beyond: usize,
+     /// How many bytes had been forwarded from the server when the last
+     /// application data of the prefix had been written to it, whether or
+-    /// not the prefix covers them. The server sent them without having seen
+-    /// that data. Records which are not application data, such as the alert
++    /// not the prefix covers them, or `usize::MAX` if it had not been
++    /// written when the prefix was taken. The server sent them without
++    /// having seen that data. Records which are not application data, such as the alert
+     /// answering a server's close, do not move this.
+     pub received_at_last_send: usize,
+ }
+@@ -391,11 +393,12 @@ impl TrafficTap {
+                     (tapped.sent.get(..sent), tapped.recv.get(..recv), tapped.first_sent)
+                 {
+                     // The write which carried the last application data of
+-                    // the prefix. If it has not been made, everything
+-                    // received so far came before it.
++                    // the prefix. If it has not been made, the server has
++                    // seen none of it whatever it sends from here on, as
++                    // far as this prefix can tell.
+                     let last_data = last_application_data_end(prefix).unwrap_or(0);
+                     let last = tapped.sends.partition_point(|(end, _)| *end < last_data);
+-                    let received_then = tapped.sends.get(last).map_or(tapped.recv.len(), |(_, received)| *received);
++                    let received_then = tapped.sends.get(last).map_or(usize::MAX, |(_, received)| *received);
+                     let known = TapPrefix {
+                         sent,
+                         received: recv,
+@@ -693,14 +696,16 @@ mod tests {
+         tap.record(TapDirection::Recv, &stale);
+         forward(&tap, &second);
+         tap.record(TapDirection::Recv, &fresh);
+-        // The answer to a server's close does not move the mark.
++        // Neither the answer to a server's close nor a record which carries
++        // no application data moves the mark.
+         forward(&tap, &record(ALERT, 26));
++        forward(&tap, &app_record(0));
+ 
+         let (.., prefix) = tap.prefix(first.len(), 0).await;
+         assert_eq!(prefix.received_at_last_send, 0);
+ 
+         // Whatever of the received data the prefix covers.
+-        let sent = first.len() + second.len() + 31;
++        let sent = first.len() + second.len() + 31 + app_record(0).len();
+         for received in [0, stale.len(), stale.len() + fresh.len()] {
+             let (.., prefix) = tap.prefix(sent, received).await;
+             assert_eq!(prefix.received_at_last_send, stale.len());
+@@ -720,7 +725,8 @@ mod tests {
+         tap.record(TapDirection::Sent, &request);
+         tap.record(TapDirection::Recv, &early);
+         let (.., prefix) = tap.prefix(request.len(), early.len()).await;
+-        assert_eq!(prefix.received_at_last_send, early.len());
++        assert_eq!(prefix.received_at_last_send, usize::MAX);
++        assert_eq!(tap.application_data_started_before(usize::MAX), 11);
+ 
+         tap.wrote(request.len());
+         tap.record(TapDirection::Recv, &late);
+-- 
+2.56.0
+

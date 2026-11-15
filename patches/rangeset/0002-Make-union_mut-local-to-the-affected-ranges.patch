@@ -1,0 +1,46 @@
+From 61b0643aa1c2005985d048ad0c332d6873cf6c5d Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 09:14:54 +0100
+Subject: [PATCH 2/3] Make union_mut local to the affected ranges
+
+---
+ src/set.rs | 20 +++++++++++---------
+ 1 file changed, 11 insertions(+), 9 deletions(-)
+
+diff --git a/src/set.rs b/src/set.rs
+index 2e7dc0a..44b4515 100644
+--- a/src/set.rs
++++ b/src/set.rs
+@@ -1153,18 +1153,20 @@ mod tests {
+         &'static [Range<usize>],
+     );
+ 
+-    /// `push_range`: O(1) tail append/coalesce in order, `true` (needs sort)
+-    /// out of order, empty ranges ignored.
++    /// `union_mut`: appends, coalesces and inserts out of order, ignoring
++    /// empty ranges.
+     #[test]
+-    fn test_push_range() {
++    fn test_union_mut_single_ranges() {
+         let mut s = RangeSet::from(Vec::<Range<usize>>::new());
+-        assert!(!s.push_range(2..4)); // into empty
+-        assert!(!s.push_range(4..6)); // adjacent -> coalesced into tail
+-        assert!(!s.push_range(8..9)); // disjoint after tail
+-        assert!(!s.push_range(20..20)); // empty range ignored
++        s.union_mut(2..4); // into empty
++        s.union_mut(4..6); // adjacent -> coalesced into tail
++        s.union_mut(8..9); // disjoint after tail
++        s.union_mut(20..20); // empty range ignored
+         assert_eq!(s.ranges, vec![2..6, 8..9]);
+-        assert!(s.push_range(0..1)); // before tail -> needs sort
+-        assert_eq!(s.ranges, vec![2..6, 8..9, 0..1]); // pushed, not yet sorted
++        s.union_mut(0..1); // before every range
++        assert_eq!(s.ranges, vec![0..1, 2..6, 8..9]);
++        s.union_mut(5..8); // bridges two ranges
++        assert_eq!(s.ranges, vec![0..1, 2..9]);
+     }
+ 
+     /// `remove_range`: in-place single-range removal; no-op when empty or
+-- 
+2.56.0
+

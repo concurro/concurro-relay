@@ -1,0 +1,521 @@
+From 6eded97846af6f17d8b45ad4bbf25b187d226c05 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 11:05:49 +0100
+Subject: [PATCH 3/4] zk: record a chunk's outputs with one range-set update
+
+---
+ crates/memory-core/src/correlated/keys.rs |  17 +++
+ crates/memory-core/src/correlated/macs.rs |  17 +++
+ crates/memory-core/src/store.rs           | 157 ++++++++++++++++++++++
+ crates/zk-core/src/store/prover.rs        |  64 +++++++++
+ crates/zk-core/src/store/verifier.rs      |  49 +++++++
+ crates/zk-core/src/view.rs                |  15 ++-
+ crates/zk/src/prover.rs                   |  13 +-
+ crates/zk/src/verifier.rs                 |  13 +-
+ 8 files changed, 334 insertions(+), 11 deletions(-)
+
+diff --git a/crates/memory-core/src/correlated/keys.rs b/crates/memory-core/src/correlated/keys.rs
+index 68f8631..028e328 100644
+--- a/crates/memory-core/src/correlated/keys.rs
++++ b/crates/memory-core/src/correlated/keys.rs
+@@ -232,6 +232,23 @@ impl KeyStore {
+         self.keys.try_set(slice, keys).map_err(From::from)
+     }
+ 
++    /// Returns an error if [`try_set_many`](Self::try_set_many) would reject
++    /// the slices.
++    #[inline]
++    pub fn check_set_many(&self, slices: impl IntoIterator<Item = Slice>) -> Result<()> {
++        self.keys.check_set_many(slices).map_err(From::from)
++    }
++
++    /// Sets keys for several slices. Nothing is written if any slice
++    /// overlaps keys which are already set or another slice in the batch.
++    #[inline]
++    pub fn try_set_many<'a>(
++        &mut self,
++        items: impl IntoIterator<Item = (Slice, &'a [Key])>,
++    ) -> Result<()> {
++        self.keys.try_set_many(items).map_err(From::from)
++    }
++
+     /// Sets keys for public data, returning an error if the keys are already
+     /// set.
+     #[inline]
+diff --git a/crates/memory-core/src/correlated/macs.rs b/crates/memory-core/src/correlated/macs.rs
+index 78bbf17..32084d2 100644
+--- a/crates/memory-core/src/correlated/macs.rs
++++ b/crates/memory-core/src/correlated/macs.rs
+@@ -178,6 +178,23 @@ impl MacStore {
+         self.macs.try_set(slice, macs).map_err(From::from)
+     }
+ 
++    /// Returns an error if [`try_set_many`](Self::try_set_many) would reject
++    /// the slices.
++    #[inline]
++    pub fn check_set_many(&self, slices: impl IntoIterator<Item = Slice>) -> Result<()> {
++        self.macs.check_set_many(slices).map_err(From::from)
++    }
++
++    /// Sets MACs for several slices. Nothing is written if any slice
++    /// overlaps MACs which are already set or another slice in the batch.
++    #[inline]
++    pub fn try_set_many<'a>(
++        &mut self,
++        items: impl IntoIterator<Item = (Slice, &'a [Mac])>,
++    ) -> Result<()> {
++        self.macs.try_set_many(items).map_err(From::from)
++    }
++
+     /// Sets MACs for public data, returning an error if they are already set.
+     #[inline]
+     pub fn try_set_public(&mut self, slice: Slice, data: &BitSlice) -> Result<()> {
+diff --git a/crates/memory-core/src/store.rs b/crates/memory-core/src/store.rs
+index bb2bd62..a4ee111 100644
+--- a/crates/memory-core/src/store.rs
++++ b/crates/memory-core/src/store.rs
+@@ -118,6 +118,66 @@ impl<T: Copy> Store<T> {
+ 
+         Ok(())
+     }
++
++    /// Returns an error if [`try_set_many`](Self::try_set_many) would reject
++    /// the slices.
++    pub fn check_set_many(&self, slices: impl IntoIterator<Item = Slice>) -> Result<()> {
++        batch_ranges(&self.set, self.items.len(), slices).map(|_| ())
++    }
++
++    /// Attempts to set several slices, recording the set ranges once.
++    ///
++    /// Nothing is written if any slice overlaps data which is already set, is
++    /// out of bounds, or overlaps another slice in the batch.
++    pub fn try_set_many<'a>(
++        &mut self,
++        items: impl IntoIterator<Item = (Slice, &'a [T])>,
++    ) -> Result<()>
++    where
++        T: 'a,
++    {
++        let items: Vec<_> = items.into_iter().collect();
++        let ranges = batch_ranges(
++            &self.set,
++            self.items.len(),
++            items.iter().map(|(slice, _)| *slice),
++        )?;
++
++        for (slice, data) in items {
++            self.items[slice.to_range()].copy_from_slice(data);
++        }
++        self.set |= &ranges;
++
++        Ok(())
++    }
++}
++
++/// Returns the ranges of a batch of slices, or an error if any slice overlaps
++/// `set`, ends past `len`, or overlaps another slice in the batch.
++fn batch_ranges(
++    set: &RangeSet,
++    len: usize,
++    slices: impl IntoIterator<Item = Slice>,
++) -> Result<RangeSet> {
++    let mut batch = Vec::new();
++    for slice in slices {
++        let range = slice.to_range();
++        if !range.is_disjoint(set) {
++            return Err(StoreError::AlreadySet(slice));
++        } else if range.end > len {
++            return Err(StoreError::InvalidSlice(slice));
++        }
++        batch.push((range, slice));
++    }
++
++    batch.sort_unstable_by_key(|(range, _)| range.start);
++    if let Some(pair) = batch.windows(2).find(|pair| pair[1].0.start < pair[0].0.end) {
++        return Err(StoreError::AlreadySet(pair[1].1));
++    }
++
++    Ok(RangeSet::from(
++        batch.into_iter().map(|(range, _)| range).collect::<Vec<_>>(),
++    ))
+ }
+ 
+ /// A linear bit store which ensures uninitialized data is not accessed.
+@@ -226,6 +286,35 @@ impl BitStore {
+ 
+         Ok(())
+     }
++
++    /// Returns an error if [`try_set_many`](Self::try_set_many) would reject
++    /// the slices.
++    pub fn check_set_many(&self, slices: impl IntoIterator<Item = Slice>) -> Result<()> {
++        batch_ranges(&self.set, self.bits.len(), slices).map(|_| ())
++    }
++
++    /// Attempts to set several slices, recording the set ranges once.
++    ///
++    /// Nothing is written if any slice overlaps data which is already set, is
++    /// out of bounds, or overlaps another slice in the batch.
++    pub fn try_set_many<'a>(
++        &mut self,
++        items: impl IntoIterator<Item = (Slice, &'a BitSlice)>,
++    ) -> Result<()> {
++        let items: Vec<_> = items.into_iter().collect();
++        let ranges = batch_ranges(
++            &self.set,
++            self.bits.len(),
++            items.iter().map(|(slice, _)| *slice),
++        )?;
++
++        for (slice, data) in items {
++            self.bits[slice.to_range()].copy_from_bitslice(data);
++        }
++        self.set |= &ranges;
++
++        Ok(())
++    }
+ }
+ 
+ #[derive(Debug, thiserror::Error)]
+@@ -277,4 +366,72 @@ mod tests {
+         let range2 = store.alloc(10);
+         assert!(!store.is_set(range2));
+     }
++    #[test]
++    fn test_try_set_many_matches_sequential() {
++        let mut batched = Store::new();
++        let mut sequential = Store::new();
++        let slices: Vec<_> = (0..4).map(|_| batched.alloc(8)).collect();
++        (0..4).for_each(|_| drop(sequential.alloc(8)));
++
++        let data: Vec<Vec<u8>> = (0..4u8).map(|i| vec![i; 8]).collect();
++        // Out of order and with a gap, as chunked outputs arrive.
++        let order = [2, 0, 3];
++        batched
++            .try_set_many(order.iter().map(|&i| (slices[i], data[i].as_slice())))
++            .unwrap();
++        for &i in &order {
++            sequential.try_set(slices[i], &data[i]).unwrap();
++        }
++
++        assert_eq!(batched.set_ranges(), sequential.set_ranges());
++        for &i in &order {
++            assert_eq!(batched.try_get(slices[i]).unwrap(), &data[i][..]);
++        }
++        assert!(!batched.is_set(slices[1]));
++    }
++
++    #[test]
++    fn test_try_set_many_rejects_invalid_batches_without_writing() {
++        let mut store = Store::new();
++        let a = store.alloc(8);
++        let b = store.alloc(8);
++        let (ones, twos) = (vec![1u8; 8], vec![2u8; 8]);
++
++        // The same slice twice.
++        let duplicate = store.try_set_many([(a, ones.as_slice()), (a, twos.as_slice())]);
++        assert!(matches!(duplicate, Err(StoreError::AlreadySet(_))));
++        assert!(!store.is_set(a));
++
++        // A slice which partially overlaps set data.
++        store.try_set(a, &ones).unwrap();
++        let straddling = Slice::new_unchecked(Ptr::new(4), 8);
++        let partial = store.try_set_many([(straddling, twos.as_slice())]);
++        assert!(matches!(partial, Err(StoreError::AlreadySet(_))));
++        assert!(!store.is_set(b));
++        assert!(store.check_set_many([straddling]).is_err());
++
++        // A slice which is already set.
++        let already = store.try_set_many([(b, twos.as_slice()), (a, twos.as_slice())]);
++        assert!(matches!(already, Err(StoreError::AlreadySet(_))));
++        assert!(!store.is_set(b));
++        assert_eq!(store.try_get(a).unwrap(), &ones[..]);
++    }
++
++    #[test]
++    fn test_bit_store_try_set_many_rejects_duplicates() {
++        let mut store = BitStore::new();
++        let a = store.alloc(4);
++        let b = store.alloc(4);
++        let data = BitVec::from_iter([true, false, true, false]);
++
++        let duplicate = store.try_set_many([(a, data.as_bitslice()), (a, data.as_bitslice())]);
++        assert!(matches!(duplicate, Err(StoreError::AlreadySet(_))));
++        assert!(!store.is_set(a));
++
++        store
++            .try_set_many([(b, data.as_bitslice()), (a, data.as_bitslice())])
++            .unwrap();
++        assert_eq!(store.try_get(a).unwrap(), &data);
++        assert_eq!(store.try_get(b).unwrap(), &data);
++    }
+ }
+diff --git a/crates/zk-core/src/store/prover.rs b/crates/zk-core/src/store/prover.rs
+index eb86995..af53b39 100644
+--- a/crates/zk-core/src/store/prover.rs
++++ b/crates/zk-core/src/store/prover.rs
+@@ -8,6 +8,7 @@ use mpz_memory_core::{
+ };
+ use zerocopy::IntoBytes;
+ 
++use crate::view::RangeSet;
+ use crate::{
+     store::ProverFlush,
+     view::{View, ViewError},
+@@ -107,6 +108,42 @@ impl ProverStore {
+         Ok(())
+     }
+ 
++    /// Sets the output MACs of several circuits at once.
++    ///
++    /// Returns an error, leaving the store unchanged, if any output is already
++    /// set or overlaps another output in the batch.
++    pub fn set_outputs_macs(&mut self, outputs: &[(Slice, Vec<Mac>)]) -> Result<()> {
++        let ranges = RangeSet::from(
++            outputs
++                .iter()
++                .map(|(slice, _)| slice.to_range())
++                .collect::<Vec<_>>(),
++        );
++        // Validate against every store before changing any of them.
++        self.mac_store
++            .check_set_many(outputs.iter().map(|(slice, _)| *slice))?;
++        self.data_store
++            .check_set_many(outputs.iter().map(|(slice, _)| *slice))?;
++        self.view.set_outputs(&ranges)?;
++
++        self.mac_store
++            .try_set_many(outputs.iter().map(|(slice, macs)| (*slice, macs.as_slice())))?;
++
++        // (Note: LSBs of MACs contain the value of the authenticated bit).
++        let data: Vec<BitVec> = outputs
++            .iter()
++            .map(|(_, macs)| BitVec::from_iter(macs.iter().map(|mac| mac.pointer())))
++            .collect();
++        self.data_store.try_set_many(
++            outputs
++                .iter()
++                .zip(&data)
++                .map(|((slice, _), data)| (*slice, data.as_bitslice())),
++        )?;
++
++        Ok(())
++    }
++
+     pub fn send_flush(&mut self, transcript: &mut Hasher) -> Result<ProverFlush> {
+         if self.pending {
+             return Err(ErrorRepr::UnexpectedFlush.into());
+@@ -311,3 +348,30 @@ impl From<ViewError> for ProverStoreError {
+         Self(ErrorRepr::View(err))
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn rejected_output_batch_leaves_store_unchanged() {
++        let mut store = ProverStore::new();
++        let a = store.alloc_output(8);
++        let b = store.alloc_output(8);
++        let macs = vec![Mac::default(); 8];
++
++        let duplicate = store.set_outputs_macs(&[(b, macs.clone()), (a, macs.clone()), (a, macs.clone())]);
++        assert!(duplicate.is_err());
++        for slice in [a, b] {
++            assert!(!store.is_set_macs(slice));
++            assert!(!store.is_committed_raw(slice));
++        }
++        assert!(!store.wants_flush());
++
++        store.set_outputs_macs(&[(b, macs.clone()), (a, macs)]).unwrap();
++        for slice in [a, b] {
++            assert!(store.is_set_macs(slice));
++            assert!(store.is_committed_raw(slice));
++        }
++    }
++}
+diff --git a/crates/zk-core/src/store/verifier.rs b/crates/zk-core/src/store/verifier.rs
+index 30b1d65..a0cc0b4 100644
+--- a/crates/zk-core/src/store/verifier.rs
++++ b/crates/zk-core/src/store/verifier.rs
+@@ -8,6 +8,7 @@ use mpz_memory_core::{
+ };
+ use zerocopy::IntoBytes;
+ 
++use crate::view::RangeSet;
+ use crate::{
+     store::ProverFlush,
+     view::{FlushView, View, ViewError},
+@@ -96,6 +97,28 @@ impl VerifierStore {
+         Ok(())
+     }
+ 
++    /// Sets the output keys of several circuits at once.
++    ///
++    /// Returns an error, leaving the store unchanged, if any output is already
++    /// set or overlaps another output in the batch.
++    pub fn set_outputs_keys(&mut self, outputs: &[(Slice, Vec<Key>)]) -> Result<()> {
++        let ranges = RangeSet::from(
++            outputs
++                .iter()
++                .map(|(slice, _)| slice.to_range())
++                .collect::<Vec<_>>(),
++        );
++        // Validate against the store before changing the view.
++        self.key_store
++            .check_set_many(outputs.iter().map(|(slice, _)| *slice))?;
++        self.view.set_outputs(&ranges)?;
++
++        self.key_store
++            .try_set_many(outputs.iter().map(|(slice, keys)| (*slice, keys.as_slice())))?;
++
++        Ok(())
++    }
++
+     pub fn mark_flush_pending(&mut self) -> Result<()> {
+         if self.pending {
+             return Err(ErrorRepr::UnexpectedFlush.into());
+@@ -294,3 +317,29 @@ impl From<ViewError> for VerifierStoreError {
+         Self(ErrorRepr::View(err))
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn rejected_output_batch_leaves_store_unchanged() {
++        let mut store = VerifierStore::new(Delta::new(Default::default()));
++        let a = store.alloc_output(8);
++        let b = store.alloc_output(8);
++        let keys = vec![Key::default(); 8];
++
++        let duplicate = store.set_outputs_keys(&[(b, keys.clone()), (a, keys.clone()), (a, keys.clone())]);
++        assert!(duplicate.is_err());
++        for slice in [a, b] {
++            assert!(store.try_get_keys(slice).is_err());
++            assert!(!store.is_committed_raw(slice));
++        }
++
++        store.set_outputs_keys(&[(b, keys.clone()), (a, keys)]).unwrap();
++        for slice in [a, b] {
++            assert!(store.try_get_keys(slice).is_ok());
++            assert!(store.is_committed_raw(slice));
++        }
++    }
++}
+diff --git a/crates/zk-core/src/view.rs b/crates/zk-core/src/view.rs
+index 7c9263c..5f0e445 100644
+--- a/crates/zk-core/src/view.rs
++++ b/crates/zk-core/src/view.rs
+@@ -3,7 +3,7 @@ use rangeset::{iter::RangeIterator, ops::Set};
+ use serde::{Deserialize, Serialize};
+ 
+ type Range = std::ops::Range<usize>;
+-type RangeSet = rangeset::set::RangeSet<usize>;
++pub(crate) type RangeSet = rangeset::set::RangeSet<usize>;
+ type Result<T, E = ViewError> = core::result::Result<T, E>;
+ 
+ #[derive(Debug, Default)]
+@@ -195,6 +195,19 @@ impl View {
+         Ok(())
+     }
+ 
++    /// Marks several outputs as complete at once.
++    pub(crate) fn set_outputs(&mut self, ranges: &RangeSet) -> Result<()> {
++        if let Some(range) = ranges.iter().find(|range| !range.is_subset(&self.output.all)) {
++            return Err(ErrorRepr::NotOutput { range }.into());
++        }
++
++        self.output.complete |= ranges;
++        // If marked for decoding, prove MACs.
++        self.flush.prove |= ranges.intersection(&self.decode.all);
++
++        Ok(())
++    }
++
+     pub(crate) fn is_committed(&self, range: Range) -> bool {
+         range.is_subset(&self.input.complete) || range.is_subset(&self.output.complete)
+     }
+diff --git a/crates/zk/src/prover.rs b/crates/zk/src/prover.rs
+index 73e9cd2..803c391 100644
+--- a/crates/zk/src/prover.rs
++++ b/crates/zk/src/prover.rs
+@@ -184,6 +184,9 @@ where
+         self.flush(ctx).await?;
+ 
+         let mut calls = chunk.into_iter().peekable();
++        // The chunk's calls were all ready when staged, so none reads another's
++        // output and the outputs can be recorded together once it completes.
++        let mut chunk_outputs = Vec::new();
+ 
+         // Execute the staged chunk in consistency-check batches. The chunk is
+         // the OT materialization window; checks still fire every `batch_size`
+@@ -265,11 +268,7 @@ where
+                 .into_iter()
+                 .collect::<VmResult<Vec<_>>>()?;
+ 
+-            for (output, output_macs) in outputs {
+-                self.store
+-                    .set_output_macs(output, &output_macs)
+-                    .map_err(VmError::memory)?;
+-            }
++            chunk_outputs.extend(outputs);
+ 
+             if self.core.pending() >= self.config.batch_size() {
+                 let RCOTReceiverOutput {
+@@ -286,6 +285,10 @@ where
+             }
+         }
+ 
++        self.store
++            .set_outputs_macs(&chunk_outputs)
++            .map_err(VmError::memory)?;
++
+         // Check this chunk's residual partial batch.
+         if self.core.wants_check() {
+             let RCOTReceiverOutput {
+diff --git a/crates/zk/src/verifier.rs b/crates/zk/src/verifier.rs
+index 0cdddd7..2909cc0 100644
+--- a/crates/zk/src/verifier.rs
++++ b/crates/zk/src/verifier.rs
+@@ -185,6 +185,9 @@ where
+         self.flush(ctx).await?;
+ 
+         let mut calls = chunk.into_iter().peekable();
++        // The chunk's calls were all ready when staged, so none reads another's
++        // output and the outputs can be recorded together once it completes.
++        let mut chunk_outputs = Vec::new();
+ 
+         // Execute the staged chunk in consistency-check batches. The chunk is
+         // the OT materialization window; checks still fire every `batch_size`
+@@ -258,11 +261,7 @@ where
+                 .into_iter()
+                 .collect::<VmResult<Vec<_>>>()?;
+ 
+-            for (output, output_keys) in outputs {
+-                self.store
+-                    .set_output_keys(output, &output_keys)
+-                    .map_err(VmError::memory)?;
+-            }
++            chunk_outputs.extend(outputs);
+ 
+             if self.core.pending() >= self.config.batch_size() {
+                 let RCOTSenderOutput {
+@@ -276,6 +275,10 @@ where
+             }
+         }
+ 
++        self.store
++            .set_outputs_keys(&chunk_outputs)
++            .map_err(VmError::memory)?;
++
+         // Check this chunk's residual partial batch.
+         if self.core.wants_check() {
+             let RCOTSenderOutput {
+-- 
+2.56.0
+

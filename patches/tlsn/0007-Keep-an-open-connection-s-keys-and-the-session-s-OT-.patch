@@ -1,0 +1,541 @@
+From 9b68f702d5667395fd7dda890238414b8c5f5f82 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 20:22:28 +0100
+Subject: [PATCH] Keep an open connection's keys and the session's OT state out
+ of unasked use
+
+Proofs about a connection which is still open no longer disclose a
+traffic key because everything in one direction happens to be revealed:
+the key is disclosed only when the prover asks. A connection can be
+carried and forwarded without committing to it when it ends, so its end
+does not draw on OT state shared with the proofs of other connections.
+Commitments to plaintext which is authenticated with a disclosed key but
+not revealed are refused.
+---
+ crates/tlsn/src/prover.rs                   | 30 ++++++-
+ crates/tlsn/src/prover/prove.rs             |  7 +-
+ crates/tlsn/src/prover/state.rs             |  3 +
+ crates/tlsn/src/transcript_internal/auth.rs | 94 +++++++++++++++++++--
+ crates/tlsn/src/verifier.rs                 | 54 +++++++++++-
+ crates/tlsn/src/verifier/state.rs           |  4 +
+ crates/tlsn/src/verifier/verify.rs          |  7 +-
+ 7 files changed, 179 insertions(+), 20 deletions(-)
+
+diff --git a/crates/tlsn/src/prover.rs b/crates/tlsn/src/prover.rs
+index 68cc05ba2..e47d50cb2 100644
+--- a/crates/tlsn/src/prover.rs
++++ b/crates/tlsn/src/prover.rs
+@@ -33,7 +33,7 @@ use crate::{
+     transport::is_transport_gone,
+ };
+ 
+-use futures::{AsyncRead, AsyncWrite, ready};
++use futures::{AsyncRead, AsyncWrite, AsyncWriteExt, ready};
+ use mpz_common::Context;
+ use mpz_vm_core::Execute;
+ use serio::{SinkExt, stream::IoStreamExt};
+@@ -370,6 +370,7 @@ impl Prover<state::CommitAccepted<Proxy>> {
+                 keys,
+                 tls_transcript,
+                 transcript,
++                open: true,
+             },
+         })
+     }
+@@ -589,6 +590,28 @@ impl<S> Prover<state::Connected<S>>
+ where
+     S: AsyncRead + AsyncWrite + Send + Unpin,
+ {
++    /// Runs the connection until it ends, without committing to it.
++    ///
++    /// This is for a connection whose traffic other provers of the session
++    /// prove by [attaching](Prover::attach) to its
++    /// [snapshots](ProverControl::snapshot). Unlike awaiting the prover it
++    /// uses none of the session's shared state, so it may end at any time.
++    pub async fn carry(mut self) -> Result<(), Error> {
++        let result = futures::future::poll_fn(|cx| self.poll(cx)).await;
++        if result.is_err() {
++            // As when awaiting the prover: let readers of the connection
++            // observe closure instead of waiting.
++            let state::Connected {
++                mut client_io,
++                mut server_socket,
++                ..
++            } = self.state;
++            let _ = client_io.close().await;
++            let _ = server_socket.close().await;
++        }
++        result
++    }
++
+     async fn finish(self) -> Result<Prover<state::Committed>, Error> {
+         let (
+             mut ctx,
+@@ -616,6 +639,7 @@ where
+                 keys,
+                 tls_transcript,
+                 transcript,
++                open: false,
+             },
+         };
+ 
+@@ -870,7 +894,7 @@ impl Prover<state::Committed> {
+             server_name,
+             tls_transcript,
+             transcript,
+-            ..
++            open,
+         } = &mut self.state;
+ 
+         let handshake = config.server_identity().then(|| {
+@@ -920,7 +944,7 @@ impl Prover<state::Committed> {
+                     .with_source(e)
+             })?;
+ 
+-        let output = prove::prove(ctx, vm, keys, transcript, tls_transcript, config).await?;
++        let output = prove::prove(ctx, vm, keys, transcript, tls_transcript, config, *open).await?;
+ 
+         Ok(output)
+     }
+diff --git a/crates/tlsn/src/prover/prove.rs b/crates/tlsn/src/prover/prove.rs
+index ba953ad0b..0bd1873e7 100644
+--- a/crates/tlsn/src/prover/prove.rs
++++ b/crates/tlsn/src/prover/prove.rs
+@@ -13,7 +13,7 @@ use tlsn_core::{
+ 
+ use crate::{
+     Error, Result,
+-    transcript_internal::{TranscriptRefs, auth::prove_plaintext, commit::hash::prove_hash},
++    transcript_internal::{TranscriptRefs, auth::{KeyDisclosure, prove_plaintext}, commit::hash::prove_hash},
+ };
+ 
+ pub(crate) async fn prove<T: Vm<Binary> + Send + Sync>(
+@@ -23,6 +23,7 @@ pub(crate) async fn prove<T: Vm<Binary> + Send + Sync>(
+     transcript: &Transcript,
+     tls_transcript: &TlsTranscript,
+     config: &ProveConfig,
++    open: bool,
+ ) -> Result<ProverOutput> {
+     let mut output = ProverOutput {
+         transcript_commitments: Vec::default(),
+@@ -53,7 +54,7 @@ pub(crate) async fn prove<T: Vm<Binary> + Send + Sync>(
+             &reveal_sent,
+             &commit_sent,
+             &config.no_control().0,
+-            false,
++            KeyDisclosure::of(open, false),
+         )
+         .map_err(|e| {
+             Error::internal()
+@@ -72,7 +73,7 @@ pub(crate) async fn prove<T: Vm<Binary> + Send + Sync>(
+             &reveal_recv,
+             &commit_recv,
+             &config.no_control().1,
+-            config.reveal_recv_key(),
++            KeyDisclosure::of(open, config.reveal_recv_key()),
+         )
+         .map_err(|e| {
+             Error::internal()
+diff --git a/crates/tlsn/src/prover/state.rs b/crates/tlsn/src/prover/state.rs
+index 684f0fbe5..56fd4a07d 100644
+--- a/crates/tlsn/src/prover/state.rs
++++ b/crates/tlsn/src/prover/state.rs
+@@ -90,6 +90,9 @@ pub struct Committed {
+     pub(crate) keys: SessionKeys,
+     pub(crate) tls_transcript: TlsTranscript,
+     pub(crate) transcript: Transcript,
++    /// Whether the connection the transcript was taken from is still in
++    /// use, so that its keys stay valid.
++    pub(crate) open: bool,
+ }
+ 
+ opaque_debug::implement!(Committed);
+diff --git a/crates/tlsn/src/transcript_internal/auth.rs b/crates/tlsn/src/transcript_internal/auth.rs
+index 602ba266d..64ff13671 100644
+--- a/crates/tlsn/src/transcript_internal/auth.rs
++++ b/crates/tlsn/src/transcript_internal/auth.rs
+@@ -28,6 +28,40 @@ const NO_CONTROL_CHUNK: usize = 256;
+ /// Output of [`no_control`] when no byte is below `0x20`.
+ const NO_CONTROL_OK: [u8; 1] = [0xff];
+ 
++/// When a plaintext proof discloses the key the plaintext was encrypted
++/// under, which then authenticates the revealed plaintext directly.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum KeyDisclosure {
++    /// If all of the plaintext is revealed. Whoever holds the key can read
++    /// and forge that direction of the connection from then on, so this is
++    /// for a connection which is over.
++    IfAllRevealed,
++    /// Never.
++    Never,
++    /// Always.
++    Always,
++}
++
++impl KeyDisclosure {
++    /// The disclosure for one direction of a connection which is still
++    /// `open` or not, whose key the prover `asked` to disclose or not.
++    pub(crate) fn of(open: bool, asked: bool) -> Self {
++        match (asked, open) {
++            (true, _) => Self::Always,
++            (false, true) => Self::Never,
++            (false, false) => Self::IfAllRevealed,
++        }
++    }
++
++    fn applies(self, reveal: &RangeSet<usize>, len: usize) -> bool {
++        match self {
++            Self::IfAllRevealed => reveal == (0..len),
++            Self::Never => false,
++            Self::Always => true,
++        }
++    }
++}
++
+ #[allow(clippy::too_many_arguments)]
+ pub(crate) fn prove_plaintext<'a>(
+     vm: &mut dyn Vm<Binary>,
+@@ -38,9 +72,9 @@ pub(crate) fn prove_plaintext<'a>(
+     reveal: &RangeSet<usize>,
+     commit: &RangeSet<usize>,
+     no_control: &RangeSet<usize>,
+-    reveal_key: bool,
++    key_disclosure: KeyDisclosure,
+ ) -> Result<ReferenceMap, PlaintextAuthError> {
+-    let is_reveal_all = reveal_key || reveal == (0..plaintext.len());
++    let is_reveal_all = key_disclosure.applies(reveal, plaintext.len());
+ 
+     let alloc_ranges = if is_reveal_all {
+         commit.clone()
+@@ -111,9 +145,9 @@ pub(crate) fn verify_plaintext<'a>(
+     reveal: &RangeSet<usize>,
+     commit: &RangeSet<usize>,
+     no_control: &RangeSet<usize>,
+-    reveal_key: bool,
++    key_disclosure: KeyDisclosure,
+ ) -> Result<(ReferenceMap, PlaintextProof<'a>), PlaintextAuthError> {
+-    let is_reveal_all = reveal_key || reveal == (0..plaintext.len());
++    let is_reveal_all = key_disclosure.applies(reveal, plaintext.len());
+ 
+     let alloc_ranges = if is_reveal_all {
+         commit.clone()
+@@ -139,6 +173,9 @@ pub(crate) fn verify_plaintext<'a>(
+     // Plaintext authenticated with the key is checked directly, which needs
+     // the ranges in question to be revealed.
+     if is_reveal_all {
++        if !commit.is_subset(reveal) {
++            return Err(ErrorRepr::CommitmentNotRevealed.into());
++        }
+         if !no_control.is_subset(reveal) {
+             return Err(ErrorRepr::ControlCharacter.into());
+         }
+@@ -681,6 +718,8 @@ enum ErrorRepr {
+     OutOfBounds,
+     #[error("transcript commitment range is out of bounds: {end} > {len}")]
+     CommitmentOutOfBounds { end: usize, len: usize },
++    #[error("transcript commitment covers plaintext which is authenticated with the key but not revealed")]
++    CommitmentNotRevealed,
+     #[error("missing decoding")]
+     MissingDecoding,
+     #[error("plaintext does not match ciphertext")]
+@@ -897,7 +936,7 @@ mod tests {
+                 &RangeSet::from(0..plaintext.len()),
+                 &RangeSet::default(),
+                 &RangeSet::from(2..6),
+-                false,
++                KeyDisclosure::IfAllRevealed,
+             )
+             .map(|_| ())
+         };
+@@ -1057,7 +1096,7 @@ mod tests {
+             &RangeSet::from(reveal),
+             &RangeSet::from(commit),
+             &RangeSet::default(),
+-            false,
++            KeyDisclosure::IfAllRevealed,
+         ) {
+             Ok(_) => panic!("verifier accepted an out-of-bounds commitment range"),
+             Err(err) => err,
+@@ -1066,6 +1105,47 @@ mod tests {
+         assert!(matches!(err.0, ErrorRepr::CommitmentOutOfBounds { .. }));
+     }
+ 
++    #[test]
++    fn test_key_is_disclosed_unasked_only_once_the_connection_is_over() {
++        let all = RangeSet::from(0..8);
++        let part = RangeSet::from(0..4);
++
++        // A connection which is still open: only on request.
++        assert!(!KeyDisclosure::of(true, false).applies(&all, 8));
++        assert!(KeyDisclosure::of(true, true).applies(&part, 8));
++
++        // A connection which is over: also when everything is revealed.
++        assert!(KeyDisclosure::of(false, false).applies(&all, 8));
++        assert!(!KeyDisclosure::of(false, false).applies(&part, 8));
++        assert!(KeyDisclosure::of(false, true).applies(&part, 8));
++    }
++
++    #[test]
++    fn test_verify_plaintext_rejects_commit_beyond_what_the_key_authenticates() {
++        let (mut vm, key_ref, iv_ref) = build_vm([0u8; 16], [0u8; 4]);
++        let plaintext = vec![0u8; 8];
++        let ciphertext = vec![0u8; 0];
++        let records: Vec<Record> = Vec::new();
++
++        let err = match verify_plaintext(
++            &mut vm,
++            key_ref,
++            iv_ref,
++            &plaintext,
++            &ciphertext,
++            &records,
++            &RangeSet::from(4..8),
++            &RangeSet::from(0..8),
++            &RangeSet::default(),
++            KeyDisclosure::Always,
++        ) {
++            Ok(_) => panic!("verifier accepted a commitment to plaintext it did not check"),
++            Err(err) => err,
++        };
++
++        assert!(matches!(err.0, ErrorRepr::CommitmentNotRevealed));
++    }
++
+     #[test]
+     fn test_verify_plaintext_accepts_in_bounds_commit() {
+         let (mut vm, key_ref, iv_ref) = build_vm([0u8; 16], [0u8; 4]);
+@@ -1083,7 +1163,7 @@ mod tests {
+             &RangeSet::from(0..8),
+             &RangeSet::from(0..8),
+             &RangeSet::default(),
+-            false,
++            KeyDisclosure::IfAllRevealed,
+         );
+ 
+         assert!(result.is_ok());
+diff --git a/crates/tlsn/src/verifier.rs b/crates/tlsn/src/verifier.rs
+index 28b65ce57..12c9a36ca 100644
+--- a/crates/tlsn/src/verifier.rs
++++ b/crates/tlsn/src/verifier.rs
+@@ -321,6 +321,7 @@ impl Verifier<state::CommitAccepted<Mpc>> {
+                 vm,
+                 keys,
+                 tls_transcript,
++                open: false,
+             },
+         })
+     }
+@@ -355,12 +356,40 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+     ///   disable Nagle's algorithm; see [Performance](crate#performance).
+     #[instrument(parent = &self.span, level = "info", skip_all, err)]
+     pub async fn run<T>(self, server_socket: T) -> Result<Verifier<state::Committed>>
++    where
++        T: AsyncRead + AsyncWrite + Send + Unpin,
++    {
++        self.run_until_closed(server_socket, true)
++            .await?
++            .ok_or_else(|| Error::internal().with_msg("verifier did not commit"))
++    }
++
++    /// Forwards the traffic of the connection until it ends, without
++    /// committing to it.
++    ///
++    /// This is for a connection whose traffic other verifiers of the
++    /// session verify by [attaching](Self::attach) to its
++    /// [tap](Self::tap). Unlike [`run`](Self::run) it uses none of the
++    /// session's shared state, so it may end at any time.
++    #[instrument(parent = &self.span, level = "info", skip_all, err)]
++    pub async fn forward<T>(self, server_socket: T) -> Result<()>
++    where
++        T: AsyncRead + AsyncWrite + Send + Unpin,
++    {
++        self.run_until_closed(server_socket, false).await.map(drop)
++    }
++
++    async fn run_until_closed<T>(
++        self,
++        server_socket: T,
++        commit: bool,
++    ) -> Result<Option<Verifier<state::Committed>>>
+     where
+         T: AsyncRead + AsyncWrite + Send + Unpin,
+     {
+         let closure = self.closure.clone();
+         match select(
+-            Box::pin(self.run_inner(server_socket)),
++            Box::pin(self.run_inner(server_socket, commit)),
+             Box::pin(closure.closed()),
+         )
+         .await
+@@ -372,7 +401,11 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+         }
+     }
+ 
+-    async fn run_inner<T>(self, server_socket: T) -> Result<Verifier<state::Committed>>
++    async fn run_inner<T>(
++        self,
++        server_socket: T,
++        commit: bool,
++    ) -> Result<Option<Verifier<state::Committed>>>
+     where
+         T: AsyncRead + AsyncWrite + Send + Unpin,
+     {
+@@ -519,6 +552,10 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+ 
+         info!("proxying TLS traffic finished");
+ 
++        if !commit {
++            return Ok(None);
++        }
++
+         let (sent_buf, recv_buf, conn_time) = tap.all();
+ 
+         // If the prover goes away before forwarding a single byte there is no
+@@ -530,7 +567,7 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+         let (ctx, vm, keys, tls_transcript) =
+             commit_recorded(verifier, &sent_buf, &recv_buf, conn_time, &finished_msg, 0).await?;
+ 
+-        Ok(Verifier {
++        Ok(Some(Verifier {
+             config: self.config,
+             span: self.span,
+             ctx: Some(ctx),
+@@ -540,8 +577,9 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+                 vm,
+                 keys,
+                 tls_transcript,
++                open: false,
+             },
+-        })
++        }))
+     }
+ 
+     /// Returns the tap recording the traffic this verifier forwards.
+@@ -602,6 +640,7 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+                     vm,
+                     keys,
+                     tls_transcript,
++                    open: true,
+                 },
+             },
+             prefix,
+@@ -690,6 +729,7 @@ impl Verifier<state::Committed> {
+             vm,
+             keys,
+             tls_transcript,
++            open,
+         } = self.state;
+ 
+         let ProveRequestMsg {
+@@ -712,6 +752,7 @@ impl Verifier<state::Committed> {
+                 vm,
+                 keys,
+                 tls_transcript,
++                open,
+                 request,
+                 handshake,
+                 transcript,
+@@ -742,6 +783,7 @@ impl Verifier<state::Verify> {
+             mut vm,
+             keys,
+             tls_transcript,
++            open,
+             request,
+             handshake,
+             transcript,
+@@ -768,6 +810,7 @@ impl Verifier<state::Verify> {
+             request,
+             handshake,
+             transcript,
++            open,
+         )
+         .await?;
+ 
+@@ -783,6 +826,7 @@ impl Verifier<state::Verify> {
+                     vm,
+                     keys,
+                     tls_transcript,
++                    open,
+                 },
+             },
+         ))
+@@ -798,6 +842,7 @@ impl Verifier<state::Verify> {
+             vm,
+             keys,
+             tls_transcript,
++            open,
+             ..
+         } = self.state;
+ 
+@@ -817,6 +862,7 @@ impl Verifier<state::Verify> {
+                 vm,
+                 keys,
+                 tls_transcript,
++                open,
+             },
+         })
+     }
+diff --git a/crates/tlsn/src/verifier/state.rs b/crates/tlsn/src/verifier/state.rs
+index 829a97343..d27cb6a91 100644
+--- a/crates/tlsn/src/verifier/state.rs
++++ b/crates/tlsn/src/verifier/state.rs
+@@ -51,6 +51,9 @@ pub struct Committed {
+     pub(crate) vm: VerifierZk,
+     pub(crate) keys: SessionKeys,
+     pub(crate) tls_transcript: TlsTranscript,
++    /// Whether the connection the transcript was taken from is still in
++    /// use, so that its keys stay valid.
++    pub(crate) open: bool,
+ }
+ 
+ opaque_debug::implement!(Committed);
+@@ -60,6 +63,7 @@ pub struct Verify {
+     pub(crate) vm: VerifierZk,
+     pub(crate) keys: SessionKeys,
+     pub(crate) tls_transcript: TlsTranscript,
++    pub(crate) open: bool,
+     pub(crate) request: ProveRequest,
+     pub(crate) handshake: Option<(ServerName, HandshakeData)>,
+     pub(crate) transcript: Option<PartialTranscript>,
+diff --git a/crates/tlsn/src/verifier/verify.rs b/crates/tlsn/src/verifier/verify.rs
+index 07e12431c..401de3bb9 100644
+--- a/crates/tlsn/src/verifier/verify.rs
++++ b/crates/tlsn/src/verifier/verify.rs
+@@ -15,7 +15,7 @@ use tlsn_core::{
+ 
+ use crate::{
+     Error, Result,
+-    transcript_internal::{TranscriptRefs, auth::verify_plaintext, commit::hash::verify_hash},
++    transcript_internal::{TranscriptRefs, auth::{KeyDisclosure, verify_plaintext}, commit::hash::verify_hash},
+ };
+ 
+ #[allow(clippy::too_many_arguments)]
+@@ -28,6 +28,7 @@ pub(crate) async fn verify<T: Vm<Binary> + Send + Sync>(
+     request: ProveRequest,
+     handshake: Option<(ServerName, HandshakeData)>,
+     transcript: Option<PartialTranscript>,
++    open: bool,
+ ) -> Result<VerifierOutput> {
+     let ciphertext_sent = collect_ciphertext(tls_transcript.sent());
+     let ciphertext_recv = collect_ciphertext(tls_transcript.recv());
+@@ -124,7 +125,7 @@ pub(crate) async fn verify<T: Vm<Binary> + Send + Sync>(
+         transcript.sent_authed(),
+         &commit_sent,
+         &request.no_control().0,
+-        false,
++        KeyDisclosure::of(open, false),
+     )
+     .map_err(|e| {
+         Error::internal()
+@@ -144,7 +145,7 @@ pub(crate) async fn verify<T: Vm<Binary> + Send + Sync>(
+         transcript.received_authed(),
+         &commit_recv,
+         &request.no_control().1,
+-        request.reveal_recv_key(),
++        KeyDisclosure::of(open, request.reveal_recv_key()),
+     )
+     .map_err(|e| {
+         Error::internal()
+-- 
+2.56.0
+

@@ -1,0 +1,180 @@
+From fedf7a70ebe27951778c3f42790fa4ce54091eca Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 23:04:02 +0100
+Subject: [PATCH] Wait for a request to be written before marking when it
+ reached the server
+
+A prefix taken while its last application data was still waiting to be
+written said the write had not been made, and its caller refused the turn.
+That refused honest turns whenever the server was slower to take a large
+request than the prover was to prove it. The prefix now waits for the
+write and gives its position. It gives up only once forwarding has ended,
+when the write will never be made.
+---
+ crates/tlsn/src/proxy.rs    | 82 +++++++++++++++++++++++++++----------
+ crates/tlsn/src/verifier.rs |  9 ++--
+ 2 files changed, 67 insertions(+), 24 deletions(-)
+
+diff --git a/crates/tlsn/src/proxy.rs b/crates/tlsn/src/proxy.rs
+index f6b2f1e2c..e0feadec2 100644
+--- a/crates/tlsn/src/proxy.rs
++++ b/crates/tlsn/src/proxy.rs
+@@ -251,6 +251,8 @@ struct Tapped {
+     /// length of `recv` at that time. Writes which every taken prefix has
+     /// passed are dropped.
+     sends: Vec<(usize, usize)>,
++    /// Whether forwarding has ended, so that nothing more will be written.
++    ended: bool,
+ }
+ 
+ /// The whole records at the start of the raw TLS stream `tls`, as their
+@@ -319,9 +321,9 @@ pub struct TapPrefix {
+     pub sent_beyond: usize,
+     /// How many bytes had been forwarded from the server when the last
+     /// application data of the prefix had been written to it, whether or
+-    /// not the prefix covers them, or `usize::MAX` if it had not been
+-    /// written when the prefix was taken. The server sent them without
+-    /// having seen that data. Records which are not application data, such as the alert
++    /// not the prefix covers them, or `usize::MAX` if forwarding ended
++    /// without its being written. The server sent them without having seen
++    /// that data. Records which are not application data, such as the alert
+     /// answering a server's close, do not move this.
+     pub received_at_last_send: usize,
+ }
+@@ -373,6 +375,14 @@ impl TrafficTap {
+         tapped.written += len;
+         let mark = (tapped.written, tapped.recv.len());
+         tapped.sends.push(mark);
++        drop(tapped);
++        self.0.changed.notify_waiters();
++    }
++
++    /// Notes that forwarding has ended.
++    pub(crate) fn end(&self) {
++        self.0.tapped.lock().expect("lock is not poisoned").ended = true;
++        self.0.changed.notify_waiters();
+     }
+ 
+     /// Returns everything recorded and the time the prover first sent data.
+@@ -381,9 +391,11 @@ impl TrafficTap {
+         (tapped.sent.clone(), tapped.recv.clone(), tapped.first_sent)
+     }
+ 
+-    /// Waits until at least `sent` and `recv` bytes have been forwarded, then
+-    /// returns those prefixes, the time the prover first sent data, and what
+-    /// else is known of the prefix.
++    /// Waits until at least `sent` and `recv` bytes have been forwarded and
++    /// the last application data among those sent has been written to the
++    /// server, or forwarding has ended. Then returns those prefixes, the
++    /// time the prover first sent data, and what else is known of the
++    /// prefix.
+     pub(crate) async fn prefix(&self, sent: usize, recv: usize) -> (Vec<u8>, Vec<u8>, u64, TapPrefix) {
+         loop {
+             let changed = self.0.changed.notified();
+@@ -393,21 +405,29 @@ impl TrafficTap {
+                     (tapped.sent.get(..sent), tapped.recv.get(..recv), tapped.first_sent)
+                 {
+                     // The write which carried the last application data of
+-                    // the prefix. If it has not been made, the server has
+-                    // seen none of it whatever it sends from here on, as
+-                    // far as this prefix can tell.
++                    // the prefix. It may be a moment behind the read which
++                    // recorded that data, or far behind if the server is
++                    // slow to take it. If it will never be made, the server
++                    // has seen none of that data whatever it sent.
+                     let last_data = last_application_data_end(prefix).unwrap_or(0);
+                     let last = tapped.sends.partition_point(|(end, _)| *end < last_data);
+-                    let received_then = tapped.sends.get(last).map_or(usize::MAX, |(_, received)| *received);
+-                    let known = TapPrefix {
+-                        sent,
+-                        received: recv,
+-                        sent_beyond: tapped.sent.len() - sent,
+-                        received_at_last_send: if last_data == 0 { 0 } else { received_then },
++                    let received_then = match tapped.sends.get(last) {
++                        _ if last_data == 0 => Some(0),
++                        Some((_, received)) => Some(*received),
++                        None if tapped.ended => Some(usize::MAX),
++                        None => None,
+                     };
+-                    let taken = (prefix.to_vec(), received.to_vec(), time, known);
+-                    tapped.sends.drain(..last);
+-                    return taken;
++                    if let Some(received_at_last_send) = received_then {
++                        let known = TapPrefix {
++                            sent,
++                            received: recv,
++                            sent_beyond: tapped.sent.len() - sent,
++                            received_at_last_send,
++                        };
++                        let taken = (prefix.to_vec(), received.to_vec(), time, known);
++                        tapped.sends.drain(..last);
++                        return taken;
++                    }
+                 }
+             }
+             changed.await;
+@@ -722,15 +742,35 @@ mod tests {
+ 
+         // The request has been read from the prover, and the server sends
+         // something before it is written to the server.
++        // A prefix waits for the write, and then tells what had been
++        // received by it.
+         tap.record(TapDirection::Sent, &request);
+         tap.record(TapDirection::Recv, &early);
+-        let (.., prefix) = tap.prefix(request.len(), early.len()).await;
+-        assert_eq!(prefix.received_at_last_send, usize::MAX);
+-        assert_eq!(tap.application_data_started_before(usize::MAX), 11);
++        let waiting = tokio::spawn({
++            let tap = tap.clone();
++            let (sent, received) = (request.len(), early.len());
++            async move { tap.prefix(sent, received).await.3 }
++        });
++        tokio::task::yield_now().await;
++        assert!(!waiting.is_finished());
+ 
+         tap.wrote(request.len());
+         tap.record(TapDirection::Recv, &late);
++        assert_eq!(waiting.await.unwrap().received_at_last_send, early.len());
+         let (.., prefix) = tap.prefix(request.len(), early.len() + late.len()).await;
+         assert_eq!(prefix.received_at_last_send, early.len());
+     }
++
++    #[tokio::test]
++    async fn test_a_request_never_written_was_seen_by_nothing_the_server_sent() {
++        let tap = TrafficTap::default();
++        let (request, early) = (app_record(50), app_record(11));
++        tap.record(TapDirection::Sent, &request);
++        tap.record(TapDirection::Recv, &early);
++        tap.end();
++
++        let (.., prefix) = tap.prefix(request.len(), early.len()).await;
++        assert_eq!(prefix.received_at_last_send, usize::MAX);
++        assert_eq!(tap.application_data_started_before(usize::MAX), 11);
++    }
+ }
+diff --git a/crates/tlsn/src/verifier.rs b/crates/tlsn/src/verifier.rs
+index 1b2e88b6d..9f089f70d 100644
+--- a/crates/tlsn/src/verifier.rs
++++ b/crates/tlsn/src/verifier.rs
+@@ -388,12 +388,15 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+         T: AsyncRead + AsyncWrite + Send + Unpin,
+     {
+         let closure = self.closure.clone();
+-        match select(
++        let tap = self.tap();
++        let ran = select(
+             Box::pin(self.run_inner(server_socket, commit)),
+             Box::pin(closure.closed()),
+         )
+-        .await
+-        {
++        .await;
++        // Whoever waits for a write to the server need wait no longer.
++        tap.end();
++        match ran {
+             Either::Left((result, _)) => result,
+             Either::Right(_) => {
+                 Err(Error::io().with_msg("session closed while the verifier was running"))
+-- 
+2.56.0
+

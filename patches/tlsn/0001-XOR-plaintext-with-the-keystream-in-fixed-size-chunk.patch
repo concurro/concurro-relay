@@ -1,0 +1,126 @@
+From be88fe3ffadd460a85a3a1af4729cbea9cda0468 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 11:05:52 +0100
+Subject: [PATCH 1/6] XOR plaintext with the keystream in fixed-size chunks
+
+---
+ crates/tlsn/src/transcript_internal/auth.rs | 84 ++++++++++++++++-----
+ 1 file changed, 65 insertions(+), 19 deletions(-)
+
+diff --git a/crates/tlsn/src/transcript_internal/auth.rs b/crates/tlsn/src/transcript_internal/auth.rs
+index 319a4bd72..04593149d 100644
+--- a/crates/tlsn/src/transcript_internal/auth.rs
++++ b/crates/tlsn/src/transcript_internal/auth.rs
+@@ -1,11 +1,11 @@
+-use std::sync::Arc;
++use std::{collections::HashMap, sync::Arc};
+ 
+ use aes::Aes128;
+ use ctr::{
+     Ctr32BE,
+     cipher::{KeyIvInit, StreamCipher, StreamCipherSeek},
+ };
+-use mpz_circuits::{AES128, circuits::xor};
++use mpz_circuits::{AES128, Circuit, circuits::xor};
+ use mpz_core::bitvec::BitVec;
+ use mpz_memory_core::{
+     Array, DecodeFutureTyped, MemoryExt, Vector, ViewExt,
+@@ -17,6 +17,9 @@ use tlsn_core::transcript::Record;
+ 
+ use crate::transcript_internal::ReferenceMap;
+ 
++/// Number of bytes XORed with the keystream per call.
++const XOR_CHUNK: usize = 4096;
++
+ pub(crate) fn prove_plaintext<'a>(
+     vm: &mut dyn Vm<Binary>,
+     key: Array<U8, 16>,
+@@ -212,25 +215,68 @@ fn alloc_ciphertext<'a>(
+     let ranges = RangeSet::from(plaintext.keys().collect::<Vec<_>>());
+ 
+     let keystream = alloc_keystream(vm, key, iv, &ranges, records)?;
+-    let mut builder = Call::builder(Arc::new(xor(ranges.len() * 8)));
+-    for (_, slice) in plaintext.iter() {
+-        builder = builder.arg(*slice);
+-    }
+-    for slice in keystream {
+-        builder = builder.arg(slice);
+-    }
+-    let call = builder.build().expect("call should be valid");
+ 
+-    let ciphertext: Vector<U8> = vm.call(call).map_err(PlaintextAuthError::vm)?;
++    // The plaintext and the keystream cover the same bytes in the same order
++    // but are split into different pieces. They are XORed a chunk at a time so
++    // that the circuit stays small and is shared between calls.
++    let mut circuits: HashMap<usize, Arc<Circuit>> = HashMap::new();
++    let mut plaintext = plaintext.iter().map(|(range, slice)| (range.start, *slice));
++    let mut current = plaintext.next();
++    let mut ciphertext = Vec::new();
++    let mut keystream = keystream.into_iter().peekable();
++    while keystream.peek().is_some() {
++        let mut keystream_args = Vec::new();
++        let mut len = 0;
++        while len < XOR_CHUNK
++            && let Some(slice) = keystream.next()
++        {
++            len += slice.len();
++            keystream_args.push(slice);
++        }
+ 
+-    let mut pos = 0;
+-    Ok(ReferenceMap::from_iter(ranges.iter().map(move |range| {
+-        let chunk = ciphertext
+-            .get(pos..pos + range.len())
+-            .expect("length was checked");
+-        pos += range.len();
+-        (range.start, chunk)
+-    })))
++        // Take the same number of plaintext bytes, remembering where each
++        // piece sits in the transcript.
++        let mut plaintext_args = Vec::new();
++        let mut taken = 0;
++        while taken < len {
++            let (start, slice) = current.take().expect("plaintext covers the keystream");
++            let take = slice.len().min(len - taken);
++            plaintext_args.push((start, slice.get(0..take).expect("length is checked")));
++            if take < slice.len() {
++                let rest = slice.get(take..slice.len()).expect("length is checked");
++                current = Some((start + take, rest));
++            } else {
++                current = plaintext.next();
++            }
++            taken += take;
++        }
++
++        let circuit = circuits
++            .entry(len)
++            .or_insert_with(|| Arc::new(xor(len * 8)))
++            .clone();
++        let mut builder = Call::builder(circuit);
++        for (_, slice) in &plaintext_args {
++            builder = builder.arg(*slice);
++        }
++        for slice in keystream_args {
++            builder = builder.arg(slice);
++        }
++        let call = builder.build().expect("call should be valid");
++
++        let output: Vector<U8> = vm.call(call).map_err(PlaintextAuthError::vm)?;
++
++        let mut pos = 0;
++        for (start, slice) in plaintext_args {
++            let chunk = output
++                .get(pos..pos + slice.len())
++                .expect("length was checked");
++            pos += slice.len();
++            ciphertext.push((start, chunk));
++        }
++    }
++
++    Ok(ReferenceMap::from_iter(ciphertext))
+ }
+ 
+ fn alloc_keystream<'a>(
+-- 
+2.56.0
+

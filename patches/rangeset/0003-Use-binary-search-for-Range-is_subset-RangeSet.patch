@@ -1,0 +1,68 @@
+From c8461a763ec74bf292aba514e2f078365d796b44 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 11:11:56 +0100
+Subject: [PATCH 3/3] Use binary search for Range::is_subset(&RangeSet)
+
+---
+ src/range.rs | 18 ++----------------
+ src/test.rs  | 18 ++++++++++++++++++
+ 2 files changed, 20 insertions(+), 16 deletions(-)
+
+diff --git a/src/range.rs b/src/range.rs
+index 42f46fe..4af49a9 100644
+--- a/src/range.rs
++++ b/src/range.rs
+@@ -579,22 +579,8 @@ mod alloc {
+                 return false;
+             }
+ 
+-            // Boundary short circuit.
+-            if self.start < other.min().unwrap() || self.end > other.end().unwrap() {
+-                // Check if self's start & end are contained within (or same as) other's.
+-                return false;
+-            }
+-
+-            for other in other.iter() {
+-                if self.start >= other.end {
+-                    // self is rightward of other, proceed to next other
+-                    continue;
+-                } else {
+-                    return self.is_subset(&other);
+-                }
+-            }
+-
+-            false
++            // Seeks by binary search to the only range that can contain self.
++            Once::new(self.start..self.end).is_subset(other)
+         }
+ 
+         fn is_superset(&self, other: &'rhs RangeSet<T>) -> bool {
+diff --git a/src/test.rs b/src/test.rs
+index bcd1a70..c4a49cd 100644
+--- a/src/test.rs
++++ b/src/test.rs
+@@ -438,3 +438,21 @@ mod union_mut_tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod range_subset_tests {
++    use crate::{ops::Set, set::RangeSet};
++
++    #[test]
++    fn range_is_subset_of_set_matches_definition() {
++        let set = RangeSet::from(vec![2usize..5, 8..12, 20..21]);
++        for start in 0..24usize {
++            for end in start..25 {
++                let expected = (start..end).all(|value| set.contains(&value));
++                assert_eq!((start..end).is_subset(&set), expected, "{start}..{end}");
++            }
++        }
++        assert!((3usize..3).is_subset(&RangeSet::default()));
++        assert!(!(3usize..4).is_subset(&RangeSet::default()));
++    }
++}
+-- 
+2.56.0
+

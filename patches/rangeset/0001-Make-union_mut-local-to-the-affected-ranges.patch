@@ -1,0 +1,121 @@
+From 257f6573e7bc5786fee649975d84ff4f0469ce68 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 09:13:42 +0100
+Subject: [PATCH 1/3] Make union_mut local to the affected ranges
+
+---
+ src/set.rs  | 48 +++++++++++++++++++++++++-----------------------
+ src/test.rs | 39 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 64 insertions(+), 23 deletions(-)
+
+diff --git a/src/set.rs b/src/set.rs
+index 4e2b152..2e7dc0a 100644
+--- a/src/set.rs
++++ b/src/set.rs
+@@ -232,31 +232,33 @@ impl<T: Copy + Ord> RangeSet<T> {
+ 
+     /// Unions in-place with the given ranges.
+     pub fn union_mut(&mut self, other: impl IntoRangeIterator<T>) {
+-        // Each range is appended in O(1); re-sort only if one arrives out of order.
+-        let mut need_sort = false;
+-        for range in other.into_range_iter() {
+-            need_sort |= self.push_range(range);
+-        }
+-        if need_sort {
+-            sort_merge(&mut self.ranges);
+-        }
+-    }
+-
+-    /// Appends `range`, coalescing into the tail when adjacent. Returns `true`
+-    /// if it landed out of order, meaning the set needs a `sort_merge`.
+-    fn push_range(&mut self, range: Range<T>) -> bool {
+-        if range.start >= range.end {
+-            return false;
+-        }
+-        match self.ranges.last_mut() {
+-            Some(last) if range.start == last.end => last.end = range.end,
+-            Some(last) if range.start < last.end => {
+-                self.ranges.push(range);
+-                return true;
++        let mut added: Vec<Range<T>> = other
++            .into_range_iter()
++            .filter(|range| range.start < range.end)
++            .collect();
++        sort_merge(&mut added);
++        let (Some(first), Some(last)) = (added.first(), added.last()) else {
++            return;
++        };
++
++        // Only the ranges which overlap or are adjacent to the added span
++        // can change, and both the starts and ends of a set are sorted.
++        let lo = self.ranges.partition_point(|range| range.end < first.start);
++        let hi = lo + self.ranges[lo..].partition_point(|range| range.start <= last.end);
++
++        match (hi - lo, added.as_slice()) {
++            (0, [range]) => self.ranges.insert(lo, range.clone()),
++            (1, [range]) => {
++                let existing = &mut self.ranges[lo];
++                existing.start = existing.start.min(range.start);
++                existing.end = existing.end.max(range.end);
++            }
++            _ => {
++                added.extend_from_slice(&self.ranges[lo..hi]);
++                sort_merge(&mut added);
++                self.ranges.splice(lo..hi, added);
+             }
+-            _ => self.ranges.push(range),
+         }
+-        false
+     }
+ 
+     /// Differences in-place with the given ranges.
+diff --git a/src/test.rs b/src/test.rs
+index 62f3f1c..bcd1a70 100644
+--- a/src/test.rs
++++ b/src/test.rs
+@@ -399,3 +399,42 @@ mod tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod union_mut_tests {
++    use crate::{iter::RangeIterator, set::RangeSet};
++    use core::ops::Range;
++
++    /// Reference implementation: union through the iterator adaptor.
++    fn reference(set: &RangeSet<u32>, other: &[Range<u32>]) -> RangeSet<u32> {
++        set.iter().union(RangeSet::new_from_slice(other).iter()).into_set()
++    }
++
++    #[test]
++    fn union_mut_matches_iterator_union() {
++        // Deterministic xorshift so the test needs no dev-dependency.
++        let mut state = 0x9e3779b97f4a7c15u64;
++        let mut next = |bound: u32| {
++            state ^= state << 13;
++            state ^= state >> 7;
++            state ^= state << 17;
++            (state % bound as u64) as u32
++        };
++        for _ in 0..20_000 {
++            let mut set = RangeSet::<u32>::default();
++            for _ in 0..next(6) {
++                let (start, len) = (next(40), next(6) + 1);
++                set.union_mut(start..start + len);
++            }
++            let other: Vec<Range<u32>> = (0..next(4))
++                .map(|_| {
++                    let (start, len) = (next(40), next(6) + 1);
++                    start..start + len
++                })
++                .collect();
++            let expected = reference(&set, &other);
++            set.union_mut(RangeSet::new_from_slice(&other));
++            assert_eq!(set, expected);
++        }
++    }
++}
+-- 
+2.56.0
+

@@ -1,0 +1,390 @@
+From 7a0709264bcf753b312882fc1ebfd93a62730e29 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 21:11:04 +0100
+Subject: [PATCH] Carry a connection without finalizing it, and tell the
+ verifier more about a prefix
+
+A carried connection no longer runs the TLS client's finalization when
+it ends: the verifier is told the connection is over and the proof state
+is dropped unused. The verifier had stopped taking part, so the prover
+alone advanced state the session shares.
+
+A tap can tell whether application data was sent beyond a prefix, which
+the alert answering a server's close is not, and a prefix tells how much
+of what it received had begun to arrive before the last of what it sent
+was forwarded.
+---
+ crates/tlsn/src/prover.rs                  |  13 +-
+ crates/tlsn/src/prover/client.rs           |  10 ++
+ crates/tlsn/src/prover/client/proxy/mod.rs |  44 ++++++-
+ crates/tlsn/src/proxy.rs                   | 146 ++++++++++++++++++++-
+ crates/tlsn/src/verifier.rs                |   7 +-
+ 5 files changed, 203 insertions(+), 17 deletions(-)
+
+diff --git a/crates/tlsn/src/prover.rs b/crates/tlsn/src/prover.rs
+index e47d50cb2..d218e83b2 100644
+--- a/crates/tlsn/src/prover.rs
++++ b/crates/tlsn/src/prover.rs
+@@ -438,7 +438,10 @@ where
+         // connection phase has succeeded, and a session that closes while the
+         // transport handles are being closed must not turn that success into an
+         // error.
+-        if state.output.is_none() {
++        // A client which only carries its connection ends without an output.
++        let ended = state.output.is_some() || state.tls_client.carried();
++
++        if !ended {
+             self.closure.register(cx.waker());
+             if self.closure.is_closed() {
+                 return Poll::Ready(Err(
+@@ -449,7 +452,7 @@ where
+ 
+         Self::poll_io(&mut state, cx)?;
+ 
+-        if state.output.is_some() {
++        if state.output.is_some() || state.tls_client.carried() {
+             // The TLS side is finished producing bytes, but those bytes may
+             // still be staged between the TLS client and the transport. Close
+             // the staging channel, then wait until its reader reports EOF
+@@ -594,9 +597,11 @@ where
+     ///
+     /// This is for a connection whose traffic other provers of the session
+     /// prove by [attaching](Prover::attach) to its
+-    /// [snapshots](ProverControl::snapshot). Unlike awaiting the prover it
+-    /// uses none of the session's shared state, so it may end at any time.
++    /// [snapshots](ProverControl::snapshot). Unlike awaiting the prover,
++    /// nothing is proven when the connection ends: the verifier is told it
++    /// is over and the prover's proof state is dropped unused.
+     pub async fn carry(mut self) -> Result<(), Error> {
++        self.state.tls_client.carry_only();
+         let result = futures::future::poll_fn(|cx| self.poll(cx)).await;
+         if result.is_err() {
+             // As when awaiting the prover: let readers of the connection
+diff --git a/crates/tlsn/src/prover/client.rs b/crates/tlsn/src/prover/client.rs
+index 7b7843158..253f4f8ca 100644
+--- a/crates/tlsn/src/prover/client.rs
++++ b/crates/tlsn/src/prover/client.rs
+@@ -93,6 +93,16 @@ pub(crate) trait TlsClient {
+     /// Returns the decryption state.
+     fn decrypt(&self) -> Arc<DecryptState>;
+ 
++    /// Asks the client to end its connection without committing to it. A
++    /// client which does so never yields an output from [`poll`](Self::poll).
++    fn carry_only(&mut self) {}
++
++    /// Returns `true` once a client asked to [carry
++    /// only](Self::carry_only) has ended its connection.
++    fn carried(&self) -> bool {
++        false
++    }
++
+     /// Polls the client to make progress.
+     fn poll(
+         &mut self,
+diff --git a/crates/tlsn/src/prover/client/proxy/mod.rs b/crates/tlsn/src/prover/client/proxy/mod.rs
+index 43c277224..36693974f 100644
+--- a/crates/tlsn/src/prover/client/proxy/mod.rs
++++ b/crates/tlsn/src/prover/client/proxy/mod.rs
+@@ -61,6 +61,8 @@ pub(crate) struct ProxyTlsClient {
+     state: State,
+     /// Shared decryption toggle.
+     decrypt: Arc<DecryptState>,
++    /// Whether to end the connection without committing to it.
++    carry_only: bool,
+ }
+ 
+ enum State {
+@@ -77,6 +79,12 @@ enum State {
+     Finalizing {
+         fut: Pin<FinalizeFuture>,
+     },
++    /// Telling the verifier that the connection is over, in place of
++    /// finalizing.
++    Carrying {
++        fut: Pin<Box<dyn Future<Output = Result<(), TlsnError>> + Send>>,
++    },
++    Carried,
+     Error,
+ }
+ 
+@@ -137,6 +145,7 @@ impl ProxyTlsClient {
+             close: CloseState::new(),
+             state: State::Init { prover },
+             decrypt: Arc::new(decrypt),
++            carry_only: false,
+         };
+ 
+         Ok(tls_client)
+@@ -275,6 +284,14 @@ impl TlsClient for ProxyTlsClient {
+         self.decrypt.clone()
+     }
+ 
++    fn carry_only(&mut self) {
++        self.carry_only = true;
++    }
++
++    fn carried(&self) -> bool {
++        matches!(self.state, State::Carried)
++    }
++
+     fn poll(
+         &mut self,
+         cx: &mut std::task::Context,
+@@ -369,7 +386,20 @@ impl TlsClient for ProxyTlsClient {
+                 // application and the response would be lost.
+                 let finalize_now = self.close.can_finalize();
+ 
+-                if finalize_now {
++                if finalize_now && self.carry_only {
++                    let traffic = self.traffic();
++                    let (tls_sent, tls_recv) =
++                        (traffic.tls_sent.len() as u64, traffic.tls_recv.len() as u64);
++                    drop(traffic);
++                    // The prover and its VM are dropped unused once the
++                    // verifier knows the connection is over.
++                    let fut = Box::pin(async move {
++                        let mut prover = prover;
++                        prover.send_finished(tls_sent, tls_recv).await
++                    });
++                    self.state = State::Carrying { fut };
++                    self.poll(cx)
++                } else if finalize_now {
+                     let ms = self.ms_log.take();
+                     if ms.is_empty() {
+                         return Poll::Ready(Err(
+@@ -413,6 +443,18 @@ impl TlsClient for ProxyTlsClient {
+                     }
+                 }
+             }
++            State::Carrying { mut fut } => {
++                debug!("inner client is ending a carried connection");
++                match fut.poll_unpin(cx)? {
++                    Poll::Ready(()) => self.state = State::Carried,
++                    Poll::Pending => self.state = State::Carrying { fut },
++                }
++                Poll::Pending
++            }
++            State::Carried => {
++                self.state = State::Carried;
++                Poll::Pending
++            }
+             State::Error => Poll::Ready(Err(
+                 TlsnError::internal().with_msg("tls proxy client is in error state")
+             )),
+diff --git a/crates/tlsn/src/proxy.rs b/crates/tlsn/src/proxy.rs
+index 705781045..ca7eb032b 100644
+--- a/crates/tlsn/src/proxy.rs
++++ b/crates/tlsn/src/proxy.rs
+@@ -245,6 +245,43 @@ struct Tapped {
+     sent: Vec<u8>,
+     recv: Vec<u8>,
+     first_sent: Option<u64>,
++    /// For each piece of data recorded from the prover, the length of
++    /// `sent` once it was added and the length of `recv` at that time.
++    /// Pieces which every taken prefix has passed are dropped.
++    sends: Vec<(usize, usize)>,
++}
++
++/// The whole records at the start of the raw TLS stream `tls`, as their
++/// content type and their length with the header, followed by the content
++/// type of a record which is not whole, if there is one.
++fn whole_records(mut tls: &[u8]) -> (Vec<(u8, usize)>, Option<u8>) {
++    let mut records = Vec::new();
++    while let Some(typ) = tls.first().copied() {
++        let whole = tls.get(3..5).map(|len| 5 + usize::from(u16::from_be_bytes([len[0], len[1]])));
++        let Some(len) = whole.filter(|len| *len <= tls.len()) else {
++            return (records, Some(typ));
++        };
++        records.push((typ, len));
++        tls = &tls[len..];
++    }
++    (records, None)
++}
++
++/// Bytes of application data in the records of the raw TLS stream `tls`
++/// which start before offset `before`.
++fn application_data_started_before(tls: &[u8], before: usize) -> usize {
++    let mut start = 0;
++    let mut app = 0;
++    for (typ, len) in whole_records(tls).0 {
++        if start >= before {
++            break;
++        }
++        if typ == APPLICATION_DATA {
++            app += len.saturating_sub(5 + GCM_RECORD_OVERHEAD);
++        }
++        start += len;
++    }
++    app
+ }
+ 
+ #[derive(Debug, Default)]
+@@ -263,6 +300,10 @@ pub struct TapPrefix {
+     /// Bytes the prover had sent beyond the prefix when it was taken. A
+     /// prover which has finished its request has none.
+     pub sent_beyond: usize,
++    /// Bytes of received application data in records which had begun to
++    /// arrive when the last of the prefix's sent data was forwarded. The
++    /// server sent them without having seen that data.
++    pub received_before_last_send: usize,
+ }
+ 
+ /// The raw TLS traffic a proxy verifier has forwarded so far.
+@@ -298,6 +339,8 @@ impl TrafficTap {
+                     tapped.first_sent = Some(now);
+                 }
+                 tapped.sent.extend_from_slice(bytes);
++                let mark = (tapped.sent.len(), tapped.recv.len());
++                tapped.sends.push(mark);
+             }
+             TapDirection::Recv => tapped.recv.extend_from_slice(bytes),
+         }
+@@ -312,22 +355,42 @@ impl TrafficTap {
+     }
+ 
+     /// Waits until at least `sent` and `recv` bytes have been forwarded, then
+-    /// returns those prefixes, the time the prover first sent data, and how
+-    /// many bytes the prover has sent beyond the prefix.
+-    pub(crate) async fn prefix(&self, sent: usize, recv: usize) -> (Vec<u8>, Vec<u8>, u64, usize) {
++    /// returns those prefixes, the time the prover first sent data, and what
++    /// else is known of the prefix.
++    pub(crate) async fn prefix(&self, sent: usize, recv: usize) -> (Vec<u8>, Vec<u8>, u64, TapPrefix) {
+         loop {
+             let changed = self.0.changed.notified();
+             {
+-                let tapped = self.0.tapped.lock().expect("lock is not poisoned");
+-                if let (Some(prefix), Some(recv), Some(time)) =
++                let mut tapped = self.0.tapped.lock().expect("lock is not poisoned");
++                if let (Some(prefix), Some(received), Some(time)) =
+                     (tapped.sent.get(..sent), tapped.recv.get(..recv), tapped.first_sent)
+                 {
+-                    return (prefix.to_vec(), recv.to_vec(), time, tapped.sent.len() - sent);
++                    // The piece which carried the last of the prefix.
++                    let last = tapped.sends.partition_point(|(end, _)| *end < sent);
++                    let received_then = tapped.sends.get(last).map_or(0, |(_, received)| *received);
++                    let known = TapPrefix {
++                        sent,
++                        received: recv,
++                        sent_beyond: tapped.sent.len() - sent,
++                        received_before_last_send: application_data_started_before(received, received_then),
++                    };
++                    let taken = (prefix.to_vec(), received.to_vec(), time, known);
++                    tapped.sends.drain(..last);
++                    return taken;
+                 }
+             }
+             changed.await;
+         }
+     }
++
++    /// Returns whether the prover has sent application data beyond the first
++    /// `sent` bytes it sent. Other records do not count, such as the alert
++    /// with which a TLS client answers the server closing the connection.
++    pub fn sent_application_data_beyond(&self, sent: usize) -> bool {
++        let tapped = self.0.tapped.lock().expect("lock is not poisoned");
++        let (whole, partial) = whole_records(tapped.sent.get(sent..).unwrap_or_default());
++        whole.iter().map(|(typ, _)| *typ).chain(partial).any(|typ| typ == APPLICATION_DATA)
++    }
+ }
+ 
+ /// An [`AsyncRead`] adapter that records all bytes read into a
+@@ -492,3 +555,74 @@ impl VerifyDataCheck {
+         Ok(())
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const ALERT: u8 = 21;
++
++    /// A raw record of content type `typ` whose body is `len` bytes.
++    fn record(typ: u8, len: usize) -> Vec<u8> {
++        let mut record = vec![typ, 3, 3];
++        record.extend_from_slice(&(len as u16).to_be_bytes());
++        record.resize(5 + len, 0);
++        record
++    }
++
++    /// An application data record carrying `app` bytes of plaintext.
++    fn app_record(app: usize) -> Vec<u8> {
++        record(APPLICATION_DATA, app + GCM_RECORD_OVERHEAD)
++    }
++
++    #[test]
++    fn test_application_data_started_before_counts_records_which_had_begun() {
++        let tls = [record(22, 40), app_record(100), record(ALERT, 26), app_record(7)].concat();
++        let second_starts = 45 + 5 + 100 + GCM_RECORD_OVERHEAD + 31;
++
++        assert_eq!(application_data_started_before(&tls, 0), 0);
++        assert_eq!(application_data_started_before(&tls, 45), 0);
++        assert_eq!(application_data_started_before(&tls, 46), 100);
++        assert_eq!(application_data_started_before(&tls, second_starts), 100);
++        assert_eq!(application_data_started_before(&tls, second_starts + 1), 107);
++        assert_eq!(application_data_started_before(&tls, tls.len()), 107);
++    }
++
++    #[test]
++    fn test_only_application_data_counts_as_sent_beyond_a_prefix() {
++        let request = app_record(50);
++        let tap = TrafficTap::default();
++        tap.record(TapDirection::Sent, &request);
++        assert!(!tap.sent_application_data_beyond(request.len()));
++
++        // The alert which answers a close, whole or not.
++        let alert = record(ALERT, 26);
++        tap.record(TapDirection::Sent, &alert[..3]);
++        assert!(!tap.sent_application_data_beyond(request.len()));
++        tap.record(TapDirection::Sent, &alert[3..]);
++        assert!(!tap.sent_application_data_beyond(request.len()));
++
++        // Application data, from its first byte.
++        tap.record(TapDirection::Sent, &app_record(9)[..1]);
++        assert!(tap.sent_application_data_beyond(request.len()));
++    }
++
++    #[tokio::test]
++    async fn test_prefix_tells_what_was_received_before_its_last_send() {
++        let tap = TrafficTap::default();
++        let (first, second) = (app_record(50), app_record(60));
++        let (stale, fresh) = (app_record(11), app_record(13));
++
++        tap.record(TapDirection::Sent, &first);
++        tap.record(TapDirection::Recv, &stale);
++        tap.record(TapDirection::Sent, &second);
++        tap.record(TapDirection::Recv, &fresh);
++
++        let received = stale.len() + fresh.len();
++        let (.., prefix) = tap.prefix(first.len(), stale.len()).await;
++        assert_eq!(prefix.received_before_last_send, 0);
++        let (.., prefix) = tap.prefix(first.len() + second.len(), received).await;
++        assert_eq!(prefix.received_before_last_send, 11);
++        assert_eq!(prefix.sent_beyond, 0);
++    }
++}
+diff --git a/crates/tlsn/src/verifier.rs b/crates/tlsn/src/verifier.rs
+index 12c9a36ca..1a3ff0895 100644
+--- a/crates/tlsn/src/verifier.rs
++++ b/crates/tlsn/src/verifier.rs
+@@ -618,16 +618,11 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+         let VerifierProxyDeps { mut verifier, .. } = deps;
+ 
+         let finished = verifier.wait_finished().await?;
+-        let (sent, recv, conn_time, sent_beyond) = tap
++        let (sent, recv, conn_time, prefix) = tap
+             .prefix(finished.tls_sent as usize, finished.tls_recv as usize)
+             .await;
+         let (ctx, vm, keys, tls_transcript) =
+             commit_recorded(verifier, &sent, &recv, conn_time, &finished, tags_from).await?;
+-        let prefix = TapPrefix {
+-            sent: sent.len(),
+-            received: recv.len(),
+-            sent_beyond,
+-        };
+ 
+         Ok((
+             Verifier {
+-- 
+2.56.0
+

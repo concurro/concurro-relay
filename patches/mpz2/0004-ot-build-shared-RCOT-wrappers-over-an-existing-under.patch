@@ -1,0 +1,68 @@
+From be4d134c364bd751cee2f3b73985c49431e7fc27 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 17:07:43 +0100
+Subject: [PATCH 4/4] ot: build shared RCOT wrappers over an existing
+ underlying instance
+
+---
+ crates/ot/src/rcot/shared/receiver.rs | 16 +++++++++++++++-
+ crates/ot/src/rcot/shared/sender.rs   | 16 +++++++++++++++-
+ 2 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/crates/ot/src/rcot/shared/receiver.rs b/crates/ot/src/rcot/shared/receiver.rs
+index e7fd4c6..0471596 100644
+--- a/crates/ot/src/rcot/shared/receiver.rs
++++ b/crates/ot/src/rcot/shared/receiver.rs
+@@ -116,7 +116,21 @@ where
+ {
+     /// Creates a new shared RCOT receiver.
+     pub fn new(inner: T) -> Self {
+-        let inner = Arc::new(Mutex::new(inner));
++        Self::from_inner(Arc::new(Mutex::new(inner)))
++    }
++
++    /// Returns the underlying receiver.
++    pub fn inner(&self) -> Arc<Mutex<T>> {
++        self.inner.clone()
++    }
++
++    /// Creates a shared receiver over an underlying receiver which may
++    /// outlive it.
++    ///
++    /// Unlike a clone, the result does not flush together with other shared
++    /// receivers over the same underlying receiver, so only one of them may
++    /// be in use at a time.
++    pub fn from_inner(inner: Arc<Mutex<T>>) -> Self {
+         let barrier = AdaptiveBarrier::new();
+         let mut state = State::new();
+         let id = state.register();
+diff --git a/crates/ot/src/rcot/shared/sender.rs b/crates/ot/src/rcot/shared/sender.rs
+index cb139c7..7b25828 100644
+--- a/crates/ot/src/rcot/shared/sender.rs
++++ b/crates/ot/src/rcot/shared/sender.rs
+@@ -114,7 +114,21 @@ where
+     /// Creates a new shared RCOT sender.
+     pub fn new(inner: T) -> Self {
+         let delta = inner.delta();
+-        let inner = Arc::new(Mutex::new(inner));
++        Self::from_inner(Arc::new(Mutex::new(inner)), delta)
++    }
++
++    /// Returns the underlying sender.
++    pub fn inner(&self) -> Arc<Mutex<T>> {
++        self.inner.clone()
++    }
++
++    /// Creates a shared sender over an underlying sender which may outlive
++    /// it, given that sender's `delta`.
++    ///
++    /// Unlike a clone, the result does not flush together with other shared
++    /// senders over the same underlying sender, so only one of them may be
++    /// in use at a time.
++    pub fn from_inner(inner: Arc<Mutex<T>>, delta: U) -> Self {
+         let barrier = AdaptiveBarrier::new();
+ 
+         let mut state = State::new();
+-- 
+2.56.0
+

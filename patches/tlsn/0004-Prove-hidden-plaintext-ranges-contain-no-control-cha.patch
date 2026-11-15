@@ -1,0 +1,529 @@
+From c7b349f8488789bfd23de41f4ce6b3f240aacdeb Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 12:33:35 +0100
+Subject: [PATCH 4/6] Prove hidden plaintext ranges contain no control
+ characters
+
+---
+ crates/core/src/config/prove.rs             |  46 ++++
+ crates/tlsn/src/prover/prove.rs             |   2 +
+ crates/tlsn/src/transcript_internal/auth.rs | 222 ++++++++++++++++++--
+ crates/tlsn/src/verifier/verify.rs          |   2 +
+ 4 files changed, 259 insertions(+), 13 deletions(-)
+
+diff --git a/crates/core/src/config/prove.rs b/crates/core/src/config/prove.rs
+index ce32ab389..2e7ffd051 100644
+--- a/crates/core/src/config/prove.rs
++++ b/crates/core/src/config/prove.rs
+@@ -13,6 +13,7 @@ use crate::transcript::{Direction, Transcript, TranscriptCommitConfig, Transcrip
+ pub struct ProveConfig {
+     server_identity: bool,
+     reveal: Option<(RangeSet<usize>, RangeSet<usize>)>,
++    no_control: (RangeSet<usize>, RangeSet<usize>),
+     transcript_commit: Option<TranscriptCommitConfig>,
+ }
+ 
+@@ -33,6 +34,12 @@ impl ProveConfig {
+         self.reveal.as_ref()
+     }
+ 
++    /// Returns the sent and received ranges in which every byte is proven to
++    /// be at least `0x20`.
++    pub fn no_control(&self) -> &(RangeSet<usize>, RangeSet<usize>) {
++        &self.no_control
++    }
++
+     /// Returns the transcript commitment configuration.
+     pub fn transcript_commit(&self) -> Option<&TranscriptCommitConfig> {
+         self.transcript_commit.as_ref()
+@@ -43,6 +50,7 @@ impl ProveConfig {
+         ProveRequest {
+             server_identity: self.server_identity,
+             reveal: self.reveal.clone(),
++            no_control: self.no_control.clone(),
+             transcript_commit: self
+                 .transcript_commit
+                 .clone()
+@@ -57,6 +65,7 @@ pub struct ProveConfigBuilder<'a> {
+     transcript: &'a Transcript,
+     server_identity: bool,
+     reveal: Option<(RangeSet<usize>, RangeSet<usize>)>,
++    no_control: (RangeSet<usize>, RangeSet<usize>),
+     transcript_commit: Option<TranscriptCommitConfig>,
+ }
+ 
+@@ -67,6 +76,7 @@ impl<'a> ProveConfigBuilder<'a> {
+             transcript,
+             server_identity: false,
+             reveal: None,
++            no_control: Default::default(),
+             transcript_commit: None,
+         }
+     }
+@@ -114,6 +124,34 @@ impl<'a> ProveConfigBuilder<'a> {
+         Ok(self)
+     }
+ 
++    /// Proves that every byte in the given ranges of the transcript is at
++    /// least `0x20`, without revealing them.
++    ///
++    /// This rules out CR, LF, NUL and tab, so that hidden data can not alter
++    /// the framing of a line-delimited protocol such as HTTP/1.1. DEL and
++    /// bytes with the high bit set are permitted.
++    pub fn prove_no_control(
++        &mut self,
++        direction: Direction,
++        ranges: impl IntoRangeIterator<usize>,
++    ) -> Result<&mut Self, ProveConfigError> {
++        let idx = RangeSet::from_range_iter(ranges);
++        if idx.end().unwrap_or(0) > self.transcript.len_of_direction(direction) {
++            return Err(ProveConfigError(ErrorRepr::IndexOutOfBounds {
++                direction,
++                actual: idx.end().unwrap_or(0),
++                len: self.transcript.len_of_direction(direction),
++            }));
++        }
++
++        match direction {
++            Direction::Sent => self.no_control.0.union_mut(&idx),
++            Direction::Received => self.no_control.1.union_mut(&idx),
++        }
++
++        Ok(self)
++    }
++
+     /// Reveals the given ranges of the sent data transcript.
+     pub fn reveal_sent(
+         &mut self,
+@@ -151,6 +189,7 @@ impl<'a> ProveConfigBuilder<'a> {
+         Ok(ProveConfig {
+             server_identity: self.server_identity,
+             reveal: self.reveal,
++            no_control: self.no_control,
+             transcript_commit: self.transcript_commit,
+         })
+     }
+@@ -161,6 +200,7 @@ impl<'a> ProveConfigBuilder<'a> {
+ pub struct ProveRequest {
+     server_identity: bool,
+     reveal: Option<(RangeSet<usize>, RangeSet<usize>)>,
++    no_control: (RangeSet<usize>, RangeSet<usize>),
+     transcript_commit: Option<TranscriptCommitRequest>,
+ }
+ 
+@@ -176,6 +216,12 @@ impl ProveRequest {
+         self.reveal.as_ref()
+     }
+ 
++    /// Returns the sent and received ranges in which the prover will prove
++    /// every byte is at least `0x20`.
++    pub fn no_control(&self) -> &(RangeSet<usize>, RangeSet<usize>) {
++        &self.no_control
++    }
++
+     /// Returns the transcript commitment configuration.
+     pub fn transcript_commit(&self) -> Option<&TranscriptCommitRequest> {
+         self.transcript_commit.as_ref()
+diff --git a/crates/tlsn/src/prover/prove.rs b/crates/tlsn/src/prover/prove.rs
+index 59b313a58..ca5613b48 100644
+--- a/crates/tlsn/src/prover/prove.rs
++++ b/crates/tlsn/src/prover/prove.rs
+@@ -52,6 +52,7 @@ pub(crate) async fn prove<T: Vm<Binary> + Send + Sync>(
+                 .filter(|record| record.typ == ContentType::ApplicationData),
+             &reveal_sent,
+             &commit_sent,
++            &config.no_control().0,
+         )
+         .map_err(|e| {
+             Error::internal()
+@@ -69,6 +70,7 @@ pub(crate) async fn prove<T: Vm<Binary> + Send + Sync>(
+                 .filter(|record| record.typ == ContentType::ApplicationData),
+             &reveal_recv,
+             &commit_recv,
++            &config.no_control().1,
+         )
+         .map_err(|e| {
+             Error::internal()
+diff --git a/crates/tlsn/src/transcript_internal/auth.rs b/crates/tlsn/src/transcript_internal/auth.rs
+index 726599abd..d401ac0d6 100644
+--- a/crates/tlsn/src/transcript_internal/auth.rs
++++ b/crates/tlsn/src/transcript_internal/auth.rs
+@@ -5,7 +5,9 @@ use ctr::{
+     Ctr32BE,
+     cipher::{KeyIvInit, StreamCipher, StreamCipherSeek},
+ };
+-use mpz_circuits::{AES128_KS, AES128_POST_KS, Circuit, circuits::xor};
++use mpz_circuits::{
++    AES128_KS, AES128_POST_KS, Circuit, CircuitBuilder, Feed, Node, circuits::xor,
++};
+ use mpz_core::bitvec::BitVec;
+ use mpz_memory_core::{
+     Array, DecodeFutureTyped, MemoryExt, Vector, ViewExt,
+@@ -20,6 +22,13 @@ use crate::transcript_internal::ReferenceMap;
+ /// Number of bytes XORed with the keystream per call.
+ const XOR_CHUNK: usize = 4096;
+ 
++/// Number of bytes checked to be at least `0x20` per call.
++const NO_CONTROL_CHUNK: usize = 256;
++
++/// Output of [`no_control`] when no byte is below `0x20`.
++const NO_CONTROL_OK: [u8; 1] = [0xff];
++
++#[allow(clippy::too_many_arguments)]
+ pub(crate) fn prove_plaintext<'a>(
+     vm: &mut dyn Vm<Binary>,
+     key: Array<U8, 16>,
+@@ -28,6 +37,7 @@ pub(crate) fn prove_plaintext<'a>(
+     records: impl IntoIterator<Item = &'a Record>,
+     reveal: &RangeSet<usize>,
+     commit: &RangeSet<usize>,
++    no_control: &RangeSet<usize>,
+ ) -> Result<ReferenceMap, PlaintextAuthError> {
+     let is_reveal_all = reveal == (0..plaintext.len());
+ 
+@@ -36,7 +46,7 @@ pub(crate) fn prove_plaintext<'a>(
+     } else {
+         // The plaintext is only partially revealed, so we need to authenticate
+         // in ZK.
+-        commit.union(reveal).into_set()
++        commit.union(reveal).union(no_control).into_set()
+     };
+ 
+     let plaintext_refs = alloc_plaintext(vm, &alloc_ranges)?;
+@@ -53,7 +63,7 @@ pub(crate) fn prove_plaintext<'a>(
+             vm.commit(*slice).map_err(PlaintextAuthError::vm)?;
+         }
+     } else {
+-        let private = commit.difference(reveal).into_set();
++        let private = commit.union(no_control).difference(reveal).into_set();
+         for (_, slice) in plaintext_refs
+             .index(&private)
+             .expect("all ranges are allocated")
+@@ -80,6 +90,10 @@ pub(crate) fn prove_plaintext<'a>(
+         for (_, slice) in ciphertext.iter() {
+             drop(vm.decode(*slice).map_err(PlaintextAuthError::vm)?);
+         }
++
++        for check in alloc_no_control(vm, &plaintext_refs, no_control)? {
++            drop(vm.decode(check).map_err(PlaintextAuthError::vm)?);
++        }
+     }
+ 
+     Ok(plaintext_refs)
+@@ -95,6 +109,7 @@ pub(crate) fn verify_plaintext<'a>(
+     records: impl IntoIterator<Item = &'a Record>,
+     reveal: &RangeSet<usize>,
+     commit: &RangeSet<usize>,
++    no_control: &RangeSet<usize>,
+ ) -> Result<(ReferenceMap, PlaintextProof<'a>), PlaintextAuthError> {
+     let is_reveal_all = reveal == (0..plaintext.len());
+ 
+@@ -103,21 +118,31 @@ pub(crate) fn verify_plaintext<'a>(
+     } else {
+         // The plaintext is only partially revealed, so we need to authenticate
+         // in ZK.
+-        commit.union(reveal).into_set()
++        commit.union(reveal).union(no_control).into_set()
+     };
+ 
+-    // The commitment ranges are supplied by the peer and, unlike the reveal
+-    // ranges, are not otherwise bounded by the transcript checks. Refuse any
+-    // that fall outside the plaintext before they are used to size an
+-    // allocation or index the buffer.
+-    if alloc_ranges.end().unwrap_or(0) > plaintext.len() {
++    // The commitment and no-control ranges are supplied by the peer and,
++    // unlike the reveal ranges, are not otherwise bounded by the transcript
++    // checks. Refuse any that fall outside the plaintext before they are used
++    // to size an allocation or index the buffer.
++    let end = alloc_ranges.end().max(no_control.end()).unwrap_or(0);
++    if end > plaintext.len() {
+         return Err(ErrorRepr::CommitmentOutOfBounds {
+-            end: alloc_ranges.end().unwrap_or(0),
++            end,
+             len: plaintext.len(),
+         }
+         .into());
+     }
+ 
++    // Fully revealed plaintext is checked directly.
++    if is_reveal_all
++        && no_control
++            .iter()
++            .any(|range| plaintext[range].iter().any(|byte| *byte < 0x20))
++    {
++        return Err(ErrorRepr::ControlCharacter.into());
++    }
++
+     let plaintext_refs = alloc_plaintext(vm, &alloc_ranges)?;
+     let records = RecordParams::from_iter(records).collect::<Vec<_>>();
+ 
+@@ -140,7 +165,7 @@ pub(crate) fn verify_plaintext<'a>(
+             ciphertext,
+         })
+     } else {
+-        let private = commit.difference(reveal).into_set();
++        let private = commit.union(no_control).difference(reveal).into_set();
+         for (_, slice) in plaintext_refs
+             .index(&private)
+             .expect("all ranges are allocated")
+@@ -173,7 +198,15 @@ pub(crate) fn verify_plaintext<'a>(
+             ));
+         }
+ 
+-        PlaintextProof(ProofInner::WithZk { ciphertexts })
++        let mut no_control_checks = Vec::new();
++        for check in alloc_no_control(vm, &plaintext_refs, no_control)? {
++            no_control_checks.push(vm.decode(check).map_err(PlaintextAuthError::vm)?);
++        }
++
++        PlaintextProof(ProofInner::WithZk {
++            ciphertexts,
++            no_control_checks,
++        })
+     };
+ 
+     Ok((plaintext_refs, plaintext_proof))
+@@ -201,6 +234,76 @@ fn alloc_plaintext(
+     })))
+ }
+ 
++/// Calls [`no_control`] on the plaintext in `ranges`, returning each call's
++/// output.
++///
++/// The plaintext references are the ones authenticated against the
++/// ciphertext, which binds the result to the transcript.
++fn alloc_no_control(
++    vm: &mut dyn Vm<Binary>,
++    plaintext: &ReferenceMap,
++    ranges: &RangeSet<usize>,
++) -> Result<Vec<Array<U8, 1>>, PlaintextAuthError> {
++    let plaintext = plaintext.index(ranges).expect("all ranges are allocated");
++
++    let mut circuits: HashMap<usize, Arc<Circuit>> = HashMap::new();
++    let mut checks = Vec::new();
++    for (_, slice) in plaintext.iter() {
++        let mut pos = 0;
++        while pos < slice.len() {
++            let len = (slice.len() - pos).min(NO_CONTROL_CHUNK);
++            let circuit = circuits
++                .entry(len)
++                .or_insert_with(|| Arc::new(no_control(len)))
++                .clone();
++            let call = Call::builder(circuit)
++                .arg(slice.get(pos..pos + len).expect("length is checked"))
++                .build()
++                .expect("call should be valid");
++
++            checks.push(vm.call(call).map_err(PlaintextAuthError::vm)?);
++            pos += len;
++        }
++    }
++
++    Ok(checks)
++}
++
++/// Returns a circuit which outputs [`NO_CONTROL_OK`] if none of its `len`
++/// input bytes is below `0x20`, and zero otherwise.
++///
++/// `fn([u8; len]) -> u8`
++fn no_control(len: usize) -> Circuit {
++    fn or(builder: &mut CircuitBuilder, x: Node<Feed>, y: Node<Feed>) -> Node<Feed> {
++        let and = builder.add_and_gate(x, y);
++        let xor = builder.add_xor_gate(x, y);
++        builder.add_xor_gate(xor, and)
++    }
++
++    let mut builder = CircuitBuilder::new();
++
++    let mut ok = None;
++    for _ in 0..len {
++        // Bits are little-endian; a byte is at least `0x20` exactly when one
++        // of its top three bits is set.
++        let bits: [Node<Feed>; 8] = std::array::from_fn(|_| builder.add_input());
++        let high = or(&mut builder, bits[5], bits[6]);
++        let high = or(&mut builder, high, bits[7]);
++        ok = Some(match ok {
++            Some(ok) => builder.add_and_gate(ok, high),
++            None => high,
++        });
++    }
++
++    let ok = ok.expect("circuit has at least one input byte");
++    for _ in 0..8 {
++        let bit = builder.add_id_gate(ok);
++        builder.add_output(bit);
++    }
++
++    builder.build().expect("circuit is valid")
++}
++
+ fn alloc_ciphertext<'a>(
+     vm: &mut dyn Vm<Binary>,
+     key: Array<U8, 16>,
+@@ -450,7 +553,10 @@ impl<'a> PlaintextProof<'a> {
+ 
+                 verify_plaintext_with_key(key, iv, &records, plaintext, ciphertext)?;
+             }
+-            ProofInner::WithZk { ciphertexts } => {
++            ProofInner::WithZk {
++                ciphertexts,
++                no_control_checks,
++            } => {
+                 for (expected, mut actual) in ciphertexts {
+                     let actual = actual
+                         .try_recv()
+@@ -461,6 +567,17 @@ impl<'a> PlaintextProof<'a> {
+                         return Err(PlaintextAuthError(ErrorRepr::InvalidPlaintext));
+                     }
+                 }
++
++                for mut check in no_control_checks {
++                    let check = check
++                        .try_recv()
++                        .map_err(PlaintextAuthError::vm)?
++                        .ok_or(PlaintextAuthError(ErrorRepr::MissingDecoding))?;
++
++                    if check != NO_CONTROL_OK {
++                        return Err(PlaintextAuthError(ErrorRepr::ControlCharacter));
++                    }
++                }
+             }
+         }
+ 
+@@ -480,6 +597,7 @@ enum ProofInner<'a> {
+         // (expected, actual)
+         #[allow(clippy::type_complexity)]
+         ciphertexts: Vec<(&'a [u8], DecodeFutureTyped<BitVec, Vec<u8>>)>,
++        no_control_checks: Vec<DecodeFutureTyped<BitVec, [u8; 1]>>,
+     },
+ }
+ 
+@@ -546,6 +664,8 @@ enum ErrorRepr {
+     MissingDecoding,
+     #[error("plaintext does not match ciphertext")]
+     InvalidPlaintext,
++    #[error("plaintext contains a byte below 0x20 where none is allowed")]
++    ControlCharacter,
+ }
+ 
+ #[cfg(test)]
+@@ -663,6 +783,80 @@ mod tests {
+         assert_eq!(keystream, expected);
+     }
+ 
++    #[rstest]
++    #[case::clean(40, [], [0..40], true)]
++    #[case::carriage_return(40, [(7, b'\r')], [0..40], false)]
++    #[case::line_feed_last(40, [(39, b'\n')], [0..40], false)]
++    #[case::nul_first(40, [(0, 0)], [0..40], false)]
++    #[case::unit_separator(40, [(3, 0x1f)], [0..40], false)]
++    #[case::space_del_and_high_bytes(40, [(1, b' '), (2, 0x7f), (3, 0x80), (4, 0xff)], [0..40], true)]
++    #[case::control_outside_range(40, [(5, b'\n'), (30, b'\r')], [6..30], true)]
++    #[case::control_at_range_edges(40, [(6, b'\n')], [6..30], false)]
++    #[case::second_of_two_ranges(40, [(21, b'\r')], [2..9, 20..25], false)]
++    #[case::last_byte_of_first_chunk(NO_CONTROL_CHUNK + 5, [(NO_CONTROL_CHUNK - 1, b'\n')], [0..NO_CONTROL_CHUNK + 5], false)]
++    #[case::first_byte_of_second_chunk(NO_CONTROL_CHUNK + 5, [(NO_CONTROL_CHUNK, b'\n')], [0..NO_CONTROL_CHUNK + 5], false)]
++    #[case::clean_across_chunks(2 * NO_CONTROL_CHUNK + 5, [], [0..2 * NO_CONTROL_CHUNK + 5], true)]
++    #[tokio::test]
++    async fn test_alloc_no_control(
++        #[case] len: usize,
++        #[case] overrides: impl IntoIterator<Item = (usize, u8)>,
++        #[case] ranges: impl IntoIterator<Item = Range<usize>>,
++        #[case] expect_ok: bool,
++    ) {
++        let mut plaintext = vec![b'a'; len];
++        for (idx, byte) in overrides {
++            plaintext[idx] = byte;
++        }
++        let ranges = RangeSet::from(ranges.into_iter().collect::<Vec<_>>());
++
++        let (mut ctx, _) = test_st_context(1024);
++        let mut vm = IdealVm::new();
++
++        let plaintext_refs = alloc_plaintext(&mut vm, &RangeSet::from(0..len)).unwrap();
++        for (range, slice) in plaintext_refs.iter() {
++            vm.mark_public(*slice).unwrap();
++            vm.assign(*slice, plaintext[range].to_vec()).unwrap();
++            vm.commit(*slice).unwrap();
++        }
++
++        let checks = alloc_no_control(&mut vm, &plaintext_refs, &ranges).unwrap();
++        vm.execute(&mut ctx).await.unwrap();
++
++        let outputs: Vec<[u8; 1]> = checks
++            .iter()
++            .map(|check| vm.get(*check).unwrap().unwrap())
++            .collect();
++
++        assert!(outputs.iter().all(|output| *output == NO_CONTROL_OK || *output == [0]));
++        assert_eq!(
++            outputs.iter().all(|output| *output == NO_CONTROL_OK),
++            expect_ok
++        );
++    }
++
++    #[test]
++    fn test_verify_plaintext_checks_no_control_when_fully_revealed() {
++        let verify = |plaintext: &[u8]| {
++            let (mut vm, key_ref, iv_ref) = build_vm([0u8; 16], [0u8; 4]);
++            let ciphertext = vec![0u8; plaintext.len()];
++            verify_plaintext(
++                &mut vm,
++                key_ref,
++                iv_ref,
++                plaintext,
++                &ciphertext,
++                std::iter::empty(),
++                &RangeSet::from(0..plaintext.len()),
++                &RangeSet::default(),
++                &RangeSet::from(2..6),
++            )
++            .map(|_| ())
++        };
++
++        assert!(verify(b"ab\rdefgh").is_err());
++        assert!(verify(b"\rbcdef\nh").is_ok());
++    }
++
+     #[rstest]
+     #[case::single_block([16], [0..16])]
+     #[case::partial_blocks([40], [3..7, 9..38])]
+@@ -812,6 +1006,7 @@ mod tests {
+             &records,
+             &RangeSet::from(reveal),
+             &RangeSet::from(commit),
++            &RangeSet::default(),
+         ) {
+             Ok(_) => panic!("verifier accepted an out-of-bounds commitment range"),
+             Err(err) => err,
+@@ -836,6 +1031,7 @@ mod tests {
+             &records,
+             &RangeSet::from(0..8),
+             &RangeSet::from(0..8),
++            &RangeSet::default(),
+         );
+ 
+         assert!(result.is_ok());
+diff --git a/crates/tlsn/src/verifier/verify.rs b/crates/tlsn/src/verifier/verify.rs
+index 7a41c5e47..f28830e38 100644
+--- a/crates/tlsn/src/verifier/verify.rs
++++ b/crates/tlsn/src/verifier/verify.rs
+@@ -123,6 +123,7 @@ pub(crate) async fn verify<T: Vm<Binary> + Send + Sync>(
+             .filter(|record| record.typ == ContentType::ApplicationData),
+         transcript.sent_authed(),
+         &commit_sent,
++        &request.no_control().0,
+     )
+     .map_err(|e| {
+         Error::internal()
+@@ -141,6 +142,7 @@ pub(crate) async fn verify<T: Vm<Binary> + Send + Sync>(
+             .filter(|record| record.typ == ContentType::ApplicationData),
+         transcript.received_authed(),
+         &commit_recv,
++        &request.no_control().1,
+     )
+     .map_err(|e| {
+         Error::internal()
+-- 
+2.56.0
+

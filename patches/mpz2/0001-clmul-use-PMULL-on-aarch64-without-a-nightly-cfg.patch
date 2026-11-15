@@ -1,0 +1,90 @@
+From fbe40e0cb19a654b2d29434cb14bb9e44e3705c8 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 11:03:32 +0100
+Subject: [PATCH 1/4] clmul: use PMULL on aarch64 without a nightly cfg
+
+---
+ crates/clmul/src/backend.rs            |  2 +-
+ crates/clmul/src/backend/autodetect.rs |  4 ++--
+ crates/clmul/src/backend/pmull.rs      |  2 ++
+ crates/clmul/src/lib.rs                | 11 +----------
+ 4 files changed, 6 insertions(+), 13 deletions(-)
+
+diff --git a/crates/clmul/src/backend.rs b/crates/clmul/src/backend.rs
+index 0c8a8e5..ace03cf 100644
+--- a/crates/clmul/src/backend.rs
++++ b/crates/clmul/src/backend.rs
+@@ -43,7 +43,7 @@ impl soft::Clmul {
+ }
+ 
+ cfg_if! {
+-    if #[cfg(all(target_arch = "aarch64", clmul_armv8, not(clmul_force_soft)))] {
++    if #[cfg(all(target_arch = "aarch64", not(clmul_force_soft)))] {
+         mod autodetect;
+         mod pmull;
+         pub use crate::backend::autodetect::Clmul;
+diff --git a/crates/clmul/src/backend/autodetect.rs b/crates/clmul/src/backend/autodetect.rs
+index 9ff3648..c2e484d 100644
+--- a/crates/clmul/src/backend/autodetect.rs
++++ b/crates/clmul/src/backend/autodetect.rs
+@@ -5,13 +5,13 @@ use core::ops::{BitXor, BitXorAssign};
+ 
+ use crate::backend::soft;
+ 
+-#[cfg(all(target_arch = "aarch64", clmul_armv8))]
++#[cfg(target_arch = "aarch64")]
+ use super::pmull as intrinsics;
+ 
+ #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+ use super::clmul as intrinsics;
+ 
+-#[cfg(all(target_arch = "aarch64", clmul_armv8))]
++#[cfg(target_arch = "aarch64")]
+ cpufeatures::new!(mul_intrinsics, "aes"); // `aes` implies PMULL
+ 
+ #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+diff --git a/crates/clmul/src/backend/pmull.rs b/crates/clmul/src/backend/pmull.rs
+index 5052322..414bc28 100644
+--- a/crates/clmul/src/backend/pmull.rs
++++ b/crates/clmul/src/backend/pmull.rs
+@@ -11,6 +11,8 @@
+ //! - <https://developer.arm.com/documentation/100069/0608/A64-SIMD-Vector-Instructions/PMULL--PMULL2--vector->
+ //! - <https://eprint.iacr.org/2015/688.pdf>
+ 
++#![allow(unsafe_op_in_unsafe_fn)]
++
+ use core::{arch::aarch64::*, mem, ops::BitXor};
+ 
+ pub type Clmul = ClmulArm;
+diff --git a/crates/clmul/src/lib.rs b/crates/clmul/src/lib.rs
+index f270fc2..521599a 100644
+--- a/crates/clmul/src/lib.rs
++++ b/crates/clmul/src/lib.rs
+@@ -28,15 +28,7 @@
+ //! On `aarch64` targets including `aarch64-apple-darwin` (Apple M1) and Linux
+ //! targets such as `aarch64-unknown-linux-gnu` and
+ //! `aarch64-unknown-linux-musl`, support for using the `PMULL` instructions in
+-//! ARMv8's Cryptography Extensions is available when using the nightly
+-//! compiler, and can be enabled using the `clmul_armv8` RUSTFLAG.
+-//!
+-//! ```text
+-//! $ RUSTFLAGS="--cfg clmul_armv8" cargo bench
+-//! ```
+-//!
+-//! On Linux and macOS, when the `clmul_armv8` RUSTFLAG is enabled support for
+-//! AES intrinsics is autodetected at runtime.
++//! ARMv8's Cryptography Extensions is autodetected at runtime.
+ //!
+ //! ## `x86`/`x86_64` intrinsics (`CMLMUL`)
+ //! By default this crate uses runtime detection on `i686`/`x86_64` targets
+@@ -53,7 +45,6 @@
+ //! ```
+ 
+ #![cfg_attr(not(test), no_std)]
+-#![cfg_attr(all(clmul_armv8, target_arch = "aarch64"), feature(stdsimd))]
+ 
+ #[cfg(not(target_endian = "little"))]
+ compile_error!("mpz requires a little-endian target; big-endian hosts are not supported");
+-- 
+2.56.0
+

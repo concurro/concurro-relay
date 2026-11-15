@@ -1,0 +1,82 @@
+From a55386b451f580f4029eab28945a8361cf866242 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 11:20:06 +0100
+Subject: [PATCH 2/6] Prove the AES key schedule once per key
+
+---
+ crates/tlsn/src/transcript_internal/auth.rs | 29 +++++++++++++++++----
+ 1 file changed, 24 insertions(+), 5 deletions(-)
+
+diff --git a/crates/tlsn/src/transcript_internal/auth.rs b/crates/tlsn/src/transcript_internal/auth.rs
+index 04593149d..c71834b93 100644
+--- a/crates/tlsn/src/transcript_internal/auth.rs
++++ b/crates/tlsn/src/transcript_internal/auth.rs
+@@ -5,7 +5,7 @@ use ctr::{
+     Ctr32BE,
+     cipher::{KeyIvInit, StreamCipher, StreamCipherSeek},
+ };
+-use mpz_circuits::{AES128, Circuit, circuits::xor};
++use mpz_circuits::{AES128_KS, AES128_POST_KS, Circuit, circuits::xor};
+ use mpz_core::bitvec::BitVec;
+ use mpz_memory_core::{
+     Array, DecodeFutureTyped, MemoryExt, Vector, ViewExt,
+@@ -287,6 +287,8 @@ fn alloc_keystream<'a>(
+     records: impl IntoIterator<Item = &'a RecordParams>,
+ ) -> Result<Vec<Vector<U8>>, PlaintextAuthError> {
+     let mut keystream = Vec::new();
++    // The key schedule is the same for every block, so it is computed once.
++    let mut key_schedule = None;
+ 
+     let mut pos = 0;
+     let mut range_iter = ranges.iter();
+@@ -323,7 +325,11 @@ fn alloc_keystream<'a>(
+             {
+                 block
+             } else {
+-                let block = alloc_block(vm, key, iv, explicit_nonce, block_num)?;
++                let key_schedule = match key_schedule {
++                    Some(key_schedule) => key_schedule,
++                    None => *key_schedule.insert(alloc_key_schedule(vm, key)?),
++                };
++                let block = alloc_block(vm, key_schedule, iv, explicit_nonce, block_num)?;
+                 current_block = Some((block_num, block));
+                 block
+             };
+@@ -364,9 +370,22 @@ fn alloc_explicit_nonce(
+     Ok(nonce)
+ }
+ 
+-fn alloc_block(
++fn alloc_key_schedule(
+     vm: &mut dyn Vm<Binary>,
+     key: Array<U8, 16>,
++) -> Result<Array<U8, 176>, PlaintextAuthError> {
++    vm.call(
++        Call::builder(AES128_KS.clone())
++            .arg(key)
++            .build()
++            .expect("call should be valid"),
++    )
++    .map_err(PlaintextAuthError::vm)
++}
++
++fn alloc_block(
++    vm: &mut dyn Vm<Binary>,
++    key_schedule: Array<U8, 176>,
+     iv: Array<U8, 4>,
+     explicit_nonce: Vector<U8>,
+     block: usize,
+@@ -380,8 +399,8 @@ fn alloc_block(
+ 
+     let block: Array<U8, 16> = vm
+         .call(
+-            Call::builder(AES128.clone())
+-                .arg(key)
++            Call::builder(AES128_POST_KS.clone())
++                .arg(key_schedule)
+                 .arg(iv)
+                 .arg(explicit_nonce)
+                 .arg(ctr)
+-- 
+2.56.0
+

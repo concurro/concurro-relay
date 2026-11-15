@@ -1,0 +1,1365 @@
+From 9806ee7f6a79a7435c7bc91deeab7d2cf5903ec0 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 18:19:59 +0100
+Subject: [PATCH 6/6] Prove a prefix of a proxy connection while it stays open
+
+---
+ crates/core/src/config/prove.rs               |  30 +++
+ crates/tlsn/src/deps/verifier.rs              |   5 +-
+ crates/tlsn/src/lib.rs                        |   1 +
+ crates/tlsn/src/prover.rs                     | 147 ++++++++---
+ crates/tlsn/src/prover/client.rs              |   2 +-
+ crates/tlsn/src/prover/client/proxy/keylog.rs |   9 +
+ crates/tlsn/src/prover/client/proxy/mod.rs    |  60 +++--
+ crates/tlsn/src/prover/control.rs             |  21 +-
+ crates/tlsn/src/prover/prove.rs               |   2 +
+ crates/tlsn/src/prover/tests/harness.rs       |   5 +-
+ crates/tlsn/src/proxy.rs                      | 241 ++++++++++++++++--
+ crates/tlsn/src/transcript_internal/auth.rs   |  82 ++++--
+ crates/tlsn/src/verifier.rs                   | 199 +++++++++++----
+ crates/tlsn/src/verifier/verify.rs            |   2 +
+ 14 files changed, 663 insertions(+), 143 deletions(-)
+
+diff --git a/crates/core/src/config/prove.rs b/crates/core/src/config/prove.rs
+index 2e7ffd051..a5a33b16e 100644
+--- a/crates/core/src/config/prove.rs
++++ b/crates/core/src/config/prove.rs
+@@ -13,6 +13,7 @@ use crate::transcript::{Direction, Transcript, TranscriptCommitConfig, Transcrip
+ pub struct ProveConfig {
+     server_identity: bool,
+     reveal: Option<(RangeSet<usize>, RangeSet<usize>)>,
++    reveal_recv_key: bool,
+     no_control: (RangeSet<usize>, RangeSet<usize>),
+     transcript_commit: Option<TranscriptCommitConfig>,
+ }
+@@ -34,6 +35,12 @@ impl ProveConfig {
+         self.reveal.as_ref()
+     }
+ 
++    /// Returns whether the received data is authenticated by revealing the
++    /// server's traffic key.
++    pub fn reveal_recv_key(&self) -> bool {
++        self.reveal_recv_key
++    }
++
+     /// Returns the sent and received ranges in which every byte is proven to
+     /// be at least `0x20`.
+     pub fn no_control(&self) -> &(RangeSet<usize>, RangeSet<usize>) {
+@@ -50,6 +57,7 @@ impl ProveConfig {
+         ProveRequest {
+             server_identity: self.server_identity,
+             reveal: self.reveal.clone(),
++            reveal_recv_key: self.reveal_recv_key,
+             no_control: self.no_control.clone(),
+             transcript_commit: self
+                 .transcript_commit
+@@ -65,6 +73,7 @@ pub struct ProveConfigBuilder<'a> {
+     transcript: &'a Transcript,
+     server_identity: bool,
+     reveal: Option<(RangeSet<usize>, RangeSet<usize>)>,
++    reveal_recv_key: bool,
+     no_control: (RangeSet<usize>, RangeSet<usize>),
+     transcript_commit: Option<TranscriptCommitConfig>,
+ }
+@@ -76,6 +85,7 @@ impl<'a> ProveConfigBuilder<'a> {
+             transcript,
+             server_identity: false,
+             reveal: None,
++            reveal_recv_key: false,
+             no_control: Default::default(),
+             transcript_commit: None,
+         }
+@@ -124,6 +134,18 @@ impl<'a> ProveConfigBuilder<'a> {
+         Ok(self)
+     }
+ 
++    /// Authenticates the revealed received ranges by revealing the server's
++    /// traffic key, however much of the received data is revealed.
++    ///
++    /// The key discloses all received data to the verifier, including what
++    /// arrives later on the same connection. Revealing every received byte
++    /// already implies it; setting this allows a proof to transmit only the
++    /// ranges it adds.
++    pub fn reveal_recv_key(&mut self) -> &mut Self {
++        self.reveal_recv_key = true;
++        self
++    }
++
+     /// Proves that every byte in the given ranges of the transcript is at
+     /// least `0x20`, without revealing them.
+     ///
+@@ -189,6 +211,7 @@ impl<'a> ProveConfigBuilder<'a> {
+         Ok(ProveConfig {
+             server_identity: self.server_identity,
+             reveal: self.reveal,
++            reveal_recv_key: self.reveal_recv_key,
+             no_control: self.no_control,
+             transcript_commit: self.transcript_commit,
+         })
+@@ -200,6 +223,7 @@ impl<'a> ProveConfigBuilder<'a> {
+ pub struct ProveRequest {
+     server_identity: bool,
+     reveal: Option<(RangeSet<usize>, RangeSet<usize>)>,
++    reveal_recv_key: bool,
+     no_control: (RangeSet<usize>, RangeSet<usize>),
+     transcript_commit: Option<TranscriptCommitRequest>,
+ }
+@@ -216,6 +240,12 @@ impl ProveRequest {
+         self.reveal.as_ref()
+     }
+ 
++    /// Returns whether the prover will authenticate the received data by
++    /// revealing the server's traffic key.
++    pub fn reveal_recv_key(&self) -> bool {
++        self.reveal_recv_key
++    }
++
+     /// Returns the sent and received ranges in which the prover will prove
+     /// every byte is at least `0x20`.
+     pub fn no_control(&self) -> &(RangeSet<usize>, RangeSet<usize>) {
+diff --git a/crates/tlsn/src/deps/verifier.rs b/crates/tlsn/src/deps/verifier.rs
+index 093c3eade..bbe334e8b 100644
+--- a/crates/tlsn/src/deps/verifier.rs
++++ b/crates/tlsn/src/deps/verifier.rs
+@@ -16,7 +16,7 @@ use tracing::debug;
+ use crate::{
+     Error,
+     deps::{build_mpc_tls_config, translate_keys},
+-    proxy::ProxyVerifier,
++    proxy::{ProxyVerifier, TrafficTap},
+ };
+ 
+ /// The verifier's half of the OT state proxy proofs share, with its global
+@@ -132,6 +132,8 @@ impl VerifierMpcDeps {
+ pub(crate) struct VerifierProxyDeps {
+     pub(crate) verifier: Box<ProxyVerifier>,
+     pub(crate) id: ContextId,
++    /// Records the traffic this verifier forwards.
++    pub(crate) tap: TrafficTap,
+ }
+ 
+ impl std::fmt::Debug for VerifierProxyDeps {
+@@ -185,6 +187,7 @@ impl VerifierProxyDeps {
+         Self {
+             verifier: Box::new(verifier),
+             id,
++            tap: TrafficTap::default(),
+         }
+     }
+ 
+diff --git a/crates/tlsn/src/lib.rs b/crates/tlsn/src/lib.rs
+index 2958e0854..47ef27510 100644
+--- a/crates/tlsn/src/lib.rs
++++ b/crates/tlsn/src/lib.rs
+@@ -85,6 +85,7 @@ mod transport;
+ pub mod verifier;
+ 
+ pub use error::Error;
++pub use proxy::{ProxySnapshot, TapPrefix, TrafficTap};
+ pub use rangeset;
+ pub use session::{
+     Session, SessionConfig, SessionConfigBuilder, SessionConfigError, SessionDriver, SessionHandle,
+diff --git a/crates/tlsn/src/prover.rs b/crates/tlsn/src/prover.rs
+index 36dc5561b..68cc05ba2 100644
+--- a/crates/tlsn/src/prover.rs
++++ b/crates/tlsn/src/prover.rs
+@@ -1,6 +1,6 @@
+ //! Prover.
+ 
+-mod client;
++pub(crate) mod client;
+ mod close;
+ mod conn;
+ mod control;
+@@ -16,6 +16,8 @@ pub use control::ProverControl;
+ pub use future::ProverFuture;
+ pub use tlsn_core::ProverOutput;
+ 
++use crate::{deps::ProverZk, proxy::ProxySnapshot};
++use mpc_tls::SessionKeys;
+ use crate::{
+     Error, Mpc, PROXY_STREAM_PREFIX, ProtocolConfig, Proxy, Result, TlsOutput,
+     deps::{ProverDeps, ProverMpcDeps, ProverProxyDeps},
+@@ -199,6 +201,7 @@ impl Prover<state::CommitAccepted<Mpc>> {
+ 
+         let control = ProverControl {
+             decrypt: tls_client.decrypt(),
++            snapshot: None,
+         };
+ 
+         let (client_io, tlsn_conn) = futures_plex::duplex(BUF_CAP);
+@@ -267,11 +270,13 @@ impl Prover<state::CommitAccepted<Proxy>> {
+         let server_name =
+             TlsServerName::try_from(server_name.as_ref()).expect("name was validated");
+ 
+-        let tls_client: Box<dyn TlsClient<Error = Error> + Send> =
+-            Box::new(ProxyTlsClient::new(proxy_prover, &config, server_name)?);
++        let tls_client = ProxyTlsClient::new(proxy_prover, &config, server_name)?;
++        let snapshot = tls_client.snapshot_source(config.server_name().clone());
++        let tls_client: Box<dyn TlsClient<Error = Error> + Send> = Box::new(tls_client);
+ 
+         let control = ProverControl {
+             decrypt: tls_client.decrypt(),
++            snapshot: Some(snapshot),
+         };
+ 
+         let (client_io, tlsn_conn) = futures_plex::duplex(BUF_CAP);
+@@ -305,6 +310,113 @@ impl Prover<state::CommitAccepted<Proxy>> {
+     }
+ }
+ 
++impl Prover<state::CommitAccepted<Proxy>> {
++    /// Commits to a snapshot of a proxy-TLS connection which another prover
++    /// of this session is running, without waiting for that connection to
++    /// close.
++    ///
++    /// Take the snapshot with
++    /// [`ProverControl::snapshot`](crate::prover::ProverControl::snapshot).
++    /// The verifier must call
++    /// [`Verifier::attach`](crate::verifier::Verifier::attach) with the tap
++    /// of the verifier forwarding that connection.
++    ///
++    /// `tags_from` is the number of received records whose tags an earlier
++    /// commitment to this connection already proved; the verifier must pass
++    /// the same number.
++    #[instrument(parent = &self.span, level = "debug", skip_all, err)]
++    pub async fn attach(
++        self,
++        snapshot: ProxySnapshot,
++        tags_from: usize,
++    ) -> Result<Prover<state::Committed>> {
++        let ProverDeps::Proxy(ProverProxyDeps {
++            prover: mut proxy_prover,
++            ..
++        }) = self.state.deps
++        else {
++            unreachable!("proxy-tls received incorrect deps")
++        };
++        let ProxySnapshot {
++            ms,
++            time,
++            traffic,
++            server_name,
++        } = snapshot;
++
++        proxy_prover
++            .send_finished(traffic.tls_sent.len() as u64, traffic.tls_recv.len() as u64)
++            .await?;
++        let (
++            mut ctx,
++            mut vm,
++            TlsOutput {
++                keys,
++                tls_transcript,
++            },
++        ) = proxy_prover.finalize(ms, time, traffic).await?;
++        let transcript =
++            prove_tags(&mut ctx, &mut vm, &keys, &tls_transcript, tags_from).await?;
++
++        Ok(Prover {
++            config: self.config,
++            span: self.span,
++            ctx: Some(ctx),
++            mux_handle: self.mux_handle,
++            closure: self.closure,
++            state: state::Committed {
++                vm,
++                server_name,
++                keys,
++                tls_transcript,
++                transcript,
++            },
++        })
++    }
++}
++
++/// Proves the tags of the received records from index `from` on, and
++/// returns the plaintext transcript.
++async fn prove_tags(
++    ctx: &mut Context,
++    vm: &mut ProverZk,
++    keys: &SessionKeys,
++    tls_transcript: &TlsTranscript,
++    from: usize,
++) -> Result<Transcript> {
++    let records = tls_transcript.recv().get(from..).ok_or_else(|| {
++        Error::internal().with_msg("more record tags were proven than records received")
++    })?;
++
++    // The prover drops the proof output.
++    let _ = verify_tags(
++        vm,
++        (keys.server_write_key, keys.server_write_iv),
++        keys.server_write_mac_key,
++        tls_transcript.version(),
++        records.to_vec(),
++    )
++    .map_err(|err| {
++        Error::internal()
++            .with_msg("tag verification setup failed")
++            .with_source(err)
++    })?;
++
++    vm.execute_all(ctx).await.map_err(|err| {
++        Error::internal()
++            .with_msg("tag verification zk execution failed")
++            .with_source(err)
++    })?;
++
++    debug!("verified tags from server");
++
++    tls_transcript.to_transcript().map_err(|e| {
++        Error::internal()
++            .with_msg("prover could not create transcript")
++            .with_source(e)
++    })
++}
++
+ impl<S> Prover<state::Connected<S>>
+ where
+     S: AsyncRead + AsyncWrite + Send + Unpin,
+@@ -490,34 +602,7 @@ where
+             .output
+             .ok_or(Error::internal().with_msg("prover has not yet closed the connection"))?;
+ 
+-        // Prove tag verification of received records.
+-        // The prover drops the proof output.
+-        let _ = verify_tags(
+-            &mut vm,
+-            (keys.server_write_key, keys.server_write_iv),
+-            keys.server_write_mac_key,
+-            tls_transcript.version(),
+-            tls_transcript.recv().to_vec(),
+-        )
+-        .map_err(|err| {
+-            Error::internal()
+-                .with_msg("tag verification setup failed")
+-                .with_source(err)
+-        })?;
+-
+-        vm.execute_all(&mut ctx).await.map_err(|err| {
+-            Error::internal()
+-                .with_msg("tag verification zk execution failed")
+-                .with_source(err)
+-        })?;
+-
+-        debug!("verified tags from server");
+-
+-        let transcript = tls_transcript.to_transcript().map_err(|e| {
+-            Error::internal()
+-                .with_msg("prover could not create transcript")
+-                .with_source(e)
+-        })?;
++        let transcript = prove_tags(&mut ctx, &mut vm, &keys, &tls_transcript, 0).await?;
+ 
+         let prover = Prover {
+             config: self.config,
+diff --git a/crates/tlsn/src/prover/client.rs b/crates/tlsn/src/prover/client.rs
+index 6fa130af3..7b7843158 100644
+--- a/crates/tlsn/src/prover/client.rs
++++ b/crates/tlsn/src/prover/client.rs
+@@ -14,7 +14,7 @@ pub(crate) use mpc::MpcTlsClient;
+ 
+ mod proxy;
+ use mpz_common::Context;
+-pub(crate) use proxy::ProxyTlsClient;
++pub(crate) use proxy::{MasterSecretLog, ProxyTlsClient};
+ 
+ /// TLS client for MPC and proxy-based TLS implementations.
+ pub(crate) trait TlsClient {
+diff --git a/crates/tlsn/src/prover/client/proxy/keylog.rs b/crates/tlsn/src/prover/client/proxy/keylog.rs
+index dc20444ea..b8999a912 100644
+--- a/crates/tlsn/src/prover/client/proxy/keylog.rs
++++ b/crates/tlsn/src/prover/client/proxy/keylog.rs
+@@ -9,6 +9,15 @@ pub(crate) struct MasterSecretLog {
+ }
+ 
+ impl MasterSecretLog {
++    /// Returns a copy of the master secret, which is empty until the
++    /// handshake has derived it.
++    pub(crate) fn peek(&self) -> Vec<u8> {
++        self.ms
++            .lock()
++            .expect("should be able to acquire lock for ms")
++            .clone()
++    }
++
+     pub(crate) fn take(&self) -> Vec<u8> {
+         std::mem::take(
+             &mut *self
+diff --git a/crates/tlsn/src/prover/client/proxy/mod.rs b/crates/tlsn/src/prover/client/proxy/mod.rs
+index 6bc8be35a..43c277224 100644
+--- a/crates/tlsn/src/prover/client/proxy/mod.rs
++++ b/crates/tlsn/src/prover/client/proxy/mod.rs
+@@ -7,7 +7,7 @@ use crate::{
+         client::{DecryptState, TlsClient, TlsOutput},
+         close::CloseState,
+     },
+-    proxy::{ProxyProver, TlsBytes},
++    proxy::{ProxyProver, SnapshotSource, TlsBytes},
+ };
+ use futures::FutureExt;
+ use mpz_common::Context;
+@@ -19,7 +19,10 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+ use std::{
+     io::{Read, Write},
+     pin::Pin,
+-    sync::{Arc, atomic::AtomicBool},
++    sync::{
++        Arc, Mutex,
++        atomic::{AtomicBool, AtomicU64, Ordering},
++    },
+     task::Poll,
+ };
+ use tls_core::dns::ServerName;
+@@ -28,7 +31,7 @@ use tracing::{debug, trace};
+ use webpki::anchor_from_trusted_cert;
+ 
+ mod keylog;
+-use keylog::MasterSecretLog;
++pub(crate) use keylog::MasterSecretLog;
+ 
+ const ALLOWED_GROUPS: &[NamedGroup] = &[NamedGroup::secp256r1];
+ const ALLOWED_SUITES: &[CipherSuite] = &[
+@@ -42,9 +45,10 @@ pub(crate) struct ProxyTlsClient {
+     /// Master secret captured during the handshake for finalization.
+     ms_log: Arc<MasterSecretLog>,
+     /// Connection timestamp, set when the handshake completes.
+-    time: Option<u64>,
++    /// Seconds since the epoch when the handshake completed, or zero.
++    time: Arc<AtomicU64>,
+     /// Captured TLS and application traffic for the transcript.
+-    traffic: TlsBytes,
++    traffic: Arc<Mutex<TlsBytes>>,
+     /// Whether the server transport closed abruptly (EOF/BrokenPipe). This is
+     /// a transport fact rather than close state: it decides whether sending
+     /// our close_notify can still succeed.
+@@ -126,8 +130,8 @@ impl ProxyTlsClient {
+         let tls_client = Self {
+             conn,
+             ms_log,
+-            time: None,
+-            traffic: TlsBytes::default(),
++            time: Arc::default(),
++            traffic: Arc::default(),
+             transport_closed: false,
+             plaintext_bytes_to_read: 0,
+             close: CloseState::new(),
+@@ -139,6 +143,26 @@ impl ProxyTlsClient {
+     }
+ }
+ 
++impl ProxyTlsClient {
++    fn traffic(&self) -> std::sync::MutexGuard<'_, TlsBytes> {
++        self.traffic.lock().expect("lock is not poisoned")
++    }
++
++    /// Returns where this client records what a snapshot of the connection
++    /// to `server_name` needs.
++    pub(crate) fn snapshot_source(
++        &self,
++        server_name: tlsn_core::connection::ServerName,
++    ) -> SnapshotSource {
++        SnapshotSource {
++            traffic: self.traffic.clone(),
++            ms: self.ms_log.clone(),
++            time: self.time.clone(),
++            server_name,
++        }
++    }
++}
++
+ impl TlsClient for ProxyTlsClient {
+     type Error = TlsnError;
+ 
+@@ -156,7 +180,7 @@ impl TlsClient for ProxyTlsClient {
+             .conn
+             .read_tls(&mut reader)
+             .map_err(|e| TlsnError::internal().with_source(e))?;
+-        self.traffic.tls_recv.extend_from_slice(&buf[..n]);
++        self.traffic().tls_recv.extend_from_slice(&buf[..n]);
+         Ok(n)
+     }
+ 
+@@ -166,7 +190,7 @@ impl TlsClient for ProxyTlsClient {
+             .conn
+             .write_tls(&mut writer)
+             .map_err(|e| TlsnError::internal().with_source(e))?;
+-        self.traffic.tls_sent.extend_from_slice(&buf[..n]);
++        self.traffic().tls_sent.extend_from_slice(&buf[..n]);
+         Ok(n)
+     }
+ 
+@@ -187,7 +211,7 @@ impl TlsClient for ProxyTlsClient {
+             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(0),
+             Err(e) => return Err(TlsnError::internal().with_source(e)),
+         }?;
+-        self.traffic.app_recv.extend_from_slice(&buf[..n]);
++        self.traffic().app_recv.extend_from_slice(&buf[..n]);
+         self.plaintext_bytes_to_read = self.plaintext_bytes_to_read.saturating_sub(n);
+         if n == 0 && self.close.peer_closed() {
+             self.close.mark_drained();
+@@ -203,7 +227,7 @@ impl TlsClient for ProxyTlsClient {
+             .writer()
+             .write(reader)
+             .map_err(|e| TlsnError::internal().with_source(e))?;
+-        self.traffic.app_sent.extend_from_slice(&buf[..n]);
++        self.traffic().app_sent.extend_from_slice(&buf[..n]);
+         Ok(n)
+     }
+ 
+@@ -274,7 +298,7 @@ impl TlsClient for ProxyTlsClient {
+                         .elapsed()
+                         .expect("system time is available")
+                         .as_secs();
+-                    self.time = Some(now);
++                    self.time.store(now, Ordering::Release);
+ 
+                     debug!("inner client is transitioning to connected");
+                     self.state = State::Connected {
+@@ -352,10 +376,14 @@ impl TlsClient for ProxyTlsClient {
+                             TlsnError::internal().with_msg("master secret is not available")
+                         ));
+                     }
+-                    let time = self.time.ok_or_else(|| {
+-                        TlsnError::internal().with_msg("connection timestamp is not set")
+-                    })?;
+-                    let traffic = std::mem::take(&mut self.traffic);
++                    let time = match self.time.load(Ordering::Acquire) {
++                        0 => {
++                            return Poll::Ready(Err(TlsnError::internal()
++                                .with_msg("connection timestamp is not set")));
++                        }
++                        time => time,
++                    };
++                    let traffic = std::mem::take(&mut *self.traffic());
+                     let tls_sent = traffic.tls_sent.len() as u64;
+                     let tls_recv = traffic.tls_recv.len() as u64;
+ 
+diff --git a/crates/tlsn/src/prover/control.rs b/crates/tlsn/src/prover/control.rs
+index 4e65c5dc0..733e8b2d5 100644
+--- a/crates/tlsn/src/prover/control.rs
++++ b/crates/tlsn/src/prover/control.rs
+@@ -1,6 +1,10 @@
+ use std::sync::Arc;
+ 
+-use crate::prover::client::DecryptState;
++use crate::{
++    Error,
++    prover::client::DecryptState,
++    proxy::{ProxySnapshot, SnapshotSource},
++};
+ 
+ /// A controller for the prover.
+ ///
+@@ -8,6 +12,8 @@ use crate::prover::client::DecryptState;
+ #[derive(Clone, Debug)]
+ pub struct ProverControl {
+     pub(crate) decrypt: Arc<DecryptState>,
++    /// Present for proxy-TLS connections.
++    pub(crate) snapshot: Option<SnapshotSource>,
+ }
+ 
+ impl ProverControl {
+@@ -24,4 +30,17 @@ impl ProverControl {
+     pub fn enable_decryption(&self, enable: bool) {
+         self.decrypt.enable_decryption(enable)
+     }
++
++    /// Takes a snapshot of a proxy-TLS connection, to prove the traffic so
++    /// far with [`Prover::attach`](crate::prover::Prover::attach) while the
++    /// connection stays open.
++    ///
++    /// The handshake must be complete and the connection quiet: everything
++    /// written has been sent and everything received has been read.
++    pub fn snapshot(&self) -> Result<ProxySnapshot, Error> {
++        self.snapshot
++            .as_ref()
++            .ok_or_else(|| Error::internal().with_msg("connection is not proxy-TLS"))?
++            .snapshot()
++    }
+ }
+diff --git a/crates/tlsn/src/prover/prove.rs b/crates/tlsn/src/prover/prove.rs
+index ca5613b48..ba953ad0b 100644
+--- a/crates/tlsn/src/prover/prove.rs
++++ b/crates/tlsn/src/prover/prove.rs
+@@ -53,6 +53,7 @@ pub(crate) async fn prove<T: Vm<Binary> + Send + Sync>(
+             &reveal_sent,
+             &commit_sent,
+             &config.no_control().0,
++            false,
+         )
+         .map_err(|e| {
+             Error::internal()
+@@ -71,6 +72,7 @@ pub(crate) async fn prove<T: Vm<Binary> + Send + Sync>(
+             &reveal_recv,
+             &commit_recv,
+             &config.no_control().1,
++            config.reveal_recv_key(),
+         )
+         .map_err(|e| {
+             Error::internal()
+diff --git a/crates/tlsn/src/prover/tests/harness.rs b/crates/tlsn/src/prover/tests/harness.rs
+index 2c055ab6a..afa89f760 100644
+--- a/crates/tlsn/src/prover/tests/harness.rs
++++ b/crates/tlsn/src/prover/tests/harness.rs
+@@ -109,7 +109,10 @@ impl TestProver {
+         let state = state::Connected {
+             server_name: ServerName::Dns("example.com".try_into().unwrap()),
+             tls_client,
+-            control: ProverControl { decrypt },
++            control: ProverControl {
++                decrypt,
++                snapshot: None,
++            },
+             client_io,
+             output: None,
+             server_socket,
+diff --git a/crates/tlsn/src/proxy.rs b/crates/tlsn/src/proxy.rs
+index a5ff44d67..705781045 100644
+--- a/crates/tlsn/src/proxy.rs
++++ b/crates/tlsn/src/proxy.rs
+@@ -11,7 +11,19 @@ use mpz_memory_core::{
+     binary::{Binary, U8},
+ };
+ use mpz_vm_core::Vm;
+-use std::{io, pin::Pin, task::Poll};
++use std::{
++    io,
++    pin::Pin,
++    sync::{
++        Arc, Mutex,
++        atomic::{AtomicU64, Ordering},
++    },
++    task::Poll,
++};
++use tlsn_core::connection::ServerName;
++use tokio::sync::Notify;
++
++use crate::prover::client::MasterSecretLog;
+ 
+ mod prover;
+ pub(crate) use prover::ProxyProver;
+@@ -124,31 +136,219 @@ pub(crate) struct TlsBytes {
+     pub(crate) app_recv: Vec<u8>,
+ }
+ 
+-/// An [`AsyncRead`] adapter that records all bytes read into a buffer.
++/// TLS record type of application data.
++const APPLICATION_DATA: u8 = 23;
++
++/// Bytes an AES-GCM record adds to its plaintext in TLS 1.2: the explicit
++/// nonce and the tag.
++const GCM_RECORD_OVERHEAD: usize = 8 + 16;
++
++/// Returns the length of the longest prefix of the raw TLS stream `tls` that
++/// consists of whole records carrying exactly `app_len` bytes of application
++/// data, if there is one.
++fn record_prefix(tls: &[u8], app_len: usize) -> Option<usize> {
++    let (mut pos, mut app, mut prefix) = (0, 0, None);
++    while let Some(header) = tls.get(pos..pos + 5) {
++        let len = usize::from(u16::from_be_bytes([header[3], header[4]]));
++        if pos + 5 + len > tls.len() {
++            break;
++        }
++        if header[0] == APPLICATION_DATA {
++            app += len.checked_sub(GCM_RECORD_OVERHEAD)?;
++        }
++        if app > app_len {
++            break;
++        }
++        pos += 5 + len;
++        if app == app_len {
++            prefix = Some(pos);
++        }
++    }
++    prefix
++}
++
++/// A prover's view of a proxy-TLS connection at one moment: everything
++/// needed to prove the traffic so far while the connection stays open.
++#[derive(Clone)]
++pub struct ProxySnapshot {
++    pub(crate) ms: Vec<u8>,
++    pub(crate) time: u64,
++    pub(crate) traffic: TlsBytes,
++    pub(crate) server_name: ServerName,
++}
++
++opaque_debug::implement!(ProxySnapshot);
++
++impl ProxySnapshot {
++    /// Number of application bytes sent so far.
++    pub fn len_sent(&self) -> usize {
++        self.traffic.app_sent.len()
++    }
++
++    /// Number of application bytes received so far.
++    pub fn len_received(&self) -> usize {
++        self.traffic.app_recv.len()
++    }
++}
++
++/// Where a proxy-TLS client records what a snapshot needs.
++#[derive(Clone, Debug)]
++pub(crate) struct SnapshotSource {
++    pub(crate) traffic: Arc<Mutex<TlsBytes>>,
++    pub(crate) ms: Arc<MasterSecretLog>,
++    /// Seconds since the epoch when the handshake completed, or zero.
++    pub(crate) time: Arc<AtomicU64>,
++    pub(crate) server_name: ServerName,
++}
++
++impl SnapshotSource {
++    /// Takes a snapshot, which requires the handshake to be complete and
++    /// the connection to be quiet: everything written has been sent and
++    /// everything received has been read.
++    pub(crate) fn snapshot(&self) -> Result<ProxySnapshot, TlsnError> {
++        let ms = self.ms.peek();
++        let time = self.time.load(Ordering::Acquire);
++        if ms.is_empty() || time == 0 {
++            return Err(TlsnError::internal().with_msg("TLS handshake is not complete"));
++        }
++
++        let mut traffic = self.traffic.lock().expect("lock is not poisoned").clone();
++        let (Some(sent), Some(recv)) = (
++            record_prefix(&traffic.tls_sent, traffic.app_sent.len()),
++            record_prefix(&traffic.tls_recv, traffic.app_recv.len()),
++        ) else {
++            return Err(TlsnError::internal().with_msg("connection has data in flight"));
++        };
++        traffic.tls_sent.truncate(sent);
++        traffic.tls_recv.truncate(recv);
++
++        Ok(ProxySnapshot {
++            ms,
++            time,
++            traffic,
++            server_name: self.server_name.clone(),
++        })
++    }
++}
++
++/// Which way recorded traffic flowed.
++#[derive(Clone, Copy, Debug)]
++pub(crate) enum TapDirection {
++    /// From the prover to the server.
++    Sent,
++    /// From the server to the prover.
++    Recv,
++}
++
++#[derive(Debug, Default)]
++struct Tapped {
++    sent: Vec<u8>,
++    recv: Vec<u8>,
++    first_sent: Option<u64>,
++}
++
++#[derive(Debug, Default)]
++struct TapShared {
++    tapped: Mutex<Tapped>,
++    changed: Notify,
++}
++
++/// How much of a [`TrafficTap`]'s raw TLS traffic a commitment covers.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct TapPrefix {
++    /// Bytes from the prover to the server.
++    pub sent: usize,
++    /// Bytes from the server to the prover.
++    pub received: usize,
++    /// Bytes the prover had sent beyond the prefix when it was taken. A
++    /// prover which has finished its request has none.
++    pub sent_beyond: usize,
++}
++
++/// The raw TLS traffic a proxy verifier has forwarded so far.
+ ///
+-/// Used to intercept TLS traffic as it flows through the proxy,
+-/// extending the parser's transcript buffers on the fly.
+-pub(crate) struct InspectReader<'a, R> {
++/// It lets other verifiers of the same session check proofs about a prefix
++/// of the traffic while the connection stays open.
++#[derive(Clone, Debug, Default)]
++pub struct TrafficTap(Arc<TapShared>);
++
++impl TrafficTap {
++    /// Returns the number of bytes forwarded from the prover to the server.
++    pub fn len_sent(&self) -> usize {
++        self.0.tapped.lock().expect("lock is not poisoned").sent.len()
++    }
++
++    /// Returns the number of bytes forwarded from the server to the prover.
++    pub fn len_received(&self) -> usize {
++        self.0.tapped.lock().expect("lock is not poisoned").recv.len()
++    }
++
++    fn record(&self, direction: TapDirection, bytes: &[u8]) {
++        if bytes.is_empty() {
++            return;
++        }
++        let mut tapped = self.0.tapped.lock().expect("lock is not poisoned");
++        match direction {
++            TapDirection::Sent => {
++                if tapped.first_sent.is_none() {
++                    let now = web_time::UNIX_EPOCH
++                        .elapsed()
++                        .expect("system time is available")
++                        .as_secs();
++                    tapped.first_sent = Some(now);
++                }
++                tapped.sent.extend_from_slice(bytes);
++            }
++            TapDirection::Recv => tapped.recv.extend_from_slice(bytes),
++        }
++        drop(tapped);
++        self.0.changed.notify_waiters();
++    }
++
++    /// Returns everything recorded and the time the prover first sent data.
++    pub(crate) fn all(&self) -> (Vec<u8>, Vec<u8>, Option<u64>) {
++        let tapped = self.0.tapped.lock().expect("lock is not poisoned");
++        (tapped.sent.clone(), tapped.recv.clone(), tapped.first_sent)
++    }
++
++    /// Waits until at least `sent` and `recv` bytes have been forwarded, then
++    /// returns those prefixes, the time the prover first sent data, and how
++    /// many bytes the prover has sent beyond the prefix.
++    pub(crate) async fn prefix(&self, sent: usize, recv: usize) -> (Vec<u8>, Vec<u8>, u64, usize) {
++        loop {
++            let changed = self.0.changed.notified();
++            {
++                let tapped = self.0.tapped.lock().expect("lock is not poisoned");
++                if let (Some(prefix), Some(recv), Some(time)) =
++                    (tapped.sent.get(..sent), tapped.recv.get(..recv), tapped.first_sent)
++                {
++                    return (prefix.to_vec(), recv.to_vec(), time, tapped.sent.len() - sent);
++                }
++            }
++            changed.await;
++        }
++    }
++}
++
++/// An [`AsyncRead`] adapter that records all bytes read into a
++/// [`TrafficTap`].
++pub(crate) struct InspectReader<R> {
+     inner: R,
+-    buf: &'a mut Vec<u8>,
+-    first_read: Option<u64>,
++    tap: TrafficTap,
++    direction: TapDirection,
+ }
+ 
+-impl<'a, R> InspectReader<'a, R> {
+-    pub(crate) fn new(inner: R, buf: &'a mut Vec<u8>) -> Self {
++impl<R> InspectReader<R> {
++    pub(crate) fn new(inner: R, tap: TrafficTap, direction: TapDirection) -> Self {
+         Self {
+             inner,
+-            buf,
+-            first_read: None,
++            tap,
++            direction,
+         }
+     }
+-
+-    pub(crate) fn first_read(&self) -> Option<u64> {
+-        self.first_read
+-    }
+ }
+ 
+-impl<R: AsyncRead + Unpin> AsyncRead for InspectReader<'_, R> {
++impl<R: AsyncRead + Unpin> AsyncRead for InspectReader<R> {
+     fn poll_read(
+         self: Pin<&mut Self>,
+         cx: &mut std::task::Context<'_>,
+@@ -156,14 +356,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for InspectReader<'_, R> {
+     ) -> Poll<io::Result<usize>> {
+         let this = self.get_mut();
+         let n = ready!(Pin::new(&mut this.inner).poll_read(cx, buf))?;
+-        if this.first_read.is_none() && n > 0 {
+-            let now = web_time::UNIX_EPOCH
+-                .elapsed()
+-                .expect("system time is available")
+-                .as_secs();
+-            this.first_read = Some(now);
+-        }
+-        this.buf.extend_from_slice(&buf[..n]);
++        this.tap.record(this.direction, &buf[..n]);
+         Poll::Ready(Ok(n))
+     }
+ }
+diff --git a/crates/tlsn/src/transcript_internal/auth.rs b/crates/tlsn/src/transcript_internal/auth.rs
+index d401ac0d6..602ba266d 100644
+--- a/crates/tlsn/src/transcript_internal/auth.rs
++++ b/crates/tlsn/src/transcript_internal/auth.rs
+@@ -38,8 +38,9 @@ pub(crate) fn prove_plaintext<'a>(
+     reveal: &RangeSet<usize>,
+     commit: &RangeSet<usize>,
+     no_control: &RangeSet<usize>,
++    reveal_key: bool,
+ ) -> Result<ReferenceMap, PlaintextAuthError> {
+-    let is_reveal_all = reveal == (0..plaintext.len());
++    let is_reveal_all = reveal_key || reveal == (0..plaintext.len());
+ 
+     let alloc_ranges = if is_reveal_all {
+         commit.clone()
+@@ -110,8 +111,9 @@ pub(crate) fn verify_plaintext<'a>(
+     reveal: &RangeSet<usize>,
+     commit: &RangeSet<usize>,
+     no_control: &RangeSet<usize>,
++    reveal_key: bool,
+ ) -> Result<(ReferenceMap, PlaintextProof<'a>), PlaintextAuthError> {
+-    let is_reveal_all = reveal == (0..plaintext.len());
++    let is_reveal_all = reveal_key || reveal == (0..plaintext.len());
+ 
+     let alloc_ranges = if is_reveal_all {
+         commit.clone()
+@@ -134,13 +136,18 @@ pub(crate) fn verify_plaintext<'a>(
+         .into());
+     }
+ 
+-    // Fully revealed plaintext is checked directly.
+-    if is_reveal_all
+-        && no_control
++    // Plaintext authenticated with the key is checked directly, which needs
++    // the ranges in question to be revealed.
++    if is_reveal_all {
++        if !no_control.is_subset(reveal) {
++            return Err(ErrorRepr::ControlCharacter.into());
++        }
++        if no_control
+             .iter()
+             .any(|range| plaintext[range].iter().any(|byte| *byte < 0x20))
+-    {
+-        return Err(ErrorRepr::ControlCharacter.into());
++        {
++            return Err(ErrorRepr::ControlCharacter.into());
++        }
+     }
+ 
+     let plaintext_refs = alloc_plaintext(vm, &alloc_ranges)?;
+@@ -163,6 +170,7 @@ pub(crate) fn verify_plaintext<'a>(
+             records,
+             plaintext,
+             ciphertext,
++            revealed: reveal.clone(),
+         })
+     } else {
+         let private = commit.union(no_control).difference(reveal).into_set();
+@@ -541,6 +549,7 @@ impl<'a> PlaintextProof<'a> {
+                 records,
+                 plaintext,
+                 ciphertext,
++                revealed,
+             } => {
+                 let key = key
+                     .try_recv()
+@@ -551,7 +560,7 @@ impl<'a> PlaintextProof<'a> {
+                     .map_err(PlaintextAuthError::vm)?
+                     .ok_or(ErrorRepr::MissingDecoding)?;
+ 
+-                verify_plaintext_with_key(key, iv, &records, plaintext, ciphertext)?;
++                verify_plaintext_with_key(key, iv, &records, plaintext, ciphertext, &revealed)?;
+             }
+             ProofInner::WithZk {
+                 ciphertexts,
+@@ -592,6 +601,8 @@ enum ProofInner<'a> {
+         records: Vec<RecordParams>,
+         plaintext: &'a [u8],
+         ciphertext: &'a [u8],
++        /// The ranges of `plaintext` the prover revealed.
++        revealed: RangeSet<usize>,
+     },
+     WithZk {
+         // (expected, actual)
+@@ -614,26 +625,36 @@ fn aes_ctr_apply_keystream(key: &[u8; 16], iv: &[u8; 4], explicit_nonce: &[u8],
+     cipher.apply_keystream(input);
+ }
+ 
++/// Checks the `revealed` ranges of `plaintext` against `ciphertext`
++/// decrypted with the key.
+ fn verify_plaintext_with_key<'a>(
+     key: [u8; 16],
+     iv: [u8; 4],
+     records: impl IntoIterator<Item = &'a RecordParams>,
+     plaintext: &[u8],
+     ciphertext: &[u8],
++    revealed: &RangeSet<usize>,
+ ) -> Result<(), PlaintextAuthError> {
+     let mut pos = 0;
+     let mut text = Vec::new();
+     for record in records {
+-        text.clear();
+-        text.extend_from_slice(&plaintext[pos..pos + record.len]);
++        let range = pos..pos + record.len;
++        pos = range.end;
++        if range.is_disjoint(revealed) {
++            continue;
++        }
+ 
++        // The keystream is its own inverse.
++        text.clear();
++        text.extend_from_slice(&ciphertext[range.clone()]);
+         aes_ctr_apply_keystream(&key, &iv, &record.explicit_nonce, &mut text);
+ 
+-        if text != ciphertext[pos..pos + record.len] {
+-            return Err(PlaintextAuthError(ErrorRepr::InvalidPlaintext));
++        for revealed in range.clone().intersection(revealed) {
++            let within = revealed.start - range.start..revealed.end - range.start;
++            if text[within] != plaintext[revealed] {
++                return Err(PlaintextAuthError(ErrorRepr::InvalidPlaintext));
++            }
+         }
+-
+-        pos += record.len;
+     }
+ 
+     Ok(())
+@@ -834,6 +855,33 @@ mod tests {
+         );
+     }
+ 
++    /// With the key, only the revealed ranges are compared, so a proof may
++    /// reveal a suffix of the received data.
++    #[test]
++    fn test_verify_plaintext_with_key_checks_only_revealed_ranges() {
++        let (key, iv) = ([7u8; 16], [9u8; 4]);
++        let records = [
++            RecordParams { explicit_nonce: vec![1; 8], len: 20 },
++            RecordParams { explicit_nonce: vec![2; 8], len: 12 },
++        ];
++        let plaintext: Vec<u8> = (0..32).collect();
++        let mut ciphertext = plaintext.clone();
++        aes_ctr_apply_keystream(&key, &iv, &records[0].explicit_nonce, &mut ciphertext[..20]);
++        aes_ctr_apply_keystream(&key, &iv, &records[1].explicit_nonce, &mut ciphertext[20..]);
++
++        // What the verifier holds when only 15..32 was revealed.
++        let mut partial = plaintext.clone();
++        partial[..15].fill(0);
++        let suffix = RangeSet::from(15..32);
++        assert!(verify_plaintext_with_key(key, iv, &records, &partial, &ciphertext, &suffix).is_ok());
++
++        // The unrevealed part is not compared; a revealed byte is.
++        let everything = RangeSet::from(0..32);
++        assert!(verify_plaintext_with_key(key, iv, &records, &partial, &ciphertext, &everything).is_err());
++        partial[25] ^= 1;
++        assert!(verify_plaintext_with_key(key, iv, &records, &partial, &ciphertext, &suffix).is_err());
++    }
++
+     #[test]
+     fn test_verify_plaintext_checks_no_control_when_fully_revealed() {
+         let verify = |plaintext: &[u8]| {
+@@ -849,6 +897,7 @@ mod tests {
+                 &RangeSet::from(0..plaintext.len()),
+                 &RangeSet::default(),
+                 &RangeSet::from(2..6),
++                false,
+             )
+             .map(|_| ())
+         };
+@@ -974,7 +1023,8 @@ mod tests {
+             plaintext.first_mut().map(|pt| *pt ^= 1);
+         }
+ 
+-        match verify_plaintext_with_key(key, iv, &records, &plaintext, &ciphertext) {
++        let revealed = RangeSet::from(0..plaintext.len());
++        match verify_plaintext_with_key(key, iv, &records, &plaintext, &ciphertext, &revealed) {
+             Ok(_) if tamper && !plaintext.is_empty() => panic!("should be invalid"),
+             Err(e) if !tamper => panic!("unexpected error: {:?}", e),
+             _ => {}
+@@ -1007,6 +1057,7 @@ mod tests {
+             &RangeSet::from(reveal),
+             &RangeSet::from(commit),
+             &RangeSet::default(),
++            false,
+         ) {
+             Ok(_) => panic!("verifier accepted an out-of-bounds commitment range"),
+             Err(err) => err,
+@@ -1032,6 +1083,7 @@ mod tests {
+             &RangeSet::from(0..8),
+             &RangeSet::from(0..8),
+             &RangeSet::default(),
++            false,
+         );
+ 
+         assert!(result.is_ok());
+diff --git a/crates/tlsn/src/verifier.rs b/crates/tlsn/src/verifier.rs
+index 9db944012..28b65ce57 100644
+--- a/crates/tlsn/src/verifier.rs
++++ b/crates/tlsn/src/verifier.rs
+@@ -5,12 +5,14 @@ mod verify;
+ 
+ pub use tlsn_core::{VerifierOutput, webpki::ServerCertVerifier};
+ 
++use mpc_tls::SessionKeys;
+ use crate::{
+     Error, Mpc, PROXY_STREAM_PREFIX, Proxy, Result,
+     deps::{VerifierDeps, VerifierMpcDeps, VerifierProxyDeps},
+     future::{Aux, poll_with},
+     msg::{ProveRequestMsg, ProxyFinished, Response, TlsCommitRequestMsg},
+-    proxy::InspectReader,
++    deps::VerifierZk,
++    proxy::{InspectReader, ProxyVerifier, TapDirection, TapPrefix, TrafficTap},
+     session::SessionClosure,
+     tag::verify_tags,
+     transport::is_transport_gone,
+@@ -377,10 +379,11 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+         let VerifierDeps::Proxy(deps) = self.state.deps else {
+             unreachable!("proxy-tls received incorrect deps")
+         };
+-        let VerifierProxyDeps { mut verifier, id } = deps;
+-
+-        let mut sent_buf = Vec::new();
+-        let mut recv_buf = Vec::new();
++        let VerifierProxyDeps {
++            mut verifier,
++            id,
++            tap,
++        } = deps;
+ 
+         info!("starting Proxy-TLS");
+ 
+@@ -393,11 +396,13 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+         let (server_read, server_write) = server_socket.split();
+ 
+         let finished_msg;
+-        let conn_time = {
++        {
+             let mut prover_write = prover_write;
+             let mut server_write = server_write;
+-            let mut prover_reader = InspectReader::new(prover_read, &mut sent_buf);
+-            let mut server_reader = InspectReader::new(server_read, &mut recv_buf);
++            let mut prover_reader =
++                InspectReader::new(prover_read, tap.clone(), TapDirection::Sent);
++            let mut server_reader =
++                InspectReader::new(server_read, tap.clone(), TapDirection::Recv);
+ 
+             let p2s: ProxyForwardFuture<'_> = Box::pin(async {
+                 // The server can close its read side while the prover is still
+@@ -510,60 +515,20 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+                     }
+                 }
+             }
+-
+-            prover_reader.first_read()
+-        };
++        }
+ 
+         info!("proxying TLS traffic finished");
+ 
++        let (sent_buf, recv_buf, conn_time) = tap.all();
++
+         // If the prover goes away before forwarding a single byte there is no
+         // connection time and no transcript to verify. This is a peer failure,
+         // not an internal invariant, so surface it as an error.
+         let conn_time = conn_time
+             .ok_or_else(|| Error::io().with_msg("prover closed before sending any data"))?;
+ 
+-        let (mut ctx, mut vm, output, cf_vd_check, sf_vd_check) = verifier
+-            .finalize(&sent_buf, &recv_buf, conn_time, &finished_msg)
+-            .await?;
+-
+-        let keys = output.keys;
+-        let tls_transcript = output.tls_transcript;
+-
+-        // Prepare for the prover to prove tag verification of the received
+-        // records.
+-        let tag_proof = verify_tags(
+-            &mut vm,
+-            (keys.server_write_key, keys.server_write_iv),
+-            keys.server_write_mac_key,
+-            tls_transcript.version(),
+-            tls_transcript.recv().to_vec(),
+-        )
+-        .map_err(|e| {
+-            Error::internal()
+-                .with_msg("tag verification setup failed")
+-                .with_source(e)
+-        })?;
+-
+-        vm.execute_all(&mut ctx).await.map_err(|e| {
+-            Error::internal()
+-                .with_msg("tag verification zk execution failed")
+-                .with_source(e)
+-        })?;
+-
+-        // Verify the tags.
+-        // After the verification, the entire TLS trancript becomes
+-        // authenticated from the verifier's perspective.
+-        tag_proof.verify().map_err(|e| {
+-            Error::internal()
+-                .with_msg("tag verification failed")
+-                .with_source(e)
+-        })?;
+-        debug!("verified tags successfully");
+-
+-        // Verify finished records
+-        cf_vd_check.check(&mut vm)?;
+-        sf_vd_check.check(&mut vm)?;
+-        debug!("verified finished records successfully");
++        let (ctx, vm, keys, tls_transcript) =
++            commit_recorded(verifier, &sent_buf, &recv_buf, conn_time, &finished_msg, 0).await?;
+ 
+         Ok(Verifier {
+             config: self.config,
+@@ -578,6 +543,134 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+             },
+         })
+     }
++
++    /// Returns the tap recording the traffic this verifier forwards.
++    ///
++    /// Take it before calling [`run`](Self::run); other verifiers of the
++    /// session can then [`attach`](Self::attach) to it.
++    pub fn tap(&self) -> TrafficTap {
++        let VerifierDeps::Proxy(deps) = &self.state.deps else {
++            unreachable!("proxy-tls received incorrect deps")
++        };
++        deps.tap.clone()
++    }
++
++    /// Commits to a prefix of the traffic recorded on `tap` by another
++    /// verifier of this session, without waiting for that connection to
++    /// close.
++    ///
++    /// The prover chooses the prefix by calling
++    /// [`Prover::attach`](crate::prover::Prover::attach) with a snapshot of
++    /// the same connection. The caller decides whether a prefix is
++    /// acceptable, for instance by requiring that it covers everything the
++    /// tap has seen the prover send.
++    ///
++    /// `tags_from` is the number of received records whose tags an earlier
++    /// commitment to this connection already verified; the prover must pass
++    /// the same number.
++    #[instrument(parent = &self.span, level = "info", skip_all, err)]
++    pub async fn attach(
++        self,
++        tap: &TrafficTap,
++        tags_from: usize,
++    ) -> Result<(Verifier<state::Committed>, TapPrefix)> {
++        let VerifierDeps::Proxy(deps) = self.state.deps else {
++            unreachable!("proxy-tls received incorrect deps")
++        };
++        let VerifierProxyDeps { mut verifier, .. } = deps;
++
++        let finished = verifier.wait_finished().await?;
++        let (sent, recv, conn_time, sent_beyond) = tap
++            .prefix(finished.tls_sent as usize, finished.tls_recv as usize)
++            .await;
++        let (ctx, vm, keys, tls_transcript) =
++            commit_recorded(verifier, &sent, &recv, conn_time, &finished, tags_from).await?;
++        let prefix = TapPrefix {
++            sent: sent.len(),
++            received: recv.len(),
++            sent_beyond,
++        };
++
++        Ok((
++            Verifier {
++                config: self.config,
++                span: self.span,
++                ctx: Some(ctx),
++                mux_handle: self.mux_handle,
++                closure: self.closure,
++                state: state::Committed {
++                    vm,
++                    keys,
++                    tls_transcript,
++                },
++            },
++            prefix,
++        ))
++    }
++}
++
++/// Commits to recorded proxy-TLS traffic, and checks its finished messages
++/// and the tags of its received records from index `tags_from` on against
++/// the committed keys.
++async fn commit_recorded(
++    verifier: Box<ProxyVerifier>,
++    sent: &[u8],
++    recv: &[u8],
++    conn_time: u64,
++    finished: &ProxyFinished,
++    tags_from: usize,
++) -> Result<(Context, VerifierZk, SessionKeys, TlsTranscript)> {
++    let (mut ctx, mut vm, output, cf_vd_check, sf_vd_check) = verifier
++        .finalize(sent, recv, conn_time, finished)
++        .await?;
++
++    let keys = output.keys;
++    let tls_transcript = output.tls_transcript;
++
++    // Prepare for the prover to prove tag verification of the received
++    // records.
++    let tag_proof = verify_tags(
++        &mut vm,
++        (keys.server_write_key, keys.server_write_iv),
++        keys.server_write_mac_key,
++        tls_transcript.version(),
++        tls_transcript
++            .recv()
++            .get(tags_from..)
++            .ok_or_else(|| {
++                Error::internal()
++                    .with_msg("more record tags were verified than records received")
++            })?
++            .to_vec(),
++    )
++    .map_err(|e| {
++        Error::internal()
++            .with_msg("tag verification setup failed")
++            .with_source(e)
++    })?;
++
++    vm.execute_all(&mut ctx).await.map_err(|e| {
++        Error::internal()
++            .with_msg("tag verification zk execution failed")
++            .with_source(e)
++    })?;
++
++    // Verify the tags.
++    // After the verification, the entire TLS trancript becomes
++    // authenticated from the verifier's perspective.
++    tag_proof.verify().map_err(|e| {
++        Error::internal()
++            .with_msg("tag verification failed")
++            .with_source(e)
++    })?;
++    debug!("verified tags successfully");
++
++    // Verify finished records
++    cf_vd_check.check(&mut vm)?;
++    sf_vd_check.check(&mut vm)?;
++    debug!("verified finished records successfully");
++
++    Ok((ctx, vm, keys, tls_transcript))
+ }
+ 
+ impl Verifier<state::Committed> {
+diff --git a/crates/tlsn/src/verifier/verify.rs b/crates/tlsn/src/verifier/verify.rs
+index f28830e38..07e12431c 100644
+--- a/crates/tlsn/src/verifier/verify.rs
++++ b/crates/tlsn/src/verifier/verify.rs
+@@ -124,6 +124,7 @@ pub(crate) async fn verify<T: Vm<Binary> + Send + Sync>(
+         transcript.sent_authed(),
+         &commit_sent,
+         &request.no_control().0,
++        false,
+     )
+     .map_err(|e| {
+         Error::internal()
+@@ -143,6 +144,7 @@ pub(crate) async fn verify<T: Vm<Binary> + Send + Sync>(
+         transcript.received_authed(),
+         &commit_recv,
+         &request.no_control().1,
++        request.reveal_recv_key(),
+     )
+     .map_err(|e| {
+         Error::internal()
+-- 
+2.56.0
+

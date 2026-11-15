@@ -1,0 +1,275 @@
+From 32bef845a1350918205a4cff6c2e99fef1be3ce0 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 21:43:45 +0100
+Subject: [PATCH] Mark the moment a request reached the server by its
+ application data
+
+The mark is taken when the last application data of a prefix has been
+written to the server, not when it was read from the prover, and is not
+moved by other records such as the alert answering a close. It is given
+as a position in the received stream, so that it holds whatever the
+prefix covers, and the tap tells how much application data had begun to
+arrive by a position.
+---
+ crates/tlsn/src/proxy.rs    | 148 ++++++++++++++++++++++++++++++------
+ crates/tlsn/src/verifier.rs |   4 +-
+ 2 files changed, 127 insertions(+), 25 deletions(-)
+
+diff --git a/crates/tlsn/src/proxy.rs b/crates/tlsn/src/proxy.rs
+index ca7eb032b..2c72f1690 100644
+--- a/crates/tlsn/src/proxy.rs
++++ b/crates/tlsn/src/proxy.rs
+@@ -2,7 +2,7 @@
+ 
+ use crate::Error as TlsnError;
+ use cipher::{Cipher, Keystream, aes::Aes128};
+-use futures::{AsyncRead, ready};
++use futures::{AsyncRead, AsyncWrite, ready};
+ use hmac_sha256::Prf;
+ use mpc_tls::SessionKeys;
+ use mpz_core::bitvec::BitVec;
+@@ -245,9 +245,11 @@ struct Tapped {
+     sent: Vec<u8>,
+     recv: Vec<u8>,
+     first_sent: Option<u64>,
+-    /// For each piece of data recorded from the prover, the length of
+-    /// `sent` once it was added and the length of `recv` at that time.
+-    /// Pieces which every taken prefix has passed are dropped.
++    /// How much of `sent` has been written to the server.
++    written: usize,
++    /// For each write to the server, `written` once it was done and the
++    /// length of `recv` at that time. Writes which every taken prefix has
++    /// passed are dropped.
+     sends: Vec<(usize, usize)>,
+ }
+ 
+@@ -267,6 +269,20 @@ fn whole_records(mut tls: &[u8]) -> (Vec<(u8, usize)>, Option<u8>) {
+     (records, None)
+ }
+ 
++/// Where the last whole record of application data in the raw TLS stream
++/// `tls` ends, if there is one.
++fn last_application_data_end(tls: &[u8]) -> Option<usize> {
++    let mut end = 0;
++    let mut last = None;
++    for (typ, len) in whole_records(tls).0 {
++        end += len;
++        if typ == APPLICATION_DATA {
++            last = Some(end);
++        }
++    }
++    last
++}
++
+ /// Bytes of application data in the records of the raw TLS stream `tls`
+ /// which start before offset `before`.
+ fn application_data_started_before(tls: &[u8], before: usize) -> usize {
+@@ -300,10 +316,12 @@ pub struct TapPrefix {
+     /// Bytes the prover had sent beyond the prefix when it was taken. A
+     /// prover which has finished its request has none.
+     pub sent_beyond: usize,
+-    /// Bytes of received application data in records which had begun to
+-    /// arrive when the last of the prefix's sent data was forwarded. The
+-    /// server sent them without having seen that data.
+-    pub received_before_last_send: usize,
++    /// How many bytes had been forwarded from the server when the last
++    /// application data of the prefix had been written to it, whether or
++    /// not the prefix covers them. The server sent them without having seen
++    /// that data. Records which are not application data, such as the alert
++    /// answering a server's close, do not move this.
++    pub received_at_last_send: usize,
+ }
+ 
+ /// The raw TLS traffic a proxy verifier has forwarded so far.
+@@ -339,8 +357,6 @@ impl TrafficTap {
+                     tapped.first_sent = Some(now);
+                 }
+                 tapped.sent.extend_from_slice(bytes);
+-                let mark = (tapped.sent.len(), tapped.recv.len());
+-                tapped.sends.push(mark);
+             }
+             TapDirection::Recv => tapped.recv.extend_from_slice(bytes),
+         }
+@@ -348,6 +364,15 @@ impl TrafficTap {
+         self.0.changed.notify_waiters();
+     }
+ 
++    /// Notes that the next `len` bytes recorded from the prover have been
++    /// written to the server.
++    fn wrote(&self, len: usize) {
++        let mut tapped = self.0.tapped.lock().expect("lock is not poisoned");
++        tapped.written += len;
++        let mark = (tapped.written, tapped.recv.len());
++        tapped.sends.push(mark);
++    }
++
+     /// Returns everything recorded and the time the prover first sent data.
+     pub(crate) fn all(&self) -> (Vec<u8>, Vec<u8>, Option<u64>) {
+         let tapped = self.0.tapped.lock().expect("lock is not poisoned");
+@@ -365,14 +390,17 @@ impl TrafficTap {
+                 if let (Some(prefix), Some(received), Some(time)) =
+                     (tapped.sent.get(..sent), tapped.recv.get(..recv), tapped.first_sent)
+                 {
+-                    // The piece which carried the last of the prefix.
+-                    let last = tapped.sends.partition_point(|(end, _)| *end < sent);
+-                    let received_then = tapped.sends.get(last).map_or(0, |(_, received)| *received);
++                    // The write which carried the last application data of
++                    // the prefix. If it has not been made, everything
++                    // received so far came before it.
++                    let last_data = last_application_data_end(prefix).unwrap_or(0);
++                    let last = tapped.sends.partition_point(|(end, _)| *end < last_data);
++                    let received_then = tapped.sends.get(last).map_or(tapped.recv.len(), |(_, received)| *received);
+                     let known = TapPrefix {
+                         sent,
+                         received: recv,
+                         sent_beyond: tapped.sent.len() - sent,
+-                        received_before_last_send: application_data_started_before(received, received_then),
++                        received_at_last_send: if last_data == 0 { 0 } else { received_then },
+                     };
+                     let taken = (prefix.to_vec(), received.to_vec(), time, known);
+                     tapped.sends.drain(..last);
+@@ -383,6 +411,14 @@ impl TrafficTap {
+         }
+     }
+ 
++    /// Returns the bytes of application data in the records from the server
++    /// which had begun to be forwarded when `received` bytes had been, as
++    /// far as those records have arrived whole.
++    pub fn application_data_started_before(&self, received: usize) -> usize {
++        let tapped = self.0.tapped.lock().expect("lock is not poisoned");
++        application_data_started_before(&tapped.recv, received)
++    }
++
+     /// Returns whether the prover has sent application data beyond the first
+     /// `sent` bytes it sent. Other records do not count, such as the alert
+     /// with which a TLS client answers the server closing the connection.
+@@ -401,6 +437,40 @@ pub(crate) struct InspectReader<R> {
+     direction: TapDirection,
+ }
+ 
++/// An [`AsyncWrite`] adapter for the connection to the server, which tells
++/// a [`TrafficTap`] when the prover's bytes have been written to it.
++pub(crate) struct InspectWriter<W> {
++    inner: W,
++    tap: TrafficTap,
++}
++
++impl<W> InspectWriter<W> {
++    pub(crate) fn new(inner: W, tap: TrafficTap) -> Self {
++        Self { inner, tap }
++    }
++}
++
++impl<W: AsyncWrite + Unpin> AsyncWrite for InspectWriter<W> {
++    fn poll_write(
++        self: Pin<&mut Self>,
++        cx: &mut std::task::Context<'_>,
++        buf: &[u8],
++    ) -> Poll<io::Result<usize>> {
++        let this = self.get_mut();
++        let n = ready!(Pin::new(&mut this.inner).poll_write(cx, buf))?;
++        this.tap.wrote(n);
++        Poll::Ready(Ok(n))
++    }
++
++    fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
++        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
++    }
++
++    fn poll_close(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
++        Pin::new(&mut self.get_mut().inner).poll_close(cx)
++    }
++}
++
+ impl<R> InspectReader<R> {
+     pub(crate) fn new(inner: R, tap: TrafficTap, direction: TapDirection) -> Self {
+         Self {
+@@ -607,22 +677,54 @@ mod tests {
+         assert!(tap.sent_application_data_beyond(request.len()));
+     }
+ 
++    /// Records `bytes` from the prover and their write to the server.
++    fn forward(tap: &TrafficTap, bytes: &[u8]) {
++        tap.record(TapDirection::Sent, bytes);
++        tap.wrote(bytes.len());
++    }
++
+     #[tokio::test]
+-    async fn test_prefix_tells_what_was_received_before_its_last_send() {
++    async fn test_prefix_tells_what_was_received_at_its_last_send_of_application_data() {
+         let tap = TrafficTap::default();
+         let (first, second) = (app_record(50), app_record(60));
+         let (stale, fresh) = (app_record(11), app_record(13));
+ 
+-        tap.record(TapDirection::Sent, &first);
++        forward(&tap, &first);
+         tap.record(TapDirection::Recv, &stale);
+-        tap.record(TapDirection::Sent, &second);
++        forward(&tap, &second);
+         tap.record(TapDirection::Recv, &fresh);
++        // The answer to a server's close does not move the mark.
++        forward(&tap, &record(ALERT, 26));
++
++        let (.., prefix) = tap.prefix(first.len(), 0).await;
++        assert_eq!(prefix.received_at_last_send, 0);
++
++        // Whatever of the received data the prefix covers.
++        let sent = first.len() + second.len() + 31;
++        for received in [0, stale.len(), stale.len() + fresh.len()] {
++            let (.., prefix) = tap.prefix(sent, received).await;
++            assert_eq!(prefix.received_at_last_send, stale.len());
++            assert_eq!(prefix.sent_beyond, 0);
++        }
++        assert_eq!(tap.application_data_started_before(stale.len()), 11);
++        assert_eq!(tap.application_data_started_before(stale.len() + 1), 24);
++    }
+ 
+-        let received = stale.len() + fresh.len();
+-        let (.., prefix) = tap.prefix(first.len(), stale.len()).await;
+-        assert_eq!(prefix.received_before_last_send, 0);
+-        let (.., prefix) = tap.prefix(first.len() + second.len(), received).await;
+-        assert_eq!(prefix.received_before_last_send, 11);
+-        assert_eq!(prefix.sent_beyond, 0);
++    #[tokio::test]
++    async fn test_what_arrives_before_a_request_is_written_came_before_it() {
++        let tap = TrafficTap::default();
++        let (request, early, late) = (app_record(50), app_record(11), app_record(13));
++
++        // The request has been read from the prover, and the server sends
++        // something before it is written to the server.
++        tap.record(TapDirection::Sent, &request);
++        tap.record(TapDirection::Recv, &early);
++        let (.., prefix) = tap.prefix(request.len(), early.len()).await;
++        assert_eq!(prefix.received_at_last_send, early.len());
++
++        tap.wrote(request.len());
++        tap.record(TapDirection::Recv, &late);
++        let (.., prefix) = tap.prefix(request.len(), early.len() + late.len()).await;
++        assert_eq!(prefix.received_at_last_send, early.len());
+     }
+ }
+diff --git a/crates/tlsn/src/verifier.rs b/crates/tlsn/src/verifier.rs
+index 1a3ff0895..1b2e88b6d 100644
+--- a/crates/tlsn/src/verifier.rs
++++ b/crates/tlsn/src/verifier.rs
+@@ -12,7 +12,7 @@ use crate::{
+     future::{Aux, poll_with},
+     msg::{ProveRequestMsg, ProxyFinished, Response, TlsCommitRequestMsg},
+     deps::VerifierZk,
+-    proxy::{InspectReader, ProxyVerifier, TapDirection, TapPrefix, TrafficTap},
++    proxy::{InspectReader, InspectWriter, ProxyVerifier, TapDirection, TapPrefix, TrafficTap},
+     session::SessionClosure,
+     tag::verify_tags,
+     transport::is_transport_gone,
+@@ -431,7 +431,7 @@ impl Verifier<state::CommitAccepted<Proxy>> {
+         let finished_msg;
+         {
+             let mut prover_write = prover_write;
+-            let mut server_write = server_write;
++            let mut server_write = InspectWriter::new(server_write, tap.clone());
+             let mut prover_reader =
+                 InspectReader::new(prover_read, tap.clone(), TapDirection::Sent);
+             let mut server_reader =
+-- 
+2.56.0
+

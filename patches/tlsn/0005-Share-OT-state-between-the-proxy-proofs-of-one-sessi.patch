@@ -1,0 +1,259 @@
+From 2d330b085adfb308eeb3888c9ac3a44af08010b2 Mon Sep 17 00:00:00 2001
+From: cylewitruk <cyle.witruk@outlook.com>
+Date: Sat, 14 Nov 2026 17:07:47 +0100
+Subject: [PATCH 5/6] Share OT state between the proxy proofs of one session
+
+---
+ crates/tlsn/src/deps.rs          | 37 ++++++++++++++++++++---
+ crates/tlsn/src/deps/prover.rs   | 39 ++++++++++++++++--------
+ crates/tlsn/src/deps/verifier.rs | 52 +++++++++++++++++++++-----------
+ crates/tlsn/src/prover.rs        |  2 +-
+ crates/tlsn/src/session.rs       |  4 +++
+ crates/tlsn/src/verifier.rs      |  2 +-
+ 6 files changed, 100 insertions(+), 36 deletions(-)
+
+diff --git a/crates/tlsn/src/deps.rs b/crates/tlsn/src/deps.rs
+index e29f2d9c8..9a3a678f4 100644
+--- a/crates/tlsn/src/deps.rs
++++ b/crates/tlsn/src/deps.rs
+@@ -13,6 +13,31 @@ pub(crate) use prover::{ProverMpc, ProverMpcDeps, ProverProxyDeps, ProverZk};
+ mod verifier;
+ pub(crate) use verifier::{VerifierMpcDeps, VerifierProxyDeps, VerifierZk};
+ 
++/// OT state shared by the proxy proofs of one session.
++///
++/// The first proof bootstraps the OT extension and later proofs continue
++/// from what it left over, which avoids repeating the bootstrap. Each side
++/// holds only its own half.
++///
++/// Two requirements fall on whoever drives the session, and are not enforced
++/// here:
++///
++/// - Proofs must run one at a time, in the same order on both sides. The
++///   two sides consume the shared OT stream in step only if they do.
++/// - The state must not outlive a failed proof. It is dropped with the
++///   session, so the session must be closed on any failure.
++#[derive(Default)]
++pub(crate) struct ProxyOt {
++    prover: std::sync::Mutex<Option<prover::ProxyRcot>>,
++    verifier: std::sync::Mutex<Option<verifier::ProxyRcot>>,
++}
++
++impl std::fmt::Debug for ProxyOt {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("ProxyOt").finish_non_exhaustive()
++    }
++}
++
+ #[derive(Debug)]
+ pub(crate) enum ProverDeps {
+     Mpc(Box<ProverMpcDeps>),
+@@ -20,10 +45,12 @@ pub(crate) enum ProverDeps {
+ }
+ 
+ impl ProverDeps {
+-    pub(crate) fn new(config: TlsCommitConfig, ctx: Context) -> Self {
++    pub(crate) fn new(config: TlsCommitConfig, ctx: Context, proxy_ot: &ProxyOt) -> Self {
+         match config {
+             TlsCommitConfig::Mpc(config) => Self::Mpc(Box::new(ProverMpcDeps::new(&config, ctx))),
+-            TlsCommitConfig::Proxy(config) => Self::Proxy(ProverProxyDeps::new(&config, ctx)),
++            TlsCommitConfig::Proxy(config) => {
++                Self::Proxy(ProverProxyDeps::new(&config, ctx, &proxy_ot.prover))
++            }
+             _ => unreachable!("unknown TLS commit config variant"),
+         }
+     }
+@@ -43,10 +70,12 @@ pub(crate) enum VerifierDeps {
+ }
+ 
+ impl VerifierDeps {
+-    pub(crate) fn new(config: &TlsCommitConfig, ctx: Context) -> Self {
++    pub(crate) fn new(config: &TlsCommitConfig, ctx: Context, proxy_ot: &ProxyOt) -> Self {
+         match config {
+             TlsCommitConfig::Mpc(config) => Self::Mpc(VerifierMpcDeps::new(config, ctx)),
+-            TlsCommitConfig::Proxy(config) => Self::Proxy(VerifierProxyDeps::new(config, ctx)),
++            TlsCommitConfig::Proxy(config) => {
++                Self::Proxy(VerifierProxyDeps::new(config, ctx, &proxy_ot.verifier))
++            }
+             _ => unreachable!("unknown TLS commit config variant"),
+         }
+     }
+diff --git a/crates/tlsn/src/deps/prover.rs b/crates/tlsn/src/deps/prover.rs
+index 4c540c239..177cb64a6 100644
+--- a/crates/tlsn/src/deps/prover.rs
++++ b/crates/tlsn/src/deps/prover.rs
+@@ -18,6 +18,9 @@ use crate::{
+     proxy::ProxyProver,
+ };
+ 
++/// The prover's half of the OT state proxy proofs share.
++pub(crate) type ProxyRcot = Arc<Mutex<ferret::Receiver<kos::Receiver<co::Sender>>>>;
++
+ cfg_select! {
+     tlsn_insecure => {
+         pub(crate) type ProverMpc = mpz_ideal_vm::IdealVm;
+@@ -135,21 +138,31 @@ impl std::fmt::Debug for ProverProxyDeps {
+ 
+ impl ProverProxyDeps {
+     #[rustfmt::skip]
+-    pub(crate) fn new(_config: &ProxyTlsConfig, ctx: Context) -> Self {
++    pub(crate) fn new(
++        _config: &ProxyTlsConfig,
++        ctx: Context,
++        shared: &std::sync::Mutex<Option<ProxyRcot>>,
++    ) -> Self {
+         let vm = cfg_select! {
+-            tlsn_insecure => { mpz_ideal_vm::IdealVm::new() }
++            tlsn_insecure => {{ let _ = shared; mpz_ideal_vm::IdealVm::new() }}
+             _ => {{
+-                let mut rng = rand::rng();
+-
+-                let base_ot_send = co::Sender::default();
+-                let rcot_recv = kos::Receiver::new(kos::ReceiverConfig::default(), base_ot_send);
+-                let rcot_recv = ferret::Receiver::new(
+-                    ferret::FerretConfig::default(),
+-                    Block::random(&mut rng),
+-                    rcot_recv,
+-                );
+-                let rcot_recv = SharedRCOTReceiver::new(rcot_recv);
+-                ProverZk::new(Default::default(), rcot_recv)
++                let rcot_recv = shared
++                    .lock()
++                    .expect("lock is not poisoned")
++                    .get_or_insert_with(|| {
++                        let mut rng = rand::rng();
++
++                        let base_ot_send = co::Sender::default();
++                        let rcot_recv =
++                            kos::Receiver::new(kos::ReceiverConfig::default(), base_ot_send);
++                        Arc::new(Mutex::new(ferret::Receiver::new(
++                            ferret::FerretConfig::default(),
++                            Block::random(&mut rng),
++                            rcot_recv,
++                        )))
++                    })
++                    .clone();
++                ProverZk::new(Default::default(), SharedRCOTReceiver::from_inner(rcot_recv))
+             }}
+         };
+ 
+diff --git a/crates/tlsn/src/deps/verifier.rs b/crates/tlsn/src/deps/verifier.rs
+index a08bbbd92..093c3eade 100644
+--- a/crates/tlsn/src/deps/verifier.rs
++++ b/crates/tlsn/src/deps/verifier.rs
+@@ -19,6 +19,13 @@ use crate::{
+     proxy::ProxyVerifier,
+ };
+ 
++/// The verifier's half of the OT state proxy proofs share, with its global
++/// key.
++pub(crate) type ProxyRcot = (
++    Delta,
++    Arc<Mutex<ferret::Sender<kos::Sender<co::Receiver>>>>,
++);
++
+ cfg_select! {
+     tlsn_insecure => {
+         pub(crate) type VerifierMpc = mpz_ideal_vm::IdealVm;
+@@ -135,25 +142,36 @@ impl std::fmt::Debug for VerifierProxyDeps {
+ 
+ impl VerifierProxyDeps {
+     #[rustfmt::skip]
+-    pub(crate) fn new(_config: &ProxyTlsConfig, ctx: Context) -> Self {
++    pub(crate) fn new(
++        _config: &ProxyTlsConfig,
++        ctx: Context,
++        shared: &std::sync::Mutex<Option<ProxyRcot>>,
++    ) -> Self {
+         let vm = cfg_select! {
+-            tlsn_insecure => { mpz_ideal_vm::IdealVm::new() }
++            tlsn_insecure => {{ let _ = shared; mpz_ideal_vm::IdealVm::new() }}
+             _ => {{
+-                let mut rng = rand::rng();
+-                let delta = Delta::random(&mut rng);
+-
+-                let base_ot_recv = co::Receiver::default();
+-                let rcot_send = kos::Sender::new(
+-                    kos::SenderConfig::default(),
+-                    delta.into_inner(),
+-                    base_ot_recv,
+-                );
+-                let rcot_send = ferret::Sender::new(
+-                    ferret::FerretConfig::default(),
+-                    Block::random(&mut rng),
+-                    rcot_send,
+-                );
+-                let rcot_send = SharedRCOTSender::new(rcot_send);
++                let (delta, rcot_send) = shared
++                    .lock()
++                    .expect("lock is not poisoned")
++                    .get_or_insert_with(|| {
++                        let mut rng = rand::rng();
++                        let delta = Delta::random(&mut rng);
++
++                        let base_ot_recv = co::Receiver::default();
++                        let rcot_send = kos::Sender::new(
++                            kos::SenderConfig::default(),
++                            delta.into_inner(),
++                            base_ot_recv,
++                        );
++                        let rcot_send = ferret::Sender::new(
++                            ferret::FerretConfig::default(),
++                            Block::random(&mut rng),
++                            rcot_send,
++                        );
++                        (delta, Arc::new(Mutex::new(rcot_send)))
++                    })
++                    .clone();
++                let rcot_send = SharedRCOTSender::from_inner(rcot_send, delta.into_inner());
+                 VerifierZk::new(Default::default(), delta, rcot_send)
+             }}
+         };
+diff --git a/crates/tlsn/src/prover.rs b/crates/tlsn/src/prover.rs
+index 9ed6ef066..36dc5561b 100644
+--- a/crates/tlsn/src/prover.rs
++++ b/crates/tlsn/src/prover.rs
+@@ -143,7 +143,7 @@ impl Prover<state::Initialized> {
+             })?;
+ 
+         let commit_config: TlsCommitConfig = config.into();
+-        let mut deps = ProverDeps::new(commit_config, ctx);
++        let mut deps = ProverDeps::new(commit_config, ctx, &self.closure.proxy_ot);
+         deps.setup().await?;
+ 
+         debug!("setup complete");
+diff --git a/crates/tlsn/src/session.rs b/crates/tlsn/src/session.rs
+index 3d921737f..e399c7084 100644
+--- a/crates/tlsn/src/session.rs
++++ b/crates/tlsn/src/session.rs
+@@ -1,3 +1,4 @@
++use crate::deps::ProxyOt;
+ use std::{
+     future::Future,
+     pin::Pin,
+@@ -105,6 +106,9 @@ pub struct SessionConfigError(#[from] tlsn_mux::ConfigError);
+ pub(crate) struct SessionClosure {
+     closed: AtomicBool,
+     wakers: Mutex<Vec<Waker>>,
++    /// OT state the session's proxy proofs share. It lives here because this
++    /// is what every participant of the session already holds.
++    pub(crate) proxy_ot: ProxyOt,
+ }
+ 
+ impl SessionClosure {
+diff --git a/crates/tlsn/src/verifier.rs b/crates/tlsn/src/verifier.rs
+index 5e4902799..9db944012 100644
+--- a/crates/tlsn/src/verifier.rs
++++ b/crates/tlsn/src/verifier.rs
+@@ -169,7 +169,7 @@ impl<P> Verifier<state::CommitStart<P>> {
+                 .with_source(e)
+         })?;
+ 
+-        let mut deps = VerifierDeps::new(&self.state.config, ctx);
++        let mut deps = VerifierDeps::new(&self.state.config, ctx, &self.closure.proxy_ot);
+         deps.setup().await?;
+ 
+         debug!("setup complete");
+-- 
+2.56.0
+
