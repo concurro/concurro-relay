@@ -1,9 +1,12 @@
 //! A relay registers with a verifier, opens links to it and performs
 //! proven exchanges with a mock provider.
 
+mod common;
+
 use std::{assert_matches, env, fs, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Result;
+use common::{PATH, STEP_LIMIT, TOKEN};
 
 use concurro_relay::{
     credentials::{Credential, Source},
@@ -45,11 +48,6 @@ use tokio::{
 };
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
-const TOKEN: &str = "sk-test-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-const PATH: &str = "/v1/responses";
-
-/// Longest any step of a test may take before it counts as stuck.
-const STEP_LIMIT: Duration = Duration::from_secs(30);
 
 /// A verifier with a gateway, a mock provider behind it, and where a relay
 /// reaches it.

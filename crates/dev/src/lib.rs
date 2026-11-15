@@ -7,4 +7,5 @@ pub mod gateway;
 pub mod jobs;
 pub mod provider;
 pub mod registry;
+pub mod slow;
 pub mod tls;

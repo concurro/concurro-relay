@@ -26,3 +26,5 @@ zstd.workspace = true
 
 [dev-dependencies]
 concurro-relay.workspace = true
+tlsn.workspace = true
+tokio-util.workspace = true

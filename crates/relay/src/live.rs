@@ -23,6 +23,16 @@ use tokio::{task::JoinHandle, time};
 /// How long the relay waits for the connection to go quiet before a proof.
 const QUIET_LIMIT: Duration = Duration::from_secs(5);
 
+/// Departures from an honest proof, for testing what a verifier rejects.
+#[derive(Clone, Debug, Default)]
+pub struct Misproof {
+    /// Reveal sent data from this offset, not from where the last proof
+    /// ended.
+    pub reveal_from: Option<usize>,
+    /// Claim this many received records were covered by earlier proofs.
+    pub tags_from: Option<usize>,
+}
+
 /// The relay's end of a provider connection which stays open.
 pub struct LiveRelay {
     tls: TlsConnection,
@@ -146,7 +156,7 @@ impl LiveRelay {
     /// their bytes is at least `0x20`.
     pub async fn prove(&mut self, handle: &mut SessionHandle, hidden: &[Range<usize>]) -> Result<()> {
         let snapshot = self.snapshot().await?;
-        self.prove_snapshot(handle, snapshot, hidden).await
+        self.prove_snapshot(handle, snapshot, hidden, &Misproof::default()).await
     }
 
     /// Takes a snapshot holding exactly what this side has written and
@@ -192,12 +202,13 @@ impl LiveRelay {
         handle: &mut SessionHandle,
         snapshot: ProxySnapshot,
         hidden: &[Range<usize>],
+        misproof: &Misproof,
     ) -> Result<()> {
         ensure!(!self.abandoned, "connection was abandoned after a failed proof");
         // Abandoned until proven otherwise, so that a proof which is
         // cancelled part-way counts as failed.
         self.abandoned = true;
-        let proven = self.prove_unguarded(handle, snapshot, hidden).await;
+        let proven = self.prove_unguarded(handle, snapshot, hidden, misproof).await;
         match proven {
             Ok(()) => self.abandoned = false,
             Err(_) => handle.close(),
@@ -210,17 +221,18 @@ impl LiveRelay {
         handle: &mut SessionHandle,
         snapshot: ProxySnapshot,
         hidden: &[Range<usize>],
+        misproof: &Misproof,
     ) -> Result<()> {
         let (sent, received) = (snapshot.len_sent(), snapshot.len_received());
         let mut prover = handle
             .new_prover(ProverConfig::builder().build()?)?
             .commit(ProxyTlsConfig::builder().server_name(DnsName::try_from(self.server.as_str())?).build()?)
             .await?
-            .attach(snapshot, self.proven_records)
+            .attach(snapshot, misproof.tags_from.unwrap_or(self.proven_records))
             .await?;
         let records = prover.tls_transcript().recv().len();
 
-        let mut revealed = RangeSet::from(self.proven..sent);
+        let mut revealed = RangeSet::from(misproof.reveal_from.unwrap_or(self.proven)..sent);
         let mut proof = ProveConfig::builder(prover.transcript());
         proof.server_identity();
         for range in hidden {

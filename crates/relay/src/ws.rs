@@ -12,7 +12,10 @@ use concurro_relay_protocol::{
 use tlsn::SessionHandle;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::{Control, OpCode};
 
-use crate::{live::LiveRelay, policy::Policy};
+use crate::{
+    live::{LiveRelay, Misproof},
+    policy::Policy,
+};
 
 /// The relay's end of a proven WebSocket connection.
 pub struct WsRelay {
@@ -168,7 +171,7 @@ impl WsRelay {
             self.in_flight = None;
             self.responses.extend(ws::completed_response(messages));
         }
-        self.live.prove_snapshot(handle, snapshot, &[]).await?;
+        self.live.prove_snapshot(handle, snapshot, &[], &Misproof::default()).await?;
         Ok(progress)
     }
 

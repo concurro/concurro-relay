@@ -478,10 +478,12 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde_json",
+ "tlsn",
  "tlsn-server-fixture-certs",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "tokio-util",
  "zstd",
 ]
 

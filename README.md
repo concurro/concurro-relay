@@ -33,6 +33,17 @@ cargo nextest run --workspace
 `upstream/` is not committed. The script refuses to overwrite a source directory; remove
 it to prepare it again after a patch changes.
 
+The tests are in `crates/dev/tests`, against a mock provider:
+
+| File | Covers |
+| ---- | ---- |
+| `relay.rs` | The relay as shipped: registration, links, single requests, WebSocket connections, refusals |
+| `adversarial.rs` | What a verifier rejects: relays which insert, omit, replay or misplace what they prove, hide more than the credential or smuggle a request into it, and providers which send stale, mixed or unfinished responses |
+
+The dishonest relays are written in the tests. The relay library's one concession to
+them is `Misproof`, a parameter by which a proof on an open connection can misstate
+where the last one ended.
+
 ## The relay
 
 ```text
@@ -109,8 +120,6 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:7050 claude -p "List the files in this direc
 
 - Concurro's side: relay records, the real registration flow and the verifier in the
   gateway's request path. `dev-verifier` stands in for all three.
-- The tests of what the verifier rejects from a modified relay or a misbehaving
-  provider. They live in the spike and need a relay which can misbehave.
 - A harness message other than a request while a response is in flight, such as a
   cancellation: the verifier reads the harness only between turns.
 - Keeping the relay's key in the operating system's keychain.
