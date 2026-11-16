@@ -1,0 +1,311 @@
+//! Runs one TLS 1.3 role on the existing authenticated relay link pair.
+
+use std::{
+    collections::HashSet,
+    env, fs,
+    os::unix::{fs::PermissionsExt, process::CommandExt},
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+};
+
+use anyhow::{Context, Result, ensure};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio::{
+    io::{self, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    net::UnixListener,
+    process::Command,
+    signal::unix::{SignalKind, signal},
+    sync::mpsc::UnboundedSender,
+    time::{self, Duration},
+};
+
+use crate::{identity, route::Route};
+
+static WORKER_GROUPS: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
+
+/// Own the native worker process group and its local bridge sockets.
+struct NativeSession {
+    control_path: PathBuf,
+    auxiliary_path: PathBuf,
+    worker_group: Option<i32>,
+}
+
+impl NativeSession {
+    /// Track sockets before spawning, so startup errors remove them too.
+    fn new(control_path: PathBuf, auxiliary_path: PathBuf) -> Self {
+        Self {
+            control_path,
+            auxiliary_path,
+            worker_group: None,
+        }
+    }
+
+    /// Register the isolated process group after a successful spawn.
+    fn worker(&mut self, pid: i32) {
+        WORKER_GROUPS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(pid);
+        self.worker_group = Some(pid);
+    }
+
+    /// Stop the worker and every native subprocess in its group.
+    fn stop(&mut self) {
+        if let Some(pid) = self.worker_group.take() {
+            // SAFETY: pid is the positive process-group leader returned by spawn.
+            unsafe { libc::killpg(pid, libc::SIGKILL) };
+            WORKER_GROUPS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .remove(&pid);
+        }
+    }
+}
+
+impl Drop for NativeSession {
+    fn drop(&mut self) {
+        self.stop();
+        let _ = fs::remove_file(&self.control_path);
+        let _ = fs::remove_file(&self.auxiliary_path);
+    }
+}
+
+/// Stop every native worker group before the process exits on a signal.
+pub fn stop_workers() {
+    for pid in WORKER_GROUPS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .iter()
+    {
+        // SAFETY: each pid was registered from an isolated native worker group.
+        unsafe { libc::killpg(*pid, libc::SIGKILL) };
+    }
+}
+
+/// Wait for an ordinary terminal interrupt or service termination.
+pub async fn shutdown_signal() -> Result<()> {
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        _ = interrupt.recv() => {}
+        _ = terminate.recv() => {}
+    }
+    Ok(())
+}
+
+/// The local role to run on an authenticated relay link.
+#[derive(Clone, Copy)]
+pub enum NativeRole {
+    /// The credential-owning relay process.
+    Sponsor,
+    /// The verifier-side process.
+    Concurro,
+}
+
+/// One Sponsor-observed proved prompt and its Concurro-reported provider usage.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct NativeAudit {
+    /// Final request record number on this TLS connection.
+    pub turn: usize,
+    /// Proved request body or WebSocket message.
+    pub prompt: String,
+    /// Digest of the proved prompt bytes.
+    pub sha256: String,
+    /// Proof implementation used for the request.
+    pub proof: String,
+    /// Provider usage relayed by Concurro; Sponsor cannot verify this field.
+    pub usage: Option<Value>,
+    /// TLS-MPC session identifier shared by the two parties.
+    pub session_id: String,
+}
+
+impl NativeRole {
+    /// The role name understood by the bundled worker.
+    fn argument(self) -> &'static str {
+        match self {
+            Self::Sponsor => "sponsor",
+            Self::Concurro => "concurro",
+        }
+    }
+}
+
+/// Public session details and the Sponsor's local credential, when applicable.
+pub struct NativeOptions {
+    /// Which native role this process runs.
+    pub role: NativeRole,
+    /// Provider route served by this session.
+    pub route: Route,
+    /// Host whose TLS certificate the native worker verifies.
+    pub provider_host: String,
+    /// Provider TCP port.
+    pub provider_port: u16,
+    /// CA file used to verify the provider certificate.
+    pub provider_ca: PathBuf,
+    /// Local CLI ingress address on Concurro.
+    pub listen: Option<String>,
+    /// Sponsor-only provider credential.
+    pub token: Option<String>,
+    /// Public ChatGPT account identifier, when present.
+    pub account: Option<String>,
+    /// Sponsor-side stream of per-request native audit events.
+    pub audit: Option<UnboundedSender<NativeAudit>>,
+    /// Concurro-side stream of bound local CLI ingress addresses.
+    pub ready: Option<UnboundedSender<String>>,
+}
+
+/// Locate the self-contained worker and native runtime beside the executable.
+pub fn bundle() -> Result<PathBuf> {
+    if let Some(bundle) = env::var_os("CONCURRO_NATIVE_BUNDLE") {
+        return Ok(PathBuf::from(bundle));
+    }
+    Ok(env::current_exe()?
+        .parent()
+        .context("executable has no directory")?
+        .join("../native-runtime"))
+}
+
+/// Bridge the two authenticated link streams to one bundled native role.
+pub async fn bridge<C, P>(control: C, auxiliary: P, options: NativeOptions) -> Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    P: AsyncRead + AsyncWrite + Unpin,
+{
+    let bundle = bundle()?;
+    let session = env::var_os("CONCURRO_NATIVE_OUTPUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir);
+    let session = session.join(format!(
+        "concurro-native-{:016x}",
+        u64::from_be_bytes(identity::random())
+    ));
+    fs::create_dir_all(&session)?;
+    fs::set_permissions(&session, fs::Permissions::from_mode(0o700))?;
+    let control_path = session.join("control.sock");
+    let auxiliary_path = session.join("aux.sock");
+    let mut native_session = NativeSession::new(control_path.clone(), auxiliary_path.clone());
+    let control_listener = UnixListener::bind(&control_path)?;
+    let auxiliary_listener = UnixListener::bind(&auxiliary_path)?;
+    let mut command = Command::new(bundle.join("python"));
+    command.as_std_mut().process_group(0);
+    command
+        .arg(bundle.join("worker/role.py"))
+        .arg("--role")
+        .arg(options.role.argument())
+        .arg("--route")
+        .arg(match options.route {
+            Route::ChatgptSubscription => "codex",
+            Route::ClaudeSubscription => "claude_h2",
+        })
+        .arg("--control")
+        .arg(&control_path)
+        .arg("--aux")
+        .arg(&auxiliary_path)
+        .arg("--runtime")
+        .arg(bundle.join("runtime"))
+        .arg("--output")
+        .arg(&session)
+        .arg("--provider-host")
+        .arg(&options.provider_host)
+        .arg("--provider-port")
+        .arg(options.provider_port.to_string())
+        .arg("--provider-ca")
+        .arg(&options.provider_ca);
+    if let Some(listen) = &options.listen {
+        command.arg("--listen").arg(listen);
+    }
+    if options.token.is_some() {
+        command.stdin(std::process::Stdio::piped());
+    } else {
+        command.stdin(std::process::Stdio::null());
+    }
+    command.stdout(std::process::Stdio::piped());
+    command.kill_on_drop(true);
+    let mut worker = command.spawn().context("start bundled native TLS worker")?;
+    native_session.worker(worker.id().context("native worker has no pid")? as i32);
+    let stdout_task = {
+        let stdout = worker.stdout.take().expect("native worker has piped stdout");
+        let audit = options.audit;
+        let ready = options.ready;
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Some(line) = lines.next_line().await? {
+                if let Some(address) = line.strip_prefix("NATIVE_READY ") {
+                    eprintln!("{line}");
+                    if let Some(sender) = &ready {
+                        let _ = sender.send(address.to_owned());
+                    }
+                } else if line.starts_with("NATIVE_CANCEL ") {
+                    eprintln!("{line}");
+                } else if let Some(value) = line.strip_prefix("NATIVE_AUDIT ")
+                    && let Some(sender) = &audit
+                {
+                    let event = serde_json::from_str(value)?;
+                    let _ = sender.send(event);
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+    };
+    let result: Result<()> = async {
+        if let Some(token) = options.token {
+            let mut stdin = worker
+                .stdin
+                .take()
+                .context("native worker has no credential pipe")?;
+            stdin
+                .write_all(&serde_json::to_vec(
+                    &json!({"token": token, "account": options.account}),
+                )?)
+                .await?;
+            drop(stdin);
+        }
+        let (worker_control, _) =
+            time::timeout(Duration::from_secs(30), control_listener.accept())
+                .await
+                .context("native worker did not connect its control socket")??;
+        let (worker_auxiliary, _) =
+            time::timeout(Duration::from_secs(30), auxiliary_listener.accept())
+                .await
+                .context("native worker did not connect its auxiliary socket")??;
+        let copied = async {
+            let (mut control_read, mut control_write) = io::split(control);
+            let (mut auxiliary_read, mut auxiliary_write) = io::split(auxiliary);
+            let (mut worker_control_read, mut worker_control_write) = io::split(worker_control);
+            let (mut worker_auxiliary_read, mut worker_auxiliary_write) =
+                io::split(worker_auxiliary);
+            tokio::select! {
+                result = io::copy(&mut control_read, &mut worker_control_write) => result?,
+                result = io::copy(&mut worker_control_read, &mut control_write) => result?,
+                result = io::copy(&mut auxiliary_read, &mut worker_auxiliary_write) => result?,
+                result = io::copy(&mut worker_auxiliary_read, &mut auxiliary_write) => result?,
+            };
+            Ok::<(), std::io::Error>(())
+        };
+        tokio::pin!(copied);
+        tokio::select! {
+            copied = &mut copied => {
+                copied?;
+                let status = time::timeout(Duration::from_millis(500), worker.wait())
+                    .await.context("native link closed while its worker remained active")??;
+                ensure!(status.success(), "native worker exited with {status}");
+            }
+            status = worker.wait() => {
+                let status = status?;
+                time::timeout(Duration::from_secs(5), &mut copied)
+                    .await.context("native worker left its link open after exit")??;
+                ensure!(status.success(), "native worker exited with {status}");
+            }
+        }
+        Ok(())
+    }
+    .await;
+    native_session.stop();
+    let _ = time::timeout(Duration::from_secs(5), worker.wait()).await;
+    let audit_result = stdout_task.await?;
+    result?;
+    audit_result
+}

@@ -233,7 +233,7 @@ async fn verifier_refuses_relays_it_should_not_serve() {
     assert!(time::timeout(STEP_LIMIT, impostor_reported.recv()).await.unwrap().is_none(), "a refused relay stops");
 
     let (_, identity) = verifier.store.load().unwrap().unwrap();
-    let hello = |version, relay: &str| Hello::Link { version, relay: relay.into(), link: 9, role: Role::Control };
+    let hello = |version, relay: &str| Hello::Link { version, relay: relay.into(), link: 9, slot: 1, role: Role::Control };
     let mut connection = verifier.server.connect().await.unwrap();
     let outdated = present(&mut connection, &hello(PROTOCOL_VERSION + 1, &registration.relay), &identity).await.unwrap_err();
     assert!(outdated.to_string().contains("update concurro-relay"), "{outdated}");

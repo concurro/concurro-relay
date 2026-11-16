@@ -17,7 +17,7 @@ use crate::{
 
 /// Version of these messages and of the proof stack beneath them. A relay
 /// and a verifier work together only at the same version.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// What the verifier tells the relay to do on a link.
 ///
@@ -27,6 +27,8 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// proof which is not coming.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Order {
+    /// Start one native TLS 1.3 session on the authenticated link pair.
+    NativeStart { route: Route, provider_host: String, provider_port: u16 },
     /// Perform one request on a provider connection of its own, and prove
     /// the exchange.
     Job(Job),
@@ -48,6 +50,8 @@ pub enum Order {
 /// What the relay tells the verifier on a link.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Notice {
+    /// The Sponsor has admitted a native TLS 1.3 session.
+    NativeReady,
     /// The job or connection ordered will be performed with these
     /// additions to its request.
     Offer(Offer),
@@ -123,7 +127,15 @@ pub enum Hello {
     Poll { device_code: String },
     /// Opens one connection of a link. The relay must then prove it holds
     /// its key.
-    Link { version: u32, relay: String, link: u64, role: Role },
+    Link {
+        version: u32,
+        relay: String,
+        /// Random number pairing this link's control and proof streams.
+        link: u64,
+        /// Stable Sponsor link slot across reconnects.
+        slot: u32,
+        role: Role,
+    },
     /// Withdraws a registration. The relay must then prove it holds its key.
     Deregister { relay: String },
 }
@@ -213,7 +225,7 @@ mod tests {
     use super::*;
 
     fn link(relay: &str) -> Hello {
-        Hello::Link { version: PROTOCOL_VERSION, relay: relay.into(), link: 1, role: Role::Control }
+        Hello::Link { version: PROTOCOL_VERSION, relay: relay.into(), link: 1, slot: 1, role: Role::Control }
     }
 
     /// Runs both ends of a challenge, the verifier judging `judged` while
@@ -240,5 +252,10 @@ mod tests {
         assert!(!challenged(link("a"), link("a"), &other, &identity.public_key()).await);
         // A signature for one hello does not serve for another.
         assert!(!challenged(link("a"), link("b"), &identity, &identity.public_key()).await);
+        let mut other_slot = link("a");
+        if let Hello::Link { slot, .. } = &mut other_slot {
+            *slot = 2;
+        }
+        assert!(!challenged(link("a"), other_slot, &identity, &identity.public_key()).await);
     }
 }

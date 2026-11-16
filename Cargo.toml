@@ -26,6 +26,7 @@ futures = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+libc = "0.2"
 mimalloc = "0.1"
 ratatui = "0.29"
 rcgen = "0.13"

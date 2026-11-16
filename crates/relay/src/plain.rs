@@ -2,6 +2,7 @@
 //! interactive and for people who prefer them.
 
 use std::{
+    env,
     io::{self, IsTerminal, Write as _},
     process::Command,
     sync::Arc,
@@ -15,6 +16,7 @@ use tokio::{signal, sync::mpsc};
 use crate::{
     codex::DeviceLogin,
     credentials::{self, Credential, Source},
+    events::Event,
     link::{self, Relay},
     login,
     routes::Served,
@@ -144,6 +146,13 @@ pub async fn run(relay: Relay, links: usize) -> Result<()> {
     let running = tokio::spawn(link::run(Arc::new(relay), links, events));
     while let Some(event) = reported.recv().await {
         println!("{event}");
+        if env::var("CONCURRO_NATIVE_AUDIT_TEXT").as_deref() == Ok("1") {
+            if let Event::NativeAudit { audit, .. } = &event {
+                println!("Proved request body:\n{}\nConcurro-reported provider usage: {}",
+                         audit.prompt,
+                         audit.usage.as_ref().map(ToString::to_string).unwrap_or_else(|| "unavailable".into()));
+            }
+        }
     }
     running.await?;
     anyhow::bail!("Concurro refused this relay")

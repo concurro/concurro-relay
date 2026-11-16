@@ -3,13 +3,14 @@
 //! turns are proven while they stay open. Every exchange is proven with
 //! the credential hidden.
 
-use std::{future::IntoFuture, ops::Range, pin::pin, time::Instant};
+use std::{env, future::IntoFuture, ops::Range, path::PathBuf, pin::pin, time::Instant};
 
 use anyhow::{Context, Result, bail};
 use concurro_relay_protocol::{
     Roots,
     link::{self, Notice, Order},
     meter::Counters,
+    native::{self, NativeOptions, NativeRole},
     route::Route,
     wire::{self, Job, Offer},
     ws::{self, Progress},
@@ -27,7 +28,7 @@ use tlsn::{
 };
 use tokio::{
     io::{self, AsyncRead, AsyncWrite},
-    sync::mpsc::UnboundedSender,
+    sync::mpsc::{self, UnboundedSender},
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -270,7 +271,9 @@ async fn carry(
             Order::Report if relay.has_unproven() => Ok(()),
             Order::Report => Err("nothing to report".into()),
             Order::Close => return relay.close().await.map(|()| turns),
-            Order::Job(_) | Order::Open { .. } => bail!("Concurro gave an order which needs the connection closed"),
+            Order::Job(_) | Order::Open { .. } | Order::NativeStart { .. } => {
+                bail!("Concurro gave an order which needs the connection closed")
+            }
         };
         if let Err(reason) = admitted {
             wire::send(notices, &Notice::Refused(reason.clone())).await?;
@@ -296,7 +299,7 @@ async fn carry(
 /// Returns the number of exchanges proved once `control` closes. Any
 /// failure ends the link, and with it the proof state its proofs share.
 pub async fn serve_link<C, P>(
-    control: C,
+    mut control: C,
     proofs: P,
     config: &RelayConfig,
     link: usize,
@@ -307,14 +310,49 @@ where
     C: AsyncRead + AsyncWrite + Unpin,
     P: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
+    let first: Order = match wire::recv(&mut control).await {
+        Ok(order) => order,
+        Err(_) => return Ok(0),
+    };
+    if let Order::NativeStart { route, provider_host, provider_port } = &first {
+        let credential = config.credentials.load(*route)?;
+        let account = credential.headers.iter().find(|(name, _)| name.eq_ignore_ascii_case("chatgpt-account-id"))
+            .map(|(_, value)| value.clone());
+        wire::send(&mut control, &Notice::NativeReady).await?;
+        let (audit, mut reported) = mpsc::unbounded_channel();
+        let events = events.clone();
+        let route = *route;
+        let forward = tokio::spawn(async move {
+            while let Some(audit) = reported.recv().await {
+                let _ = events.send(Event::NativeAudit { link, route, audit });
+            }
+        });
+        let result = native::bridge(control, proofs, NativeOptions {
+            role: NativeRole::Sponsor,
+            route,
+            provider_host: provider_host.clone(),
+            provider_port: *provider_port,
+            provider_ca: env::var_os("CONCURRO_NATIVE_PROVIDER_CA").map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/etc/ssl/cert.pem")),
+            listen: None,
+            token: Some(credential.token),
+            account,
+            audit: Some(audit),
+            ready: None,
+        }).await;
+        forward.await?;
+        result?;
+        return Ok(1);
+    }
     let (driver, mut handle) = Session::new(proofs.compat()).split();
     let driver = tokio::spawn(driver);
     let (orders, mut notices) = io::split(control);
     let mut orders = pin!(link::incoming::<_, Order>(orders));
     let reporter = Reporter { link, traffic, events };
     let mut served = 0;
+    let mut first = Some(first);
     // A failure to read the next order means Concurro ended the link.
-    while let Some(Ok(order)) = orders.next().await {
+    while let Some(Ok(order)) = match first.take() { Some(order) => Some(Ok(order)), None => orders.next().await } {
         served += match order {
             Order::Job(job) => usize::from(perform(&job, &mut handle, &mut notices, config, &reporter).await?),
             Order::Open { job, key } => carry(&job, &key, &mut handle, &mut orders, &mut notices, config, &reporter).await?,

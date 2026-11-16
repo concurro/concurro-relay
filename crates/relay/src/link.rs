@@ -32,9 +32,9 @@ pub struct Relay {
 impl Relay {
     /// Opens one connection of link `number` and proves the relay's
     /// identity on it.
-    async fn connect(&self, number: u64, role: Role) -> Result<Connection> {
+    async fn connect(&self, number: u64, slot: u32, role: Role) -> Result<Connection> {
         let mut connection = self.registration.server.connect().await?;
-        let hello = Hello::Link { version: PROTOCOL_VERSION, relay: self.registration.relay.clone(), link: number, role };
+        let hello = Hello::Link { version: PROTOCOL_VERSION, relay: self.registration.relay.clone(), link: number, slot, role };
         link::present(&mut connection, &hello, &self.identity).await?;
         Ok(connection)
     }
@@ -42,8 +42,9 @@ impl Relay {
     /// Opens a link and serves it until it ends.
     async fn serve(&self, link: usize, events: &UnboundedSender<Event>) -> Result<usize> {
         let number = u64::from_be_bytes(identity::random());
-        let control = self.connect(number, Role::Control).await?;
-        let proofs = self.connect(number, Role::Proofs).await?;
+        let slot = u32::try_from(link)?;
+        let control = self.connect(number, slot, Role::Control).await?;
+        let proofs = self.connect(number, slot, Role::Proofs).await?;
         let _ = events.send(Event::Link { link, state: LinkState::Up });
         let traffic = Counters::default();
         serve::serve_link(control, Metered::new(proofs, traffic.clone()), &self.config, link, &traffic, events).await

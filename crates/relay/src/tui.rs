@@ -206,6 +206,13 @@ impl Dashboard {
                 let (request, response) = (mem::take(&mut exchange.request), mem::take(&mut exchange.response));
                 said = Some((transcript::request_text(&request), transcript::response_text(&response)));
             }
+            Event::NativeAudit { route, audit, .. } => {
+                if let Some(at) = self.logins.iter().position(|(served, _)| served == route) {
+                    self.proved[at] += 1;
+                }
+                let usage = audit.usage.as_ref().map(ToString::to_string).unwrap_or_else(|| "unavailable".into());
+                said = Some((mem::take(&mut audit.prompt), format!("Concurro-reported provider usage: {usage}")));
+            }
             Event::Refused { .. } => {}
         }
         self.activity.push_back(Entry { at: Instant::now(), event, said, open: false, side: Side::Request });
@@ -670,6 +677,11 @@ fn entry_line(entry: &Entry, selected: bool, since: Instant) -> Line<'static> {
             format!("{:<18}", exchange.model.as_deref().unwrap_or("")).cyan(),
             format!("sent {:>9}  received {:>9}  ", events::size(exchange.sent as u64), events::size(exchange.received as u64)).into(),
             format!("{:>9} up  {:.1}s", events::size(exchange.upload), exchange.seconds).dim(),
+        ]),
+        Event::NativeAudit { route, audit, .. } => spans.extend([
+            format!("{:<22}", route.label()).into(),
+            format!("proved request {}  ", audit.turn).cyan(),
+            format!("sha256 {}", audit.sha256).dim(),
         ]),
         Event::Refused { reason, .. } => spans.extend(["refused  ".yellow(), reason.clone().into()]),
         Event::Link { link, state } => spans.push(format!("link {link} {state}").red()),

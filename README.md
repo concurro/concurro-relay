@@ -116,6 +116,14 @@ Claude Code, with `--route claude_subscription` on the dev verifier:
 ANTHROPIC_BASE_URL=http://127.0.0.1:7050 claude -p "List the files in this directory"
 ```
 
+## Native TLS 1.3 backend
+
+`dev-verifier --backend tls13` serves packaged Sponsor and Concurro native
+workers over the existing authenticated relay links. The default remains
+TLSNotary. See [native/README.md](native/README.md) for packaging inputs,
+per-link ingress leases, and offline fixtures. The accepted extraction and
+its limits are recorded in [native/ACCEPTANCE.md](native/ACCEPTANCE.md).
+
 ## Not done
 
 - Concurro's side: relay records, the real registration flow and the verifier in the

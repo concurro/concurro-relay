@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use concurro_relay::{login, plain, state::Store, transport::Server, tui};
-use concurro_relay_protocol::route::Route;
+use concurro_relay_protocol::{native, route::Route};
 
 /// Returns freed proof buffers to the system instead of retaining them.
 #[global_allocator]
@@ -93,6 +93,7 @@ fn machine_name() -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let operation = async {
     let store = Store::open(cli.state_dir)?;
     match cli.command {
         None if io::stdout().is_terminal() => tui::run(store, cli.server.server(), machine_name(), cli.serving.links).await,
@@ -110,6 +111,15 @@ async fn main() -> Result<()> {
                 Ok(false) => println!("Not registered."),
                 Err(error) => println!("Removed this relay's key, but could not tell Concurro: {error:#}"),
             }
+            Ok(())
+        }
+    }
+    };
+    tokio::select! {
+        result = operation => result,
+        signal = native::shutdown_signal() => {
+            signal?;
+            native::stop_workers();
             Ok(())
         }
     }

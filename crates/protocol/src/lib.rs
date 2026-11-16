@@ -5,6 +5,7 @@
 pub mod identity;
 pub mod link;
 pub mod meter;
+pub mod native;
 pub mod route;
 pub mod timing;
 pub mod wire;

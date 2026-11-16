@@ -44,6 +44,10 @@ pub trait Registry: Send + Sync + 'static {
 /// A link whose relay has proven its identity on both connections.
 pub struct Accepted<S> {
     pub relay: String,
+    /// Random number pairing the link's two authenticated streams.
+    pub number: u64,
+    /// Stable Sponsor link slot across reconnects.
+    pub slot: u32,
     /// Carries jobs and the relay's answers.
     pub control: S,
     /// Carries the proof session.
@@ -54,8 +58,8 @@ pub struct Accepted<S> {
 pub struct Acceptor<R, S> {
     registry: Arc<R>,
     /// The first connection of each link whose second has not arrived, by
-    /// relay and link number.
-    halves: Mutex<HashMap<(String, u64), (Role, S)>>,
+    /// relay, random link number, and stable slot.
+    halves: Mutex<HashMap<(String, u64, u32), (Role, S)>>,
     ready: UnboundedSender<Accepted<S>>,
 }
 
@@ -99,7 +103,7 @@ where
                 }
                 Err(reason) => Answer::Refused(reason),
             },
-            Hello::Link { version, relay, link, role } => {
+            Hello::Link { version, relay, link, slot, role } => {
                 let proven = match outdated(*version) {
                     Some(reason) => Err(reason),
                     None => self.proven(&mut stream, &hello, relay).await?,
@@ -108,7 +112,7 @@ where
                     return wire::send(&mut stream, &Answer::Refused(reason)).await;
                 }
                 wire::send(&mut stream, &Answer::Welcome).await?;
-                self.pair(relay.clone(), *link, *role, stream);
+                self.pair(relay.clone(), *link, *slot, *role, stream);
                 return Ok(());
             }
         };
@@ -127,9 +131,9 @@ where
 
     /// Keeps `stream` until its link's other connection arrives, or pairs
     /// it with the one already waiting.
-    fn pair(&self, relay: String, link: u64, role: Role, stream: S) {
+    fn pair(&self, relay: String, link: u64, slot: u32, role: Role, stream: S) {
         let mut halves = self.halves.lock().expect("lock is not poisoned");
-        let key = (relay, link);
+        let key = (relay, link, slot);
         let (control, proofs) = match halves.remove(&key) {
             Some((other_role, other)) if other_role != role => match role {
                 Role::Control => (stream, other),
@@ -141,7 +145,7 @@ where
                 return;
             }
         };
-        let _ = self.ready.send(Accepted { relay: key.0, control, proofs });
+        let _ = self.ready.send(Accepted { relay: key.0, number: key.1, slot: key.2, control, proofs });
     }
 }
 

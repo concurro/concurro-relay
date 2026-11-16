@@ -105,7 +105,7 @@ impl Gateway {
         let (returned, idle) = mpsc::unbounded_channel();
         let ready = returned.clone();
         tokio::spawn(async move {
-            while let Some(Accepted { relay, control, proofs }) = accepted.recv().await {
+            while let Some(Accepted { relay, control, proofs, .. }) = accepted.recv().await {
                 eprintln!("link opened by {relay}");
                 let traffic = Counters::default();
                 let link = Link::new(Metered::new(control, traffic.clone()), Metered::new(proofs, traffic.clone()));
