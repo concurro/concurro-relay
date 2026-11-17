@@ -4,6 +4,7 @@ use std::{collections::VecDeque, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use concurro_relay_protocol::ws::FINAL_EVENTS;
 use concurro_relay_provider_protocol::codex;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -183,11 +184,13 @@ async fn client(
     let mut queued: VecDeque<(Value, String)> = VecDeque::new();
     let mut active: Option<mpsc::Receiver<Result<CodexEvent>>> = None;
     let mut count_active = false;
+    let mut terminal_sent = false;
     loop {
         if active.is_none()
             && let Some((request, text)) = queued.pop_front()
         {
             count_active = request["generate"] != false;
+            terminal_sent = false;
             let (reply, receiver) = mpsc::channel(32);
             turns
                 .send(CodexTurn {
@@ -212,19 +215,24 @@ async fn client(
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => {
-                    if active.is_some() || !queued.is_empty() { bail!("NATIVE_CANCEL codex_disconnect"); }
+                    if active.is_some() && !terminal_sent || !queued.is_empty() { bail!("NATIVE_CANCEL codex_disconnect"); }
                     return Ok(ClientEnd::Idle);
                 }
                 Some(Ok(Message::Ping(payload))) => sink.send(Message::Pong(payload)).await?,
                 Some(Ok(_)) => {},
                 Some(Err(error)) => {
-                    if active.is_some() || !queued.is_empty() { bail!("NATIVE_CANCEL codex_disconnect: {error}"); }
+                    if active.is_some() && !terminal_sent || !queued.is_empty() { bail!("NATIVE_CANCEL codex_disconnect: {error}"); }
                     return Ok(ClientEnd::Idle);
                 }
             },
             event = async { active.as_mut().unwrap().recv().await }, if active.is_some() => {
                 match event.context("native Codex turn canceled")?? {
-                    CodexEvent::Data(bytes) => sink.send(Message::Text(String::from_utf8(bytes)?.into())).await?,
+                    CodexEvent::Data(bytes) => {
+                        terminal_sent = serde_json::from_slice::<Value>(&bytes).ok()
+                            .and_then(|event| event["type"].as_str().map(str::to_owned))
+                            .is_some_and(|kind| FINAL_EVENTS.contains(&kind.as_str()));
+                        sink.send(Message::Text(String::from_utf8(bytes)?.into())).await?;
+                    }
                     CodexEvent::Done => {
                         active = None;
                         if count_active { *completed += 1; }

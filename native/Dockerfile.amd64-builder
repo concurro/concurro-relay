@@ -1,0 +1,11 @@
+FROM rust:1.100.0-trixie@sha256:ebc54bef33ec8f9a5cd05799366010f35efbb73b354fb4f2cb086ec6b9460ef5
+
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    build-essential cmake ninja-build pkg-config python3 python3-gmpy2 protobuf-compiler \
+    libssl-dev libprotobuf-dev libzstd-dev libgmp-dev libmpfr-dev \
+    libboost-dev libboost-filesystem-dev libboost-iostreams-dev \
+    libboost-thread-dev libsodium-dev libntl-dev yasm \
+    clang-19=1:19.1.7-3+b1 golang-go=2:1.24~2 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH=/usr/lib/go-1.24/bin:$PATH

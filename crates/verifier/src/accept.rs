@@ -37,8 +37,8 @@ pub trait Registry: Send + Sync + 'static {
     /// The public key of the registered relay `relay`.
     fn public_key(&self, relay: &str) -> Option<Vec<u8>>;
 
-    /// Forgets the relay `relay`.
-    fn deregister(&self, relay: &str);
+    /// Durably forgets the relay `relay`, or reports why it could not.
+    fn deregister(&self, relay: &str) -> Result<(), String>;
 }
 
 /// A link whose relay has proven its identity on both connections.
@@ -107,8 +107,15 @@ where
             },
             Hello::Deregister { relay } => match self.proven(&mut stream, &hello, relay).await? {
                 Ok(()) => {
-                    self.registry.deregister(relay);
-                    Answer::Welcome
+                    let registry = self.registry.clone();
+                    let relay = relay.clone();
+                    match tokio::task::spawn_blocking(move || registry.deregister(&relay)).await {
+                        Ok(Ok(())) => Answer::Welcome,
+                        Ok(Err(reason)) => Answer::Refused(reason),
+                        Err(error) => {
+                            Answer::Refused(format!("registry withdrawal failed: {error}"))
+                        }
+                    }
                 }
                 Err(reason) => Answer::Refused(reason),
             },

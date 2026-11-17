@@ -1,0 +1,17 @@
+FROM --platform=linux/amd64 debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    ca-certificates libboost-filesystem1.83.0 libboost-iostreams1.83.0 \
+    libbz2-1.0 libgmp10 libgmpxx4ldbl libsodium23 libssl3t64 \
+    libzstd1 liblzma5 zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY package-concurro-v3/ /opt/concurro/
+
+ENV PATH=/opt/concurro/bin:$PATH \
+    CONCURRO_NATIVE_BUNDLE=/opt/concurro/native-runtime \
+    CONCURRO_NATIVE_OUTPUT=/data/sessions \
+    LD_LIBRARY_PATH=/opt/concurro/native-runtime/runtime/DiStefano/build/emp-tool:/opt/concurro/native-runtime/runtime/MP-SPDZ
+
+WORKDIR /opt/concurro
+ENTRYPOINT ["concurro-relay-hosted"]

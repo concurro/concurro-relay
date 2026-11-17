@@ -1,0 +1,10 @@
+--- a/src/emp-tool/emp-tool/utils/block.h
++++ b/src/emp-tool/emp-tool/utils/block.h
+@@ -22,6 +22,7 @@
+ #endif
+ 
+ #include <assert.h>
++#include <stdint.h>
+ #include <cstring>
+ #include <iostream>
+ #include <iomanip>

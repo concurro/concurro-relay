@@ -1,0 +1,343 @@
+//! Local Codex WebSocket ingress that admits every Responses turn through agentgateway.
+
+use std::{collections::VecDeque, net::SocketAddr, sync::Arc, time::Instant};
+
+use anyhow::{Context, Result, bail, ensure};
+use clap::Parser;
+use concurro_relay_protocol::ws::FINAL_EVENTS;
+use futures::{
+    SinkExt, StreamExt,
+    stream::{SplitSink, SplitStream},
+};
+use http_body_util::{BodyExt, Full};
+use hyper::{Request, Uri, body::Bytes, client::conn::http1};
+use hyper_util::rt::TokioIo;
+use serde_json::{Value, json};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::{
+    WebSocketStream, accept_hdr_async,
+    tungstenite::{
+        Message,
+        handshake::server::{Request as UpgradeRequest, Response as UpgradeResponse},
+    },
+};
+
+/// WebSocket listener and the real gateway HTTP endpoint.
+#[derive(Parser)]
+struct Args {
+    /// Listener to expose through the same TLS edge as the inference gateway.
+    #[arg(long, default_value = "127.0.0.1:7451")]
+    listen: SocketAddr,
+    /// Actual agentgateway inference URL, used for every admitted POST.
+    #[arg(long)]
+    gateway: Uri,
+}
+
+/// Outcome of one gateway-admitted Responses turn.
+enum TurnOutcome {
+    /// The gateway returned a complete response or a classified refusal.
+    Finished {
+        /// Gateway HTTP status.
+        status: u16,
+        /// Number of provider events relayed to Codex.
+        events: usize,
+        /// Sanitized refusal category, if the turn was denied.
+        category: Option<&'static str>,
+        /// A disconnected non-generating warmup finished without a client.
+        detached: bool,
+    },
+    /// Codex canceled or disconnected while the gateway request was active.
+    Cancelled,
+}
+
+/// Carry one CLI WebSocket session through separately admitted gateway POSTs.
+async fn client(stream: TcpStream, gateway: Arc<Uri>) -> Result<()> {
+    let mut authorization = None;
+    let socket = accept_hdr_async(
+        stream,
+        |request: &UpgradeRequest, response: UpgradeResponse| {
+            if request.uri().path() == "/v1/responses" {
+                authorization = request.headers().get("authorization").cloned();
+            }
+            Ok(response)
+        },
+    )
+    .await?;
+    let authorization = authorization.context("Codex virtual key missing")?;
+    let (mut sink, mut source) = socket.split();
+    let mut queued = VecDeque::new();
+    let mut sequence = 0_u64;
+    loop {
+        let incoming = if let Some(message) = queued.pop_front() {
+            Some(Ok(message))
+        } else {
+            source.next().await
+        };
+        let Some(message) = incoming else { break };
+        let Message::Text(raw) = message? else {
+            continue;
+        };
+        let mut request: Value = serde_json::from_str(&raw)?;
+        match request["type"].as_str() {
+            Some("response.cancel") => break,
+            Some("response.create") => {}
+            _ => bail!("unsupported Codex WebSocket request"),
+        }
+        sequence += 1;
+        let previous = request["previous_response_id"].as_str().map(str::to_owned);
+        let input_types: Vec<_> = request["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["type"].as_str().map(str::to_owned))
+            .collect();
+        let generate = request["generate"].as_bool();
+        let warmup = generate == Some(false);
+        if request["background"] == true {
+            sink.send(Message::Text(
+                json!({"type":"error","error":{
+                "type":"unsupported_transport","code":"unsupported_transport",
+                "message":"background Responses are unavailable over WebSocket"}})
+                .to_string()
+                .into(),
+            ))
+            .await?;
+            continue;
+        }
+        let fields = request.as_object_mut().context("invalid Codex request")?;
+        fields.remove("type");
+        fields.remove("stream_id");
+        fields.remove("background");
+        request["stream"] = Value::Bool(true);
+        let body = serde_json::to_vec(&request)?;
+        let started = Instant::now();
+        match forward(
+            &mut sink,
+            &mut source,
+            &mut queued,
+            &gateway,
+            &authorization,
+            body.clone(),
+            warmup,
+        )
+        .await?
+        {
+            TurnOutcome::Finished {
+                status,
+                events,
+                category,
+                detached,
+            } => {
+                println!(
+                    "{}",
+                    json!({"kind":"codex_gateway_turn","sequence":sequence,
+                    "previous_response_id":previous,"input_types":input_types,
+                    "body_bytes":body.len(),"gateway_status":status,"events":events,
+                    "category":category,"generate":generate,"detached":detached})
+                );
+                if status != 200 {
+                    break;
+                }
+            }
+            TurnOutcome::Cancelled => {
+                println!(
+                    "{}",
+                    json!({"kind":"codex_gateway_cancel","sequence":sequence,
+                    "previous_response_id":previous,"body_bytes":body.len(),
+                    "input_types":input_types,"generate":generate,
+                    "elapsed_ms":started.elapsed().as_millis()})
+                );
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Queue another turn or stop the active gateway request on cancellation and disconnect.
+async fn active_message(
+    incoming: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+    sink: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+    queued: &mut VecDeque<Message>,
+) -> Result<bool> {
+    match incoming {
+        Some(Ok(Message::Text(raw))) => {
+            let request: Value = serde_json::from_str(&raw)?;
+            match request["type"].as_str() {
+                Some("response.cancel") => {
+                    eprintln!("Codex sent response.cancel");
+                    Ok(false)
+                }
+                Some("response.create") => {
+                    queued.push_back(Message::Text(raw));
+                    Ok(true)
+                }
+                _ => bail!("unsupported Codex WebSocket request"),
+            }
+        }
+        Some(Ok(Message::Close(_))) => {
+            eprintln!("Codex closed WebSocket");
+            Ok(false)
+        }
+        None => {
+            eprintln!("Codex WebSocket reached EOF");
+            Ok(false)
+        }
+        Some(Err(error)) => {
+            eprintln!("Codex WebSocket read failed: {error}");
+            Ok(false)
+        }
+        Some(Ok(Message::Ping(payload))) => {
+            sink.send(Message::Pong(payload)).await?;
+            Ok(true)
+        }
+        Some(Ok(_)) => Ok(true),
+    }
+}
+
+/// Classify a gateway refusal without forwarding raw provider or identity details.
+fn denial_category(status: u16, body: &[u8]) -> &'static str {
+    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+    if status == 401 {
+        return "auth";
+    }
+    if status == 403 && text.contains("model") {
+        return "model_denied";
+    }
+    if status == 429 && text.contains("budget") {
+        return "budget_denied";
+    }
+    match status {
+        403 => "forbidden",
+        429 => "rate_limited",
+        502..=504 => "unavailable",
+        _ => "gateway_http_error",
+    }
+}
+
+/// Send one Responses POST to agentgateway and relay its sanitized SSE events unchanged.
+async fn forward(
+    sink: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+    source: &mut SplitStream<WebSocketStream<TcpStream>>,
+    queued: &mut VecDeque<Message>,
+    gateway: &Uri,
+    authorization: &hyper::http::HeaderValue,
+    body: Vec<u8>,
+    warmup: bool,
+) -> Result<TurnOutcome> {
+    ensure!(
+        gateway.scheme_str() == Some("http"),
+        "gateway URL must use local HTTP"
+    );
+    let authority = gateway.authority().context("gateway authority missing")?;
+    let stream = TcpStream::connect(authority.as_str()).await?;
+    let (mut sender, connection) = http1::handshake(TokioIo::new(stream)).await?;
+    let connection = tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            eprintln!("gateway HTTP connection ended: {error}");
+        }
+    });
+    let outcome = async {
+        // Codex may close a non-generating warmup while native setup is still running.
+        let mut detached = false;
+        let request = Request::post("/v1/responses")
+            .header("host", authority.as_str())
+            .header("authorization", authorization)
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
+            .body(Full::new(Bytes::from(body)))?;
+        let response = sender.send_request(request);
+        tokio::pin!(response);
+        let mut response = loop {
+            if detached {
+                break response.await?;
+            }
+            tokio::select! {
+                ready = &mut response => break ready?,
+                incoming = source.next() => {
+                    if warmup && matches!(&incoming, None | Some(Ok(Message::Close(_))) | Some(Err(_))) {
+                        detached = true;
+                        continue;
+                    }
+                    if !active_message(incoming, sink, queued).await? { return Ok(TurnOutcome::Cancelled); }
+                }
+            }
+        };
+        let status = response.status().as_u16();
+        let mut pending = Vec::new();
+        let mut events = 0;
+        let mut final_event = None;
+        loop {
+            let frame = if final_event.is_some() || detached {
+                response.body_mut().frame().await
+            } else {
+                tokio::select! {
+                    frame = response.body_mut().frame() => frame,
+                    incoming = source.next() => {
+                        if warmup && matches!(&incoming, None | Some(Ok(Message::Close(_))) | Some(Err(_))) {
+                            detached = true;
+                            continue;
+                        }
+                        if !active_message(incoming, sink, queued).await? { return Ok(TurnOutcome::Cancelled); }
+                        continue;
+                    }
+                }
+            };
+            let Some(frame) = frame else { break };
+            let frame = frame?;
+            let Ok(data) = frame.into_data() else { continue };
+            pending.extend_from_slice(&data);
+            ensure!(pending.len() <= if status == 200 { 8 * 1024 * 1024 } else { 16 * 1024 },
+                "gateway response event too large");
+            if status != 200 { continue; }
+            while let Some(end) = pending.windows(2).position(|bytes| bytes == b"\n\n") {
+                let raw = pending.drain(..end + 2).collect::<Vec<_>>();
+                let payload = raw.split(|byte| *byte == b'\n')
+                    .find_map(|line| line.strip_prefix(b"data:").map(|value| value.trim_ascii()))
+                    .context("gateway SSE event lacks data")?;
+                if payload == b"[DONE]" { continue; }
+                let event: Value = serde_json::from_slice(payload)?;
+                let kind = event["type"].as_str().context("gateway event type missing")?;
+                events += 1;
+                if FINAL_EVENTS.contains(&kind) {
+                    final_event = Some(String::from_utf8(payload.to_vec())?);
+                } else if final_event.is_none() && !detached {
+                    sink.send(Message::Text(String::from_utf8(payload.to_vec())?.into())).await?;
+                }
+            }
+        }
+        if status == 200 {
+            let terminal = final_event.context("gateway response ended without a terminal event")?;
+            if !detached {
+                sink.send(Message::Text(terminal.into())).await?;
+            }
+            return Ok(TurnOutcome::Finished { status, events, category: None, detached });
+        }
+        let category = denial_category(status, &pending);
+        if !detached { sink.send(Message::Text(json!({"type":"error","error":{
+            "type":category,"code":category,
+            "message":format!("gateway rejected request (HTTP {status}: {category})"),
+            "status":status}}).to_string().into())).await?; }
+        Ok(TurnOutcome::Finished { status, events, category: Some(category), detached })
+    }.await;
+    connection.abort();
+    outcome
+}
+
+/// Start the public WebSocket ingress while agentgateway remains the admission authority.
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let listener = TcpListener::bind(args.listen).await?;
+    let gateway = Arc::new(args.gateway);
+    println!("RESPONSES_BRIDGE_READY {}", listener.local_addr()?);
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let gateway = gateway.clone();
+        tokio::spawn(async move {
+            if let Err(error) = client(stream, gateway).await {
+                eprintln!("Codex gateway WebSocket ended: {error:#}");
+            }
+        });
+    }
+}

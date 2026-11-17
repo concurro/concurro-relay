@@ -148,9 +148,10 @@ impl Registry for DevRegistry {
             .cloned()
     }
 
-    fn deregister(&self, relay: &str) {
+    fn deregister(&self, relay: &str) -> Result<(), String> {
         let mut relays = self.relays.lock().expect("lock is not poisoned");
         relays.registered.remove(relay);
         self.keep(&relays);
+        Ok(())
     }
 }

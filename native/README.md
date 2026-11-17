@@ -15,6 +15,8 @@ loads and library identities to package-local paths, removes rpaths, signs the
 images, and audits the result. Homebrew, the compiler, Python, and the source
 checkout are build or test inputs; the packaged runtime does not need their
 paths. This runtime claim is for macOS arm64.
+The hosted Linux amd64 source-to-image path is in [linux-amd64-build.md](linux-amd64-build.md);
+its packager reuses `package.py`'s file copier for the Linux runtime layout.
 Each package has a SHA-256 manifest. Private MASCOT transport keys and OT
 preprocessing are generated for each session outside the bundle.
 

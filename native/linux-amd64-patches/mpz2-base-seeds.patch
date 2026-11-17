@@ -1,0 +1,50 @@
+--- a/crates/ot/src/kos/receiver.rs
++++ b/crates/ot/src/kos/receiver.rs
+@@ -5,7 +5,7 @@
+ use mpz_common::{Context, ContextError, Flush, future::MaybeDone};
+ use mpz_core::Block;
+ use mpz_ot_core::{
+-    kos::{Receiver as Core, ReceiverConfig, ReceiverError as CoreError, receiver_state as state},
++    kos::{CSP, Receiver as Core, ReceiverConfig, ReceiverError as CoreError, receiver_state as state},
+     ot::OTSender,
+     rcot::{RCOTReceiver, RCOTReceiverOutput},
+ };
+@@ -49,6 +49,13 @@
+             },
+         }
+     }
++
++    /// Creates a KOS receiver from independently completed random base OT seed pairs.
++    pub fn new_with_base_seeds(config: ReceiverConfig, seeds: [[Block; 2]; CSP]) -> Self {
++        Self {
++            state: State::Extension(Core::new(config).setup(seeds)),
++        }
++    }
+ }
+ 
+ impl<BaseOT> RCOTReceiver<bool, Block> for Receiver<BaseOT> {
+--- a/crates/ot/src/kos/sender.rs
++++ b/crates/ot/src/kos/sender.rs
+@@ -3,7 +3,7 @@
+ use mpz_common::{Context, ContextError, Flush, future::MaybeDone};
+ use mpz_core::Block;
+ use mpz_ot_core::{
+-    kos::{Sender as Core, SenderConfig, SenderError as CoreError, sender_state as state},
++    kos::{CSP, Sender as Core, SenderConfig, SenderError as CoreError, sender_state as state},
+     ot::{OTReceiver, OTReceiverOutput},
+     rcot::{RCOTSender, RCOTSenderOutput},
+ };
+@@ -49,6 +49,13 @@
+             },
+         }
+     }
++
++    /// Creates a KOS sender from independently completed random base OT seeds.
++    pub fn new_with_base_seeds(config: SenderConfig, delta: Block, seeds: [Block; CSP]) -> Self {
++        Self {
++            state: State::Extension(Core::new(config, delta).setup(seeds)),
++        }
++    }
+ }
+ 
+ impl<BaseOT> RCOTSender<Block> for Sender<BaseOT> {
