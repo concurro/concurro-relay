@@ -722,7 +722,7 @@ mod tests {
         bootstrap, frame,
     };
 
-    /// Match phase-0 Python bootstrap and opaque authorization-index bytes.
+    /// Match the frozen bootstrap and opaque authorization-index bytes.
     #[test]
     fn indexed_request_reference() {
         let template = Template {

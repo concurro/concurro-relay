@@ -55,7 +55,7 @@ impl BootstrapOptions {
         }
     }
 
-    /// Return the Python reference route label for evidence comparison.
+    /// Return the route label used by native control messages.
     pub fn route(&self) -> &'static str {
         match self.profile {
             Profile::Codex => "codex",

@@ -68,7 +68,9 @@ def assemble(args):
              runtime / 'DiStefano/src/2pc/vhdl' / name)
     for name in ('mascot-party.x', 'libSPDZ.so'):
         copy(source / 'MP-SPDZ' / name, runtime / 'MP-SPDZ' / name)
-    shutil.copytree(source / 'MP-SPDZ/Programs', runtime / 'MP-SPDZ/Programs')
+    for name in ('Bytecode/concurro_ectf_field-0.bc',
+                 'Schedules/concurro_ectf_field.sch'):
+        copy(source / 'MP-SPDZ/Programs' / name, runtime / 'MP-SPDZ/Programs' / name)
     copy(source / 'request-proof/target/release/handoff-request-proof',
          runtime / 'request-proof/target/release/handoff-request-proof')
     openssl = Path(args.openssl).resolve()

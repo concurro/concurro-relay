@@ -17,7 +17,7 @@ pub enum WorkerRoute {
     ClaudeH2,
 }
 
-/// Arguments compatible with the current Python worker launcher.
+/// Arguments supplied to the bundled native worker.
 #[derive(Debug, Parser)]
 pub struct WorkerConfig {
     /// Local native role.

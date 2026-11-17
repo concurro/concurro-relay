@@ -1,19 +1,19 @@
 # Packaged native TLS 1.3 backend
 
-The [Rust port plan](RUST-PORT-PLAN.md) maps the Python runtime to Rust modules,
-defines the migration sequence, and records the behavior and fixtures to preserve.
-
-[Phase 4](PHASE4-REPORT.md) added Codex; [phase 5](PHASE5-REPORT.md) adds
-successive Claude HTTP/2 requests and local SSE ingress. [Phase 6](PHASE6-REPORT.md)
-records package qualification. Both role packages now launch their bundled Rust
-worker by default. `CONCURRO_NATIVE_RUST_WORKER`
-can select a development worker binary explicitly.
+Both role packages launch the bundled Rust worker by default.
+`CONCURRO_NATIVE_RUST_WORKER` selects a development worker binary explicitly.
+The worker handles Codex WebSocket continuations and successive Claude HTTP/2
+requests over one protected session. Frozen TLS and control-wire test inputs are
+in `native/fixtures`; the Python worker used during the port is retained in Git
+history at `aa8c3d0`.
 
 `package.py` assembles separate macOS arm64 Sponsor and Concurro bundles from
 the accepted TLS 1.3 native helper runtime and three Rust binaries. OpenSSL,
-dynamic libraries, and public circuits are included. Python and its libraries
-are used only by build and reference fixtures, outside the runtime package.
-The compiler, Homebrew, and a source checkout are build inputs only.
+dynamic libraries, and public circuits are included. Python is used by local
+build and test fixtures, outside the runtime package.
+The compiler and source checkout are build inputs. Some helper binaries retain
+absolute `/opt/homebrew` library paths despite the bundled library copies;
+running the package on a Mac without matching Homebrew paths is unqualified.
 Each package has a SHA-256 manifest. Private MASCOT transport keys and OT
 preprocessing are generated for each session outside the bundle.
 
@@ -24,12 +24,14 @@ python3 native/package.py --role concurro --runtime "$MVP_RUNTIME" --relay targe
 ```
 
 `MVP_RUNTIME` is an external accepted runnable MVP artifact containing
-`DiStefano/build`, `MP-SPDZ`, and `request-proof`. Set
+the DiStefano helpers and public circuits, MP-SPDZ program, and request-proof
+binary. Set
 `CONCURRO_NATIVE_OUTPUT` to keep session logs and fresh private state in a
 chosen directory.
 
-Start `dev-verifier` from the Concurro package with `--backend tls13` and the
-desired `--route`, then run the registered Sponsor package's `concurro-relay run`.
+Start `dev-verifier` from the Concurro package with the desired `--route`
+(TLS 1.3 is the default), then run the registered Sponsor package's
+`concurro-relay run`.
 Repeat `--route` to assign different routes to successive link slots. With one
 route flag, all slots use that route. Each `NATIVE_SESSION_READY` line prints a
 dedicated `ingress` for its `relay` and `link` slot; point each concurrent CLI
@@ -54,7 +56,19 @@ or sending Codex `response.cancel` during a turn, ends that native session.
 The verifier accepts a new registered link for the next request. SIGINT and
 SIGTERM stop isolated native worker process groups and remove bridge sockets.
 
-The accepted synthetic fixtures can be started with `fixture_server.py`.
+The current ignored bootstrap integration tests use `python3` for a loopback
+TLS provider and `openssl` for fixture certificates. They also need sibling
+Sponsor and Concurro packages containing the accepted native helpers:
+
+```bash
+CONCURRO_PHASE3_FIXTURE_BUNDLE="$SPONSOR_PACKAGE/native-runtime" \
+  cargo nextest run -p concurro-relay-native --test bootstrap --run-ignored all --locked
+```
+
+`fixture_server.py` supports local offline CLI fixtures when the external
+provider fixture source and certificates are supplied. Historical phase and
+benchmark runners are available at the commits in [ARCHIVE.md](../ARCHIVE.md);
+they are not part of the current package build.
 For a single Codex CLI invocation with one tool iteration, use
 `--route codex --tool-loop --calls 3` and set
 `CONCURRO_NATIVE_TEST_TURNS=2` on Concurro. The preflight with

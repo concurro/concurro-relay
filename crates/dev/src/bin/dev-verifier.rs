@@ -195,7 +195,7 @@ struct Args {
     #[arg(long)]
     zstd: bool,
     /// Transport backend for accepted relay links.
-    #[arg(long, value_enum, default_value_t = Backend::Tlsnotary)]
+    #[arg(long, value_enum, default_value_t = Backend::Tls13)]
     backend: Backend,
     /// Provider socket host for the native backend.
     #[arg(long)]

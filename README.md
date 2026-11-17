@@ -93,14 +93,14 @@ Without a command and outside a terminal it behaves as `run`.
   and `pgup`/`pgdn` scroll a long one. What the newest fifty said is held in memory
   only, never written down.
 
-## Trying it
+## Trying TLSNotary
 
 The dev verifier approves every registration by itself and serves a harness on
 `--listen`. It keeps its registered relays in `dev-verifier.json`, so a relay stays
 registered when the dev verifier is started again.
 
 ```bash
-cargo run --bin dev-verifier -- --route chatgpt_subscription
+cargo run --bin dev-verifier -- --backend tlsnotary --route chatgpt_subscription
 ```
 
 ```bash
@@ -123,10 +123,11 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:7050 claude -p "List the files in this direc
 ## Native TLS 1.3 backend
 
 `dev-verifier --backend tls13` serves packaged Sponsor and Concurro native
-workers over the existing authenticated relay links. The default remains
-TLSNotary. See [native/README.md](native/README.md) for packaging inputs,
-per-link ingress leases, and offline fixtures. The accepted extraction and
-its limits are recorded in [native/ACCEPTANCE.md](native/ACCEPTANCE.md).
+workers over the existing authenticated relay links. TLS 1.3 is the default;
+use `--backend tlsnotary` to select TLSNotary. See
+[native/README.md](native/README.md) for packaging inputs,
+per-link ingress leases, and offline fixtures. Earlier port and benchmark
+evidence is preserved at the commits listed in [ARCHIVE.md](ARCHIVE.md).
 
 ## Not done
 
