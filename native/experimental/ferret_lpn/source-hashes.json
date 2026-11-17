@@ -1,0 +1,21 @@
+{
+  "baseline_source_commit": "2ffc80643c9c92f3fd9238d681643a2a2526e1a2",
+  "files": {
+    "src/2pc/HandoffPartyKrrw.cpp": {
+      "baseline_sha256": "2ecbfa030b09f8af460d54ed71a3ab2c913f54951f8beb7ac56fdd52658d3491",
+      "experimental_sha256": "206690360ca7ec8596d69655062ffedabf85240f7f399f63f067a9e5231b1b63"
+    },
+    "src/ssl/Util.inl": {
+      "baseline_sha256": "db3453040dbc57ed3ba797d9809ec20d29ff701ee0f3eb5a86dad943acbb4b49",
+      "experimental_sha256": "ad348dc84ebdc5b409539eecec6a65636dcd1a061b0530a3a64cadf2a242a210"
+    },
+    "src/emp-ot/emp-ot/ferret/ferret_cot.hpp": {
+      "baseline_sha256": "32dc62c93bd2d93eeb44ade8d5e8facb0ea14427fc6a3e8e0c9879ac0761ab82",
+      "experimental_sha256": "a7ca1c32e68f9ee98a77478db94fa12b6fec7390cc525caeb563922e94617743"
+    },
+    "src/emp-ot/emp-ot/ferret/lpn_f2.h": {
+      "baseline_sha256": "2a1acb538e69145a6b81743a4147ca58d35ab32e80f22b30f754fcdd855a5b9e",
+      "experimental_sha256": "d6dee260bdaad3c2bb2c39459ff33430aead0ae516a0db468b6cbd7b0e624b9a"
+    }
+  }
+}
