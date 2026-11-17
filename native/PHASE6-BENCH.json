@@ -1,0 +1,713 @@
+{
+  "runs": [
+    {
+      "output": "/private/tmp/concurro-phase6-bench-fast-rust-1",
+      "profile": "fast",
+      "worker": "rust",
+      "turns": [
+        {
+          "phase": "cold",
+          "status": 200,
+          "first_headers_ms": 32494.6,
+          "first_body_ms": 32494.6,
+          "complete_ms": 37040.3,
+          "response_bytes": 834
+        },
+        {
+          "phase": "warm",
+          "status": 200,
+          "first_headers_ms": 768.9,
+          "first_body_ms": 768.9,
+          "complete_ms": 5261.3,
+          "response_bytes": 834
+        }
+      ],
+      "bootstrap_count": 1,
+      "proof_records": 28,
+      "directional_bytes": {
+        "upload_bytes": 188140025,
+        "download_bytes": 173681135
+      },
+      "sponsor_helpers": {
+        "handshake": 10716.5,
+        "prefix": 20139.6,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 8629
+      },
+      "concurro_helpers": {
+        "handshake": 10299.2,
+        "prefix": 19459.3,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 7206
+      },
+      "resources": {
+        "peak_rss_mib": 2910.3,
+        "peak_cpu_pct": 106.2
+      },
+      "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+      "provider_response_ms": [
+        0.1,
+        0.1
+      ]
+    },
+    {
+      "output": "/private/tmp/concurro-phase6-bench-fast-rust-2",
+      "profile": "fast",
+      "worker": "rust",
+      "turns": [
+        {
+          "phase": "cold",
+          "status": 200,
+          "first_headers_ms": 32457.5,
+          "first_body_ms": 32457.5,
+          "complete_ms": 37015.3,
+          "response_bytes": 834
+        },
+        {
+          "phase": "warm",
+          "status": 200,
+          "first_headers_ms": 771.0,
+          "first_body_ms": 771.0,
+          "complete_ms": 5310.7,
+          "response_bytes": 834
+        }
+      ],
+      "bootstrap_count": 1,
+      "proof_records": 28,
+      "directional_bytes": {
+        "upload_bytes": 188139030,
+        "download_bytes": 173687670
+      },
+      "sponsor_helpers": {
+        "handshake": 10712.6,
+        "prefix": 20105.8,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 8692
+      },
+      "concurro_helpers": {
+        "handshake": 10301.6,
+        "prefix": 19435.4,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 7251
+      },
+      "resources": {
+        "peak_rss_mib": 2965.4,
+        "peak_cpu_pct": 105.0
+      },
+      "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+      "provider_response_ms": [
+        0.1,
+        0.1
+      ]
+    },
+    {
+      "output": "/private/tmp/concurro-phase6-bench-fast-python-1",
+      "profile": "fast",
+      "worker": "python",
+      "turns": [
+        {
+          "phase": "cold",
+          "status": 200,
+          "first_headers_ms": 32761.0,
+          "first_body_ms": 32761.0,
+          "complete_ms": 38375.0,
+          "response_bytes": 834
+        },
+        {
+          "phase": "warm",
+          "status": 200,
+          "first_headers_ms": 928.1,
+          "first_body_ms": 928.1,
+          "complete_ms": 6552.1,
+          "response_bytes": 834
+        }
+      ],
+      "bootstrap_count": 1,
+      "proof_records": 28,
+      "directional_bytes": {
+        "upload_bytes": 188136930,
+        "download_bytes": 173671145
+      },
+      "sponsor_helpers": {
+        "handshake": 10775.1,
+        "prefix": 20145.1,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 10338
+      },
+      "concurro_helpers": {
+        "handshake": 10305.4,
+        "prefix": 19433.6,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 7275
+      },
+      "resources": {
+        "peak_rss_mib": 2950.6,
+        "peak_cpu_pct": 104.3
+      },
+      "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+      "provider_response_ms": [
+        0.1,
+        0.1
+      ]
+    },
+    {
+      "output": "/private/tmp/concurro-phase6-bench-fast-python-2",
+      "profile": "fast",
+      "worker": "python",
+      "turns": [
+        {
+          "phase": "cold",
+          "status": 200,
+          "first_headers_ms": 32752.2,
+          "first_body_ms": 32752.2,
+          "complete_ms": 38371.9,
+          "response_bytes": 834
+        },
+        {
+          "phase": "warm",
+          "status": 200,
+          "first_headers_ms": 930.4,
+          "first_body_ms": 930.4,
+          "complete_ms": 6647.8,
+          "response_bytes": 834
+        }
+      ],
+      "bootstrap_count": 1,
+      "proof_records": 28,
+      "directional_bytes": {
+        "upload_bytes": 188137675,
+        "download_bytes": 173670823
+      },
+      "sponsor_helpers": {
+        "handshake": 10766.6,
+        "prefix": 20154.7,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 10346
+      },
+      "concurro_helpers": {
+        "handshake": 10307,
+        "prefix": 19437.1,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 7270
+      },
+      "resources": {
+        "peak_rss_mib": 2956.9,
+        "peak_cpu_pct": 109.3
+      },
+      "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+      "provider_response_ms": [
+        0.2,
+        0.2
+      ]
+    },
+    {
+      "output": "/private/tmp/concurro-phase6-bench-home-rust-1",
+      "profile": "home",
+      "worker": "rust",
+      "turns": [
+        {
+          "phase": "cold",
+          "status": 200,
+          "first_headers_ms": 167190.9,
+          "first_body_ms": 167190.9,
+          "complete_ms": 175204.1,
+          "response_bytes": 834
+        },
+        {
+          "phase": "warm",
+          "status": 200,
+          "first_headers_ms": 1361.2,
+          "first_body_ms": 1361.2,
+          "complete_ms": 9377.8,
+          "response_bytes": 834
+        }
+      ],
+      "bootstrap_count": 1,
+      "proof_records": 28,
+      "directional_bytes": {
+        "upload_bytes": 188156430,
+        "download_bytes": 173680195
+      },
+      "sponsor_helpers": {
+        "handshake": 54906,
+        "prefix": 109613,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 15253
+      },
+      "concurro_helpers": {
+        "handshake": 54444.9,
+        "prefix": 108894,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 12668
+      },
+      "resources": {
+        "peak_rss_mib": 2890.4,
+        "peak_cpu_pct": 99.3
+      },
+      "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+      "provider_response_ms": [
+        0.1,
+        0.2
+      ]
+    },
+    {
+      "output": "/private/tmp/concurro-phase6-bench-home-python-1",
+      "profile": "home",
+      "worker": "python",
+      "turns": [
+        {
+          "phase": "cold",
+          "status": 200,
+          "first_headers_ms": 167519.9,
+          "first_body_ms": 167519.9,
+          "complete_ms": 176678.4,
+          "response_bytes": 834
+        },
+        {
+          "phase": "warm",
+          "status": 200,
+          "first_headers_ms": 1568.4,
+          "first_body_ms": 1568.5,
+          "complete_ms": 10645.1,
+          "response_bytes": 834
+        }
+      ],
+      "bootstrap_count": 1,
+      "proof_records": 28,
+      "directional_bytes": {
+        "upload_bytes": 188151408,
+        "download_bytes": 173671290
+      },
+      "sponsor_helpers": {
+        "handshake": 54945.1,
+        "prefix": 109698,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 16941
+      },
+      "concurro_helpers": {
+        "handshake": 54427.2,
+        "prefix": 108940,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 12701
+      },
+      "resources": {
+        "peak_rss_mib": 2979.5,
+        "peak_cpu_pct": 91.0
+      },
+      "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+      "provider_response_ms": [
+        0.1,
+        0.1
+      ]
+    },
+    {
+      "output": "/private/tmp/concurro-phase6-bench-constrained-rust-3",
+      "profile": "constrained",
+      "worker": "rust",
+      "turns": [
+        {
+          "phase": "cold",
+          "status": 200,
+          "first_headers_ms": 364174.8,
+          "first_body_ms": 364174.8,
+          "complete_ms": 382516.6,
+          "response_bytes": 834
+        },
+        {
+          "phase": "warm",
+          "status": 200,
+          "first_headers_ms": 3114.2,
+          "first_body_ms": 3114.2,
+          "complete_ms": 21438.0,
+          "response_bytes": 834
+        }
+      ],
+      "bootstrap_count": 1,
+      "proof_records": 28,
+      "directional_bytes": {
+        "upload_bytes": 188157390,
+        "download_bytes": 173683038
+      },
+      "sponsor_helpers": {
+        "handshake": 119296,
+        "prefix": 239520,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 36328
+      },
+      "concurro_helpers": {
+        "handshake": 118749,
+        "prefix": 238712,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 31442
+      },
+      "resources": {
+        "peak_rss_mib": 2757.1,
+        "peak_cpu_pct": 92.4
+      },
+      "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+      "provider_response_ms": [
+        0.1,
+        0.1
+      ]
+    },
+    {
+      "output": "/private/tmp/concurro-phase6-bench-constrained-python-1",
+      "profile": "constrained",
+      "worker": "python",
+      "turns": [
+        {
+          "phase": "cold",
+          "status": 200,
+          "first_headers_ms": 364587.6,
+          "first_body_ms": 364587.7,
+          "complete_ms": 383980.9,
+          "response_bytes": 834
+        },
+        {
+          "phase": "warm",
+          "status": 200,
+          "first_headers_ms": 3304.5,
+          "first_body_ms": 3304.5,
+          "complete_ms": 22842.4,
+          "response_bytes": 834
+        }
+      ],
+      "bootstrap_count": 1,
+      "proof_records": 28,
+      "directional_bytes": {
+        "upload_bytes": 188154662,
+        "download_bytes": 173673426
+      },
+      "sponsor_helpers": {
+        "handshake": 119394,
+        "prefix": 239638,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 37996
+      },
+      "concurro_helpers": {
+        "handshake": 118781,
+        "prefix": 238772,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 31457
+      },
+      "resources": {
+        "peak_rss_mib": 2845.6,
+        "peak_cpu_pct": 94.0
+      },
+      "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+      "provider_response_ms": [
+        0.1,
+        0.1
+      ]
+    }
+  ],
+  "spread": {
+    "fast_rust": {
+      "n": 2,
+      "metrics": {
+        "cold_first_body_ms": {
+          "min": 32457.5,
+          "median": 32476.05,
+          "max": 32494.6
+        },
+        "cold_complete_ms": {
+          "min": 37015.3,
+          "median": 37027.8,
+          "max": 37040.3
+        },
+        "warm_first_body_ms": {
+          "min": 768.9,
+          "median": 769.95,
+          "max": 771.0
+        },
+        "warm_complete_ms": {
+          "min": 5261.3,
+          "median": 5286.0,
+          "max": 5310.7
+        }
+      }
+    },
+    "fast_python": {
+      "n": 2,
+      "metrics": {
+        "cold_first_body_ms": {
+          "min": 32752.2,
+          "median": 32756.6,
+          "max": 32761.0
+        },
+        "cold_complete_ms": {
+          "min": 38371.9,
+          "median": 38373.45,
+          "max": 38375.0
+        },
+        "warm_first_body_ms": {
+          "min": 928.1,
+          "median": 929.25,
+          "max": 930.4
+        },
+        "warm_complete_ms": {
+          "min": 6552.1,
+          "median": 6599.950000000001,
+          "max": 6647.8
+        }
+      }
+    },
+    "home_rust": {
+      "n": 1,
+      "metrics": {
+        "cold_first_body_ms": {
+          "min": 167190.9,
+          "median": 167190.9,
+          "max": 167190.9
+        },
+        "cold_complete_ms": {
+          "min": 175204.1,
+          "median": 175204.1,
+          "max": 175204.1
+        },
+        "warm_first_body_ms": {
+          "min": 1361.2,
+          "median": 1361.2,
+          "max": 1361.2
+        },
+        "warm_complete_ms": {
+          "min": 9377.8,
+          "median": 9377.8,
+          "max": 9377.8
+        }
+      }
+    },
+    "home_python": {
+      "n": 1,
+      "metrics": {
+        "cold_first_body_ms": {
+          "min": 167519.9,
+          "median": 167519.9,
+          "max": 167519.9
+        },
+        "cold_complete_ms": {
+          "min": 176678.4,
+          "median": 176678.4,
+          "max": 176678.4
+        },
+        "warm_first_body_ms": {
+          "min": 1568.5,
+          "median": 1568.5,
+          "max": 1568.5
+        },
+        "warm_complete_ms": {
+          "min": 10645.1,
+          "median": 10645.1,
+          "max": 10645.1
+        }
+      }
+    },
+    "constrained_rust": {
+      "n": 1,
+      "metrics": {
+        "cold_first_body_ms": {
+          "min": 364174.8,
+          "median": 364174.8,
+          "max": 364174.8
+        },
+        "cold_complete_ms": {
+          "min": 382516.6,
+          "median": 382516.6,
+          "max": 382516.6
+        },
+        "warm_first_body_ms": {
+          "min": 3114.2,
+          "median": 3114.2,
+          "max": 3114.2
+        },
+        "warm_complete_ms": {
+          "min": 21438.0,
+          "median": 21438.0,
+          "max": 21438.0
+        }
+      }
+    },
+    "constrained_python": {
+      "n": 1,
+      "metrics": {
+        "cold_first_body_ms": {
+          "min": 364587.7,
+          "median": 364587.7,
+          "max": 364587.7
+        },
+        "cold_complete_ms": {
+          "min": 383980.9,
+          "median": 383980.9,
+          "max": 383980.9
+        },
+        "warm_first_body_ms": {
+          "min": 3304.5,
+          "median": 3304.5,
+          "max": 3304.5
+        },
+        "warm_complete_ms": {
+          "min": 22842.4,
+          "median": 22842.4,
+          "max": 22842.4
+        }
+      }
+    }
+  },
+  "codex_runs": [
+    {
+      "output": "/private/tmp/concurro-phase6-bench-fast-codex-rust-1",
+      "profile": "fast",
+      "worker": "rust",
+      "elapsed_ms": 33387.6,
+      "client_elapsed_ms": 33015.1,
+      "local_connections": 2,
+      "provider_connections": 1,
+      "response_count": 3,
+      "request_body_bytes": [
+        78,
+        172,
+        253
+      ],
+      "proof_records": 4,
+      "directional_bytes": {
+        "upload_bytes": 182068116,
+        "download_bytes": 142753830
+      },
+      "sponsor_helpers": {
+        "handshake": 10723,
+        "prefix": 19826.4,
+        "proof_count": 4,
+        "proof_elapsed_ms_sum": 1241
+      },
+      "concurro_helpers": {
+        "handshake": 10302.8,
+        "prefix": 19162.1,
+        "proof_count": 4,
+        "proof_elapsed_ms_sum": 1038
+      },
+      "resources": {
+        "peak_rss_mib": 2872.8,
+        "peak_cpu_pct": 109.4
+      }
+    },
+    {
+      "output": "/private/tmp/concurro-phase6-bench-fast-codex-python-1",
+      "profile": "fast",
+      "worker": "python",
+      "elapsed_ms": 33483.0,
+      "client_elapsed_ms": 33421.8,
+      "local_connections": 2,
+      "provider_connections": 1,
+      "response_count": 3,
+      "request_body_bytes": [
+        78,
+        172,
+        253
+      ],
+      "proof_records": 4,
+      "directional_bytes": {
+        "upload_bytes": 182064489,
+        "download_bytes": 142749119
+      },
+      "sponsor_helpers": {
+        "handshake": 10769.5,
+        "prefix": 19762.1,
+        "proof_count": 4,
+        "proof_elapsed_ms_sum": 1507
+      },
+      "concurro_helpers": {
+        "handshake": 10309.3,
+        "prefix": 19067.4,
+        "proof_count": 4,
+        "proof_elapsed_ms_sum": 1057
+      },
+      "resources": {
+        "peak_rss_mib": 2939.7,
+        "peak_cpu_pct": 98.6
+      }
+    }
+  ],
+  "provenance": {
+    "package_root": "/private/tmp/concurro-phase6-rust-packages-v3",
+    "python_reference_package": "/Users/cylwit/Code/github.com/concurro/.artifacts/concurro-relay-native-v16",
+    "public_circuits": "/private/tmp/concurro-phase6-public-circuits",
+    "runner": "/private/tmp/concurro-phase6-bench-runner.py",
+    "shaper": "/private/tmp/concurro-phase6-shaper.py",
+    "claude_provider": "/private/tmp/concurro-phase6-fixture_parallel_sse.py",
+    "python_worker_shim": "/private/tmp/concurro-phase6-python-worker.sh",
+    "link_shaped": "Sponsor-Concurro outer authenticated TCP link; CLI and provider links unshaped",
+    "runner_sha256": "436c5db6fd3fc219f3d0fef8240ea97e529a53f523518a3a6567e790827547fb",
+    "shaper_sha256": "8f7ca0406bc70152e96adbf8c7c0c1116ad992a679075f55107bbaa27e64bf76",
+    "claude_provider_sha256": "074c94e01178a413ee31541f147d6154ea36b821f2a8aa49778dae9f262d69cf",
+    "python_worker_shim_sha256": "dfabcffe063cacedf0ba12a9bf7b079d3ae85528dc816d354549ea49471aae73",
+    "sponsor_manifest_sha256": "ebdcda098ab591eb88e84eeca1faa92e00f31f43e6233b87d3e03211834109af",
+    "concurro_manifest_sha256": "3f89a503c62e992ce9037f34dbf8a33644369ed13e3fc6a34de6003bbcdde347"
+  },
+  "claude_payload": {
+    "request_body_bytes_per_turn": 121,
+    "response_sse_body_bytes_per_turn": 834,
+    "proof_records_per_turn": 14,
+    "fixture": "phase6 fixture_parallel_sse send_fragments splits H2 writes into 1, 2, 5, and remaining bytes"
+  },
+  "codex_payload": {
+    "request_body_bytes_by_turn": [
+      78,
+      172,
+      253
+    ],
+    "response_count": 3,
+    "proof_records_total": 4
+  },
+  "supplemental_runs": [
+    {
+      "output": "/private/tmp/concurro-phase6-bench-home-rust-2",
+      "profile": "home",
+      "worker": "rust",
+      "turns": [
+        {
+          "phase": "cold",
+          "status": 200,
+          "first_headers_ms": 167221.8,
+          "first_body_ms": 167221.8,
+          "complete_ms": 175254.1,
+          "response_bytes": 834
+        },
+        {
+          "phase": "warm",
+          "status": 200,
+          "first_headers_ms": 1361.9,
+          "first_body_ms": 1361.9,
+          "complete_ms": 9382.9,
+          "response_bytes": 834
+        }
+      ],
+      "bootstrap_count": 1,
+      "proof_records": 28,
+      "directional_bytes": {
+        "upload_bytes": 188153275,
+        "download_bytes": 173681972
+      },
+      "sponsor_helpers": {
+        "handshake": 54898.3,
+        "prefix": 109623,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 15279
+      },
+      "concurro_helpers": {
+        "handshake": 54443.5,
+        "prefix": 108913,
+        "proof_count": 28,
+        "proof_elapsed_ms_sum": 12678
+      },
+      "resources": {
+        "peak_rss_mib": 2890.5,
+        "peak_cpu_pct": 95.1
+      },
+      "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+      "provider_response_ms": [
+        0.1,
+        0.1
+      ]
+    }
+  ]
+}

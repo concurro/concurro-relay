@@ -1,22 +1,30 @@
 # Packaged native TLS 1.3 backend
 
+The [Rust port plan](RUST-PORT-PLAN.md) maps the Python runtime to Rust modules,
+defines the migration sequence, and records the behavior and fixtures to preserve.
+
+[Phase 4](PHASE4-REPORT.md) added Codex; [phase 5](PHASE5-REPORT.md) adds
+successive Claude HTTP/2 requests and local SSE ingress. [Phase 6](PHASE6-REPORT.md)
+records package qualification. Both role packages now launch their bundled Rust
+worker by default. `CONCURRO_NATIVE_RUST_WORKER`
+can select a development worker binary explicitly.
+
 `package.py` assembles separate macOS arm64 Sponsor and Concurro bundles from
-the accepted TLS 1.3 native runtime, a local `hpack` installation, and the two
-Rust binaries. Python, OpenSSL, dynamic libraries, and public circuits are
-included. The compiler, Homebrew, and a source checkout are build inputs only.
+the accepted TLS 1.3 native helper runtime and three Rust binaries. OpenSSL,
+dynamic libraries, and public circuits are included. Python and its libraries
+are used only by build and reference fixtures, outside the runtime package.
+The compiler, Homebrew, and a source checkout are build inputs only.
 Each package has a SHA-256 manifest. Private MASCOT transport keys and OT
 preprocessing are generated for each session outside the bundle.
 
 ```bash
-RUSTC_WRAPPER= cargo build -p concurro-relay -p concurro-relay-dev --bins
-python3 native/package.py --role sponsor --runtime "$MVP_RUNTIME" --hpack "$HPACK_DIR" --relay target/debug/concurro-relay --verifier target/debug/dev-verifier --output "$SPONSOR_PACKAGE"
-python3 native/package.py --role concurro --runtime "$MVP_RUNTIME" --hpack "$HPACK_DIR" --relay target/debug/concurro-relay --verifier target/debug/dev-verifier --output "$CONCURRO_PACKAGE"
+RUSTC_WRAPPER= cargo build --release -p concurro-relay -p concurro-relay-dev -p concurro-relay-native --bins --locked
+python3 native/package.py --role sponsor --runtime "$MVP_RUNTIME" --relay target/release/concurro-relay --verifier target/release/dev-verifier --worker target/release/concurro-native-worker --output "$SPONSOR_PACKAGE"
+python3 native/package.py --role concurro --runtime "$MVP_RUNTIME" --relay target/release/concurro-relay --verifier target/release/dev-verifier --worker target/release/concurro-native-worker --output "$CONCURRO_PACKAGE"
 ```
 
 `MVP_RUNTIME` is an external accepted runnable MVP artifact containing
-`DiStefano/build`, `MP-SPDZ`, `request-proof`, and `pydeps`. `HPACK_DIR`
-contains the `hpack` Python package. The package script runs `clang` and
-reads the local signed Python 3.13 framework during assembly. Set
+`DiStefano/build`, `MP-SPDZ`, and `request-proof`. Set
 `CONCURRO_NATIVE_OUTPUT` to keep session logs and fresh private state in a
 chosen directory.
 

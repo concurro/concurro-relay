@@ -22,7 +22,12 @@ pub struct Served {
 impl Served {
     /// `route` as the relay serves it for a real provider.
     pub fn builtin(route: Route) -> Self {
-        Self { route, policy: policy(route), websocket: websocket(route), credential_header: CredentialHeader::bearer() }
+        Self {
+            route,
+            policy: policy(route),
+            websocket: websocket(route),
+            credential_header: CredentialHeader::bearer(),
+        }
     }
 }
 
@@ -62,7 +67,12 @@ fn websocket(route: Route) -> Option<Policy> {
             ],
         ),
     };
-    Some(Policy { host: route.host().into(), paths: names(paths), headers: names(headers), body_fields: names(body_fields) })
+    Some(Policy {
+        host: route.host().into(),
+        paths: names(paths),
+        headers: names(headers),
+        body_fields: names(body_fields),
+    })
 }
 
 fn names(names: &[&str]) -> Vec<String> {
@@ -136,5 +146,10 @@ fn policy(route: Route) -> Policy {
             ],
         ),
     };
-    Policy { host: route.host().into(), paths: names(paths), headers: names(headers), body_fields: names(body_fields) }
+    Policy {
+        host: route.host().into(),
+        paths: names(paths),
+        headers: names(headers),
+        body_fields: names(body_fields),
+    }
 }

@@ -23,14 +23,22 @@ pub const STEP_LIMIT: Duration = Duration::from_secs(30);
 pub async fn provider(lenient: bool) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(provider::serve(listener, ProviderConfig { token: TOKEN.into(), lenient }));
+    tokio::spawn(provider::serve(
+        listener,
+        ProviderConfig {
+            token: TOKEN.into(),
+            lenient,
+        },
+    ));
     address
 }
 
 /// A connected pair of loopback sockets.
 pub async fn pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let near = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+    let near = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
     let (far, _) = listener.accept().await.unwrap();
     near.set_nodelay(true).unwrap();
     far.set_nodelay(true).unwrap();

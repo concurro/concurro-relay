@@ -30,6 +30,7 @@ def main():
     parser.add_argument('--delay', type=float, default=2)
     parser.add_argument('--responses', type=int, default=2)
     parser.add_argument('--max-connections', type=int, default=3)
+    parser.add_argument('--error-status', type=int, choices=(401, 429))
     args = parser.parse_args()
     sys.path.insert(0, str(args.source))
     accepted = runpy.run_path(str(args.source / 'run_cli.py'))
@@ -89,6 +90,19 @@ def main():
                                 result['requests'].append(item)
                                 print(json.dumps({'fixture_event': 'request', **item}),
                                       file=sys.stderr, flush=True)
+                                if args.error_status:
+                                    error_type = ('authentication_error' if args.error_status == 401
+                                                  else 'rate_limit_error')
+                                    error_body = json.dumps({'type': 'error',
+                                                             'error': {'type': error_type,
+                                                                       'message': 'local fixture'}}).encode()
+                                    h2.send_headers(event.stream_id,
+                                                    [(b':status', str(args.error_status).encode()),
+                                                     (b'content-type', b'application/json')])
+                                    h2.send_data(event.stream_id, error_body, end_stream=True)
+                                    send_fragments(connection, h2.data_to_send())
+                                    result['responses'] += 1
+                                    continue
                                 events = claude_events(request, 'OK')
                                 encoded = [b'event: ' + value['type'].encode() + b'\n' +
                                            b'data: ' + json.dumps(value).encode() + b'\n\n'

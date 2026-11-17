@@ -15,5 +15,5 @@ pub mod serve;
 pub mod state;
 pub mod transcript;
 pub mod transport;
-pub mod ws;
 pub mod tui;
+pub mod ws;

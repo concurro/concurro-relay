@@ -48,10 +48,19 @@ impl DevRegistry {
     /// waited `approve_after`, starting with the relays kept in `file`.
     pub fn new(login: String, approve_after: Duration, file: Option<PathBuf>) -> Result<Self> {
         let registered = match file.as_ref().filter(|file| file.exists()) {
-            Some(file) => serde_json::from_slice(&fs::read(file)?).with_context(|| format!("{} is unreadable", file.display()))?,
+            Some(file) => serde_json::from_slice(&fs::read(file)?)
+                .with_context(|| format!("{} is unreadable", file.display()))?,
             None => HashMap::new(),
         };
-        Ok(Self { login, approve_after, file, relays: Mutex::new(Relays { pending: HashMap::new(), registered }) })
+        Ok(Self {
+            login,
+            approve_after,
+            file,
+            relays: Mutex::new(Relays {
+                pending: HashMap::new(),
+                registered,
+            }),
+        })
     }
 
     /// Writes the registered relays to the file they are kept in.
@@ -59,14 +68,21 @@ impl DevRegistry {
         if let Some(file) = &self.file {
             let kept = serde_json::to_vec(&relays.registered).expect("relays serialize");
             if let Err(error) = fs::write(file, kept) {
-                eprintln!("could not keep the registered relays in {}: {error}", file.display());
+                eprintln!(
+                    "could not keep the registered relays in {}: {error}",
+                    file.display()
+                );
             }
         }
     }
 
     /// How many relays are registered.
     pub fn registered(&self) -> usize {
-        self.relays.lock().expect("lock is not poisoned").registered.len()
+        self.relays
+            .lock()
+            .expect("lock is not poisoned")
+            .registered
+            .len()
     }
 }
 
@@ -77,10 +93,19 @@ fn hex(bytes: &[u8]) -> String {
 impl Registry for DevRegistry {
     fn register(&self, registration: Registration) -> Result<DeviceCode, String> {
         let device_code = hex(&identity::random::<16>());
-        let letters: Vec<u8> = identity::random::<8>().iter().map(|byte| CODE_LETTERS[*byte as usize % CODE_LETTERS.len()]).collect();
-        let user_code = format!("{}-{}", String::from_utf8_lossy(&letters[..4]), String::from_utf8_lossy(&letters[4..]));
+        let letters: Vec<u8> = identity::random::<8>()
+            .iter()
+            .map(|byte| CODE_LETTERS[*byte as usize % CODE_LETTERS.len()])
+            .collect();
+        let user_code = format!(
+            "{}-{}",
+            String::from_utf8_lossy(&letters[..4]),
+            String::from_utf8_lossy(&letters[4..])
+        );
         let mut relays = self.relays.lock().expect("lock is not poisoned");
-        relays.pending.insert(device_code.clone(), (registration, Instant::now()));
+        relays
+            .pending
+            .insert(device_code.clone(), (registration, Instant::now()));
         Ok(DeviceCode {
             device_code,
             user_code,
@@ -92,19 +117,35 @@ impl Registry for DevRegistry {
 
     fn poll(&self, device_code: &str) -> Result<Option<Registered>, String> {
         let mut relays = self.relays.lock().expect("lock is not poisoned");
-        let (_, made) = relays.pending.get(device_code).ok_or("unknown or expired code")?;
+        let (_, made) = relays
+            .pending
+            .get(device_code)
+            .ok_or("unknown or expired code")?;
         if made.elapsed() < self.approve_after {
             return Ok(None);
         }
-        let (registration, _) = relays.pending.remove(device_code).expect("the code was just found");
+        let (registration, _) = relays
+            .pending
+            .remove(device_code)
+            .expect("the code was just found");
         let relay = format!("relay-{}", hex(&identity::random::<4>()));
-        relays.registered.insert(relay.clone(), registration.public_key);
+        relays
+            .registered
+            .insert(relay.clone(), registration.public_key);
         self.keep(&relays);
-        Ok(Some(Registered { relay, login: self.login.clone() }))
+        Ok(Some(Registered {
+            relay,
+            login: self.login.clone(),
+        }))
     }
 
     fn public_key(&self, relay: &str) -> Option<Vec<u8>> {
-        self.relays.lock().expect("lock is not poisoned").registered.get(relay).cloned()
+        self.relays
+            .lock()
+            .expect("lock is not poisoned")
+            .registered
+            .get(relay)
+            .cloned()
     }
 
     fn deregister(&self, relay: &str) {

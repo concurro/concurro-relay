@@ -53,22 +53,42 @@ impl LiveVerifier {
     ///
     /// Opening uses the session's OT state, so a failure closes the
     /// session, as a failed proof does.
-    pub async fn open(handle: &mut SessionHandle, host: &str, provider: SocketAddr, roots: Roots) -> Result<Self> {
-        let opened = time::timeout(PROOF_LIMIT, Self::open_unguarded(handle, host, provider, roots))
-            .await
-            .unwrap_or_else(|_| Err(anyhow!("relay did not open the connection in time")));
+    pub async fn open(
+        handle: &mut SessionHandle,
+        host: &str,
+        provider: SocketAddr,
+        roots: Roots,
+    ) -> Result<Self> {
+        let opened = time::timeout(
+            PROOF_LIMIT,
+            Self::open_unguarded(handle, host, provider, roots),
+        )
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("relay did not open the connection in time")));
         if opened.is_err() {
             handle.close();
         }
         opened
     }
 
-    async fn open_unguarded(handle: &mut SessionHandle, host: &str, provider: SocketAddr, roots: Roots) -> Result<Self> {
-        let verifier = handle.new_verifier(VerifierConfig::builder().root_store(roots.store()).build()?)?;
+    async fn open_unguarded(
+        handle: &mut SessionHandle,
+        host: &str,
+        provider: SocketAddr,
+        roots: Roots,
+    ) -> Result<Self> {
+        let verifier = handle.new_verifier(
+            VerifierConfig::builder()
+                .root_store(roots.store())
+                .build()?,
+        )?;
         let VerifierCommitStart::Proxy(verifier) = verifier.commit().await? else {
             bail!("relay did not request proxy mode");
         };
-        ensure!(verifier.config().server_name().as_str() == host, "relay targeted another server");
+        ensure!(
+            verifier.config().server_name().as_str() == host,
+            "relay targeted another server"
+        );
         let provider = TcpStream::connect(provider).await?;
         provider.set_nodelay(true)?;
         let verifier = verifier.accept().await?;
@@ -76,7 +96,16 @@ impl LiveVerifier {
         let forwarding = tokio::spawn(async move {
             let _ = verifier.forward(provider.compat()).await;
         });
-        Ok(Self { tap, forwarding, host: host.to_owned(), roots, sent: Vec::new(), received: 0, records: 0, abandoned: false })
+        Ok(Self {
+            tap,
+            forwarding,
+            host: host.to_owned(),
+            roots,
+            sent: Vec::new(),
+            received: 0,
+            records: 0,
+            abandoned: false,
+        })
     }
 
     /// Verifies the relay's proof of everything since the last one.
@@ -91,7 +120,10 @@ impl LiveVerifier {
         expected: &[u8],
         hidden: &[Range<usize>],
     ) -> Result<Result<Vec<u8>, String>> {
-        Ok(self.verify_received(handle, expected, hidden).await?.map(|received| received.bytes))
+        Ok(self
+            .verify_received(handle, expected, hidden)
+            .await?
+            .map(|received| received.bytes))
     }
 
     /// How many of the bytes received on the connection, from its start,
@@ -134,7 +166,11 @@ impl LiveVerifier {
         expected: &[u8],
         hidden: &[Range<usize>],
     ) -> Result<Result<Received, String>> {
-        let verifier = handle.new_verifier(VerifierConfig::builder().root_store(self.roots.store()).build()?)?;
+        let verifier = handle.new_verifier(
+            VerifierConfig::builder()
+                .root_store(self.roots.store())
+                .build()?,
+        )?;
         let VerifierCommitStart::Proxy(verifier) = verifier.commit().await? else {
             return Ok(Err("relay did not request proxy mode".into()));
         };
@@ -149,22 +185,34 @@ impl LiveVerifier {
 
         let start = self.sent.len();
         let end = start + expected.len();
-        let hidden = RangeSet::from(hidden.iter().map(|range| start + range.start..start + range.end).collect::<Vec<_>>());
+        let hidden = RangeSet::from(
+            hidden
+                .iter()
+                .map(|range| start + range.start..start + range.end)
+                .collect::<Vec<_>>(),
+        );
         let mut revealed = RangeSet::from(start..end);
         revealed.difference_mut(&hidden);
 
         // The proof must cover exactly the new bytes: hidden ones proven
         // unable to reframe the request, the rest revealed.
         let request = verifier.request();
-        let reveals_new = request
-            .reveal()
-            .is_some_and(|(sent, received)| *sent == revealed && received.min().is_none_or(|from| from == self.received));
+        let reveals_new = request.reveal().is_some_and(|(sent, received)| {
+            *sent == revealed && received.min().is_none_or(|from| from == self.received)
+        });
         if !reveals_new || !request.reveal_recv_key() || request.no_control().0 != hidden {
             let reason = "proof does not cover exactly the new request bytes";
             verifier.reject(Some(reason)).await?;
             return Ok(Err(reason.into()));
         }
-        let (VerifierOutput { server_name, transcript, .. }, verifier) = match verifier.accept().await {
+        let (
+            VerifierOutput {
+                server_name,
+                transcript,
+                ..
+            },
+            verifier,
+        ) = match verifier.accept().await {
             Ok(accepted) => accepted,
             Err(error) => return Ok(Err(format!("proof failed: {error}"))),
         };
@@ -178,13 +226,19 @@ impl LiveVerifier {
         }
         let transcript = transcript.context("no transcript revealed")?;
         if transcript.len_sent() != end {
-            return Ok(Err(format!("relay sent {} bytes, expected {end}", transcript.len_sent())));
+            return Ok(Err(format!(
+                "relay sent {} bytes, expected {end}",
+                transcript.len_sent()
+            )));
         }
-        let sent = transcript.sent_unsafe(end).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let sent = transcript
+            .sent_unsafe(end)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         if sent[start..] != *expected {
             return Ok(Err("request differs from the one asked for".into()));
         }
-        if *transcript.received_authed() != RangeSet::from(self.received..transcript.len_received()) {
+        if *transcript.received_authed() != RangeSet::from(self.received..transcript.len_received())
+        {
             return Ok(Err("response is partly hidden".into()));
         }
         // The relay may have sent no application data beyond what this proof
@@ -201,7 +255,10 @@ impl LiveVerifier {
         self.sent.extend_from_slice(expected);
         self.received = received.len();
         self.records = records;
-        Ok(Ok(Received { bytes, request_mark: prefix.received_at_last_send }))
+        Ok(Ok(Received {
+            bytes,
+            request_mark: prefix.received_at_last_send,
+        }))
     }
 
     /// Waits for the relay to close the provider connection.

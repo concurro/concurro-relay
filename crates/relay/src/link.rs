@@ -34,7 +34,13 @@ impl Relay {
     /// identity on it.
     async fn connect(&self, number: u64, slot: u32, role: Role) -> Result<Connection> {
         let mut connection = self.registration.server.connect().await?;
-        let hello = Hello::Link { version: PROTOCOL_VERSION, relay: self.registration.relay.clone(), link: number, slot, role };
+        let hello = Hello::Link {
+            version: PROTOCOL_VERSION,
+            relay: self.registration.relay.clone(),
+            link: number,
+            slot,
+            role,
+        };
         link::present(&mut connection, &hello, &self.identity).await?;
         Ok(connection)
     }
@@ -45,9 +51,20 @@ impl Relay {
         let slot = u32::try_from(link)?;
         let control = self.connect(number, slot, Role::Control).await?;
         let proofs = self.connect(number, slot, Role::Proofs).await?;
-        let _ = events.send(Event::Link { link, state: LinkState::Up });
+        let _ = events.send(Event::Link {
+            link,
+            state: LinkState::Up,
+        });
         let traffic = Counters::default();
-        serve::serve_link(control, Metered::new(proofs, traffic.clone()), &self.config, link, &traffic, events).await
+        serve::serve_link(
+            control,
+            Metered::new(proofs, traffic.clone()),
+            &self.config,
+            link,
+            &traffic,
+            events,
+        )
+        .await
     }
 
     /// Keeps link `link` open, opening it again whenever it ends, until
@@ -55,7 +72,10 @@ impl Relay {
     async fn keep(&self, link: usize, events: UnboundedSender<Event>) {
         let mut delay = RETRY_DELAY;
         loop {
-            let _ = events.send(Event::Link { link, state: LinkState::Connecting });
+            let _ = events.send(Event::Link {
+                link,
+                state: LinkState::Connecting,
+            });
             let state = match self.serve(link, &events).await {
                 // A link which did work ends for reasons of its own.
                 Ok(served) => {

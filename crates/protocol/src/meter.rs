@@ -64,7 +64,9 @@ impl<S: AsyncRead + Unpin> AsyncRead for Metered<S> {
         let before = buf.filled().len();
         let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
         let fresh = &buf.filled()[before..];
-        self.counters.read.fetch_add(fresh.len() as u64, Ordering::Relaxed);
+        self.counters
+            .read
+            .fetch_add(fresh.len() as u64, Ordering::Relaxed);
         if let Some(recorded) = &self.counters.recorded {
             recorded.lock().unwrap().extend_from_slice(fresh);
         }
@@ -73,10 +75,16 @@ impl<S: AsyncRead + Unpin> AsyncRead for Metered<S> {
 }
 
 impl<S: AsyncWrite + Unpin> AsyncWrite for Metered<S> {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let poll = Pin::new(&mut self.inner).poll_write(cx, buf);
         if let Poll::Ready(Ok(n)) = &poll {
-            self.counters.written.fetch_add(*n as u64, Ordering::Relaxed);
+            self.counters
+                .written
+                .fetch_add(*n as u64, Ordering::Relaxed);
         }
         poll
     }

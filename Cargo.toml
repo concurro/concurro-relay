@@ -13,6 +13,9 @@ publish = false
 concurro-relay-protocol = { path = "crates/protocol" }
 concurro-relay = { path = "crates/relay" }
 concurro-relay-verifier = { path = "crates/verifier" }
+concurro-relay-native = { path = "crates/native" }
+concurro-relay-native-transport = { path = "crates/native-transport" }
+concurro-relay-provider-protocol = { path = "crates/provider-protocol" }
 
 # Prepared by scripts/upstream.sh.
 tlsn = { path = "upstream/tlsn/crates/tlsn", features = ["mozilla-certs"] }
@@ -23,15 +26,20 @@ base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env"] }
 dirs = "6"
 futures = "0.3"
+hex = "0.4"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
 mimalloc = "0.1"
+num-bigint = "0.4"
+p256 = "0.13"
 ratatui = "0.29"
 rcgen = "0.13"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
+rustls-pemfile = "2"
+rustls-webpki = { version = "0.103", default-features = false, features = ["alloc", "ring", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

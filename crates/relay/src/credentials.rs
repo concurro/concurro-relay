@@ -39,14 +39,20 @@ pub struct Credential {
 /// Shows everything but the token.
 impl fmt::Debug for Credential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Credential").field("token", &"<hidden>").field("headers", &self.headers).finish()
+        f.debug_struct("Credential")
+            .field("token", &"<hidden>")
+            .field("headers", &self.headers)
+            .finish()
     }
 }
 
 impl Credential {
     /// A credential which is a token alone.
     pub fn token(token: &str) -> Self {
-        Self { token: token.to_owned(), headers: Vec::new() }
+        Self {
+            token: token.to_owned(),
+            headers: Vec::new(),
+        }
     }
 
     /// When the token says it stops being valid, if it says.
@@ -71,14 +77,24 @@ impl Source {
     pub fn load(&self, route: Route) -> Result<Credential> {
         let credential = match (self, route) {
             (Self::Fixed(credential), _) => credential.clone(),
-            (Self::Kept(store), Route::ChatgptSubscription) => {
-                store.credential(route)?.context("needs a ChatGPT sign-in")?
+            (Self::Kept(store), Route::ChatgptSubscription) => store
+                .credential(route)?
+                .context("needs a ChatGPT sign-in")?,
+            (Self::Kept(store), Route::ClaudeSubscription) => {
+                claude(env::var(CLAUDE_TOKEN_VAR).ok(), || store.credential(route))?
             }
-            (Self::Kept(store), Route::ClaudeSubscription) => claude(env::var(CLAUDE_TOKEN_VAR).ok(), || store.credential(route))?,
         };
-        ensure!(usable(&credential.token), "the {} credential is not a usable token", route.label());
+        ensure!(
+            usable(&credential.token),
+            "the {} credential is not a usable token",
+            route.label()
+        );
         if let Some(expired) = credential.expiry().and_then(|expiry| expiry.elapsed().ok()) {
-            bail!("the {} sign-in expired {} ago; sign in again with `concurro-relay connect {route}`", route.label(), ago(expired));
+            bail!(
+                "the {} sign-in expired {} ago; sign in again with `concurro-relay connect {route}`",
+                route.label(),
+                ago(expired)
+            );
         }
         Ok(credential)
     }
@@ -101,8 +117,14 @@ pub fn ago(elapsed: Duration) -> String {
 
 /// The relay's Claude credential: the token `from_environment` holds, or
 /// else what `kept` finds in the relay's store.
-fn claude(from_environment: Option<String>, kept: impl FnOnce() -> Result<Option<Credential>>) -> Result<Credential> {
-    match from_environment.map(|token| token.trim().to_owned()).filter(|token| !token.is_empty()) {
+fn claude(
+    from_environment: Option<String>,
+    kept: impl FnOnce() -> Result<Option<Credential>>,
+) -> Result<Credential> {
+    match from_environment
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty())
+    {
         Some(token) => Ok(Credential::token(&token)),
         None => kept()?.context("needs a token from `claude setup-token`"),
     }
@@ -118,7 +140,10 @@ mod tests {
     fn claude_token_comes_from_the_environment_before_the_store() {
         let kept = || Ok(Some(Credential::token("kept")));
         assert_eq!(claude(None, kept).unwrap().token, "kept");
-        assert_eq!(claude(Some(" from-env\n".into()), kept).unwrap().token, "from-env");
+        assert_eq!(
+            claude(Some(" from-env\n".into()), kept).unwrap().token,
+            "from-env"
+        );
         assert_eq!(claude(Some("  ".into()), kept).unwrap().token, "kept");
         assert!(claude(None, || Ok(None)).is_err());
     }
@@ -128,22 +153,40 @@ mod tests {
         let fixed = |token: &str| Source::Fixed(Credential::token(token));
         assert!(fixed("plain-token").load(Route::ClaudeSubscription).is_ok());
         assert!(fixed("two words").load(Route::ClaudeSubscription).is_err());
-        assert!(fixed("line\r\nbreak").load(Route::ClaudeSubscription).is_err());
+        assert!(
+            fixed("line\r\nbreak")
+                .load(Route::ClaudeSubscription)
+                .is_err()
+        );
         assert!(fixed("").load(Route::ClaudeSubscription).is_err());
     }
 
     /// A token which says it expires `seconds` from now.
     fn expiring(seconds: i64) -> Credential {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         let claims = URL_SAFE_NO_PAD.encode(json!({"exp": now + seconds}).to_string());
         Credential::token(&format!("header.{claims}.signature"))
     }
 
     #[test]
     fn a_token_which_says_it_has_expired_is_not_used() {
-        assert!(Source::Fixed(expiring(3600)).load(Route::ChatgptSubscription).is_ok());
-        let expired = Source::Fixed(expiring(-3900)).load(Route::ChatgptSubscription).unwrap_err().to_string();
-        assert!(expired.contains("expired 1h 5m ago") && expired.contains("connect chatgpt_subscription"), "{expired}");
+        assert!(
+            Source::Fixed(expiring(3600))
+                .load(Route::ChatgptSubscription)
+                .is_ok()
+        );
+        let expired = Source::Fixed(expiring(-3900))
+            .load(Route::ChatgptSubscription)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            expired.contains("expired 1h 5m ago")
+                && expired.contains("connect chatgpt_subscription"),
+            "{expired}"
+        );
         assert_eq!(Credential::token("opaque-token").expiry(), None);
     }
 }

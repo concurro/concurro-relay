@@ -101,14 +101,28 @@ impl Gateway {
     /// A gateway for `route` which uses the relay links arriving on
     /// `accepted`, and with `zstd` compresses request bodies before they
     /// are sent and proven.
-    pub fn new(route: Route, expect: Expect, zstd: bool, mut accepted: mpsc::UnboundedReceiver<Accepted<Connection>>) -> Arc<Self> {
+    pub fn new(
+        route: Route,
+        expect: Expect,
+        zstd: bool,
+        mut accepted: mpsc::UnboundedReceiver<Accepted<Connection>>,
+    ) -> Arc<Self> {
         let (returned, idle) = mpsc::unbounded_channel();
         let ready = returned.clone();
         tokio::spawn(async move {
-            while let Some(Accepted { relay, control, proofs, .. }) = accepted.recv().await {
+            while let Some(Accepted {
+                relay,
+                control,
+                proofs,
+                ..
+            }) = accepted.recv().await
+            {
                 eprintln!("link opened by {relay}");
                 let traffic = Counters::default();
-                let link = Link::new(Metered::new(control, traffic.clone()), Metered::new(proofs, traffic.clone()));
+                let link = Link::new(
+                    Metered::new(control, traffic.clone()),
+                    Metered::new(proofs, traffic.clone()),
+                );
                 let _ = ready.send(RelayLink { link, traffic });
             }
         });
@@ -125,27 +139,52 @@ impl Gateway {
 
     /// Has a relay perform `job` and verifies the outcome.
     pub async fn perform(&self, job: &Job) -> Result<Performed> {
-        let RelayLink { link, traffic } = self.idle.lock().await.recv().await.context("no relay is connected")?;
+        let RelayLink { link, traffic } = self
+            .idle
+            .lock()
+            .await
+            .recv()
+            .await
+            .context("no relay is connected")?;
         let (upload, download) = (traffic.read(), traffic.written());
         // A link which times out is dropped along with the exchange.
         let (verdict, link) = time::timeout(EXCHANGE_LIMIT, link.exchange(job, &self.expect))
             .await
             .context("exchange exceeded its time limit")?;
         if let Some(link) = link {
-            let _ = self.returned.send(RelayLink { link, traffic: traffic.clone() });
+            let _ = self.returned.send(RelayLink {
+                link,
+                traffic: traffic.clone(),
+            });
         }
-        Ok(Performed { verdict: verdict?, upload: traffic.read() - upload, download: traffic.written() - download })
+        Ok(Performed {
+            verdict: verdict?,
+            upload: traffic.read() - upload,
+            download: traffic.written() - download,
+        })
     }
 
     /// Has a relay carry the WebSocket connection `harness` to the provider
     /// with the upgrade request `job`, logging each turn under `label`.
-    pub async fn carry<H>(&self, harness: &mut WebSocketStream<H>, job: &Job, label: &str) -> Result<()>
+    pub async fn carry<H>(
+        &self,
+        harness: &mut WebSocketStream<H>,
+        job: &Job,
+        label: &str,
+    ) -> Result<()>
     where
         H: AsyncRead + AsyncWrite + Unpin,
     {
-        let RelayLink { mut link, traffic } = self.idle.lock().await.recv().await.context("no relay is connected")?;
+        let RelayLink { mut link, traffic } = self
+            .idle
+            .lock()
+            .await
+            .recv()
+            .await
+            .context("no relay is connected")?;
         // A link which failed is dropped along with the connection.
-        link.carry(harness, job, &self.expect, label, &traffic).await?;
+        link.carry(harness, job, &self.expect, label, &traffic)
+            .await?;
         let _ = self.returned.send(RelayLink { link, traffic });
         Ok(())
     }
@@ -153,9 +192,16 @@ impl Gateway {
     /// Accepts a harness's WebSocket upgrade for `path` and has a relay
     /// carry the connection.
     fn upgrade(self: &Arc<Self>, request: Request<Incoming>, path: &str) -> Response<Full<Bytes>> {
-        let key = request.headers().get(SEC_WEBSOCKET_KEY).map(|key| key.as_bytes()).unwrap_or_default();
+        let key = request
+            .headers()
+            .get(SEC_WEBSOCKET_KEY)
+            .map(|key| key.as_bytes())
+            .unwrap_or_default();
         let accept = derive_accept_key(key);
-        let headers = request.headers().iter().filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)));
+        let headers = request
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)));
         let job = match jobs::job(self.route, path, headers, String::new()) {
             Ok(job) => job,
             Err(error) => return failure(StatusCode::BAD_REQUEST, &format!("{error:#}")),
@@ -163,8 +209,11 @@ impl Gateway {
         let label = format!("ws#{}", self.served.fetch_add(1, Ordering::Relaxed) + 1);
         let gateway = self.clone();
         tokio::spawn(async move {
-            let Ok(upgraded) = upgrade::on(request).await else { return };
-            let mut harness = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
+            let Ok(upgraded) = upgrade::on(request).await else {
+                return;
+            };
+            let mut harness =
+                WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
             eprintln!("{label} upgrade from the harness: {}", job.path);
             let (code, reason) = match gateway.carry(&mut harness, &job, &label).await {
                 Ok(()) => (CloseCode::Normal, String::new()),
@@ -177,7 +226,12 @@ impl Gateway {
             while !reason.is_char_boundary(end) {
                 end -= 1;
             }
-            let _ = harness.close(Some(CloseFrame { code, reason: reason[..end].to_owned().into() })).await;
+            let _ = harness
+                .close(Some(CloseFrame {
+                    code,
+                    reason: reason[..end].to_owned().into(),
+                }))
+                .await;
             eprintln!("{label} closed");
         });
         Response::builder()
@@ -196,14 +250,28 @@ impl Gateway {
             let gateway = self.clone();
             tokio::spawn(async move {
                 let service = service_fn(|request| gateway.handle(request));
-                let _ = http1::Builder::new().serve_connection(TokioIo::new(socket), service).with_upgrades().await;
+                let _ = http1::Builder::new()
+                    .serve_connection(TokioIo::new(socket), service)
+                    .with_upgrades()
+                    .await;
             });
         }
     }
 
-    async fn handle(self: &Arc<Self>, request: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
-        let path = request.uri().path_and_query().map_or("/", |path| path.as_str()).to_owned();
-        if request.headers().get(UPGRADE).is_some_and(|protocol| protocol.as_bytes().eq_ignore_ascii_case(b"websocket")) {
+    async fn handle(
+        self: &Arc<Self>,
+        request: Request<Incoming>,
+    ) -> Result<Response<Full<Bytes>>, Infallible> {
+        let path = request
+            .uri()
+            .path_and_query()
+            .map_or("/", |path| path.as_str())
+            .to_owned();
+        if request
+            .headers()
+            .get(UPGRADE)
+            .is_some_and(|protocol| protocol.as_bytes().eq_ignore_ascii_case(b"websocket"))
+        {
             return Ok(self.upgrade(request, &path));
         }
         if request.method() != Method::POST {
@@ -227,7 +295,12 @@ impl Gateway {
 
     /// Has a relay perform the harness's request and returns the verified
     /// response.
-    async fn exchange(&self, request: Request<Incoming>, path: &str, number: usize) -> Result<Response<Full<Bytes>>> {
+    async fn exchange(
+        &self,
+        request: Request<Incoming>,
+        path: &str,
+        number: usize,
+    ) -> Result<Response<Full<Bytes>>> {
         let (parts, body) = request.into_parts();
         let headers = parts
             .headers
@@ -239,10 +312,20 @@ impl Gateway {
         let model = fields["model"].as_str().unwrap_or_default().to_owned();
         // A thread continuation must build on a response this gateway
         // verified, since the request no longer carries the conversation.
-        let thread = match (fields["thread"]["type"].as_str(), fields["thread"]["previous_message_id"].as_str()) {
+        let thread = match (
+            fields["thread"]["type"].as_str(),
+            fields["thread"]["previous_message_id"].as_str(),
+        ) {
             (Some("continue"), Some(previous)) => {
-                if !self.verified_messages.lock().expect("lock is not poisoned").contains(previous) {
-                    eprintln!("#{number} refused: thread continues {previous}, which this gateway did not verify");
+                if !self
+                    .verified_messages
+                    .lock()
+                    .expect("lock is not poisoned")
+                    .contains(previous)
+                {
+                    eprintln!(
+                        "#{number} refused: thread continues {previous}, which this gateway did not verify"
+                    );
                     return Ok(thread_not_found());
                 }
                 "continue"
@@ -255,10 +338,17 @@ impl Gateway {
         if self.zstd {
             job.compress()?;
         }
-        eprintln!("#{number} request: model={model} thread={thread} body={plain} bytes, sent as {} bytes", job.body.len());
+        eprintln!(
+            "#{number} request: model={model} thread={thread} body={plain} bytes, sent as {} bytes",
+            job.body.len()
+        );
 
         let started = Instant::now();
-        let Performed { verdict, upload, download } = self.perform(&job).await?;
+        let Performed {
+            verdict,
+            upload,
+            download,
+        } = self.perform(&job).await?;
         let response = match verdict {
             Verdict::Verified(response) => response,
             Verdict::Refused(reason) if reason.starts_with(UNKNOWN_THREAD_PARENT) => {
@@ -270,9 +360,16 @@ impl Gateway {
         };
 
         if let Some(id) = wire::message_id(&response.body) {
-            self.verified_messages.lock().expect("lock is not poisoned").insert(id);
+            self.verified_messages
+                .lock()
+                .expect("lock is not poisoned")
+                .insert(id);
         }
-        let phases: Vec<String> = response.laps.iter().map(|(name, s)| format!("{name} {s:.2}s")).collect();
+        let phases: Vec<String> = response
+            .laps
+            .iter()
+            .map(|(name, s)| format!("{name} {s:.2}s"))
+            .collect();
         eprintln!(
             "#{number} verified: status={} total={:.2}s ({}) relay→gateway={:.1} MB gateway→relay={:.1} MB body={} bytes",
             response.status,
@@ -286,7 +383,9 @@ impl Gateway {
         let passed_on: Vec<(&str, &str)> = response
             .headers
             .iter()
-            .filter(|(name, _)| PASSED_ON.contains(&name.as_str()) || name.starts_with("anthropic-ratelimit-"))
+            .filter(|(name, _)| {
+                PASSED_ON.contains(&name.as_str()) || name.starts_with("anthropic-ratelimit-")
+            })
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
         let status = StatusCode::from_u16(response.status)?;
@@ -313,10 +412,18 @@ fn thread_not_found() -> Response<Full<Bytes>> {
             "details": {"error_code": "thread_not_found"},
         },
     });
-    reply(StatusCode::NOT_FOUND, &[("content-type", "application/json")], Bytes::from(body.to_string()))
+    reply(
+        StatusCode::NOT_FOUND,
+        &[("content-type", "application/json")],
+        Bytes::from(body.to_string()),
+    )
 }
 
 fn failure(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
     let body = json!({"type": "error", "error": {"type": "api_error", "message": message}});
-    reply(status, &[("content-type", "application/json")], Bytes::from(body.to_string()))
+    reply(
+        status,
+        &[("content-type", "application/json")],
+        Bytes::from(body.to_string()),
+    )
 }

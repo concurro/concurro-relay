@@ -3,15 +3,9 @@
 import argparse
 import hashlib
 import json
-import os
-import plistlib
 import shutil
 import subprocess
 from pathlib import Path
-
-HERE = Path(__file__).resolve().parent
-PYTHON = Path('/Library/Frameworks/Python.framework/Versions/3.13')
-
 
 def copy(source, destination):
     """Copy one existing runtime file without carrying source-tree siblings."""
@@ -47,30 +41,8 @@ def add_libraries(bundle, roots):
                 queue.append(target)
 
 
-def copy_python_framework(bundle):
-    """Preserve upstream's signed standard library without installed extras."""
-    destination = bundle / 'Python.framework/Versions/3.13'
-    resources = PYTHON / '_CodeSignature/CodeResources'
-    sealed = plistlib.loads(resources.read_bytes())['files2']
-    for name in sorted(sealed):
-        source = PYTHON / name
-        target = destination / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if source.is_symlink():
-            target.symlink_to(source.readlink())
-        elif source.is_dir():
-            shutil.copytree(source, target, symlinks=True, dirs_exist_ok=True)
-        else:
-            shutil.copy2(source, target)
-    copy(PYTHON / 'Python', destination / 'Python')
-    copy(resources, destination / '_CodeSignature/CodeResources')
-    (bundle / 'libexec').mkdir(parents=True, exist_ok=True)
-    subprocess.run(['clang', '-arch', 'arm64', '-O2', str(HERE / 'python_launcher.c'),
-                    '-o', str(bundle / 'libexec/python3.13')], check=True)
-
-
 def assemble(args):
-    """Copy only role-required binaries, Python, public circuits, and libraries."""
+    """Copy role-required Rust binaries, native helpers, circuits, and libraries."""
     source = args.runtime.resolve()
     output = args.output.resolve()
     if output.exists():
@@ -80,6 +52,8 @@ def assemble(args):
     binary = args.relay if args.role == 'sponsor' else args.verifier
     executable = output / 'bin' / binary.name
     copy(binary, executable)
+    worker = bundle / 'concurro-native-worker'
+    copy(args.worker, worker)
     for name in ('HandoffKeyShare', 'HandoffPartyKrrw', 'HandoffPrefix'):
         copy(source / 'DiStefano/build' / name, runtime / 'DiStefano/build' / name)
     copy(source / 'DiStefano/build/emp-tool/libemp-tool.dylib',
@@ -97,40 +71,15 @@ def assemble(args):
     shutil.copytree(source / 'MP-SPDZ/Programs', runtime / 'MP-SPDZ/Programs')
     copy(source / 'request-proof/target/release/handoff-request-proof',
          runtime / 'request-proof/target/release/handoff-request-proof')
-    shutil.copytree(HERE / 'worker', bundle / 'worker', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-    copy(HERE / 'tunnel.py', bundle / 'tunnel.py')
-    copy_python_framework(bundle)
-    for name in ('cryptography', 'cffi', 'pycparser', '_yaml', 'yaml'):
-        path = source / 'pydeps' / name
-        if path.exists():
-            shutil.copytree(path, bundle / 'pydeps' / name,
-                            ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-    for extension in (source / 'pydeps').glob('*.so'):
-        copy(extension, bundle / 'pydeps' / extension.name)
-    shutil.copytree(args.hpack / 'hpack', bundle / 'pydeps/hpack',
-                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     openssl = Path(args.openssl).resolve()
     copy(openssl, bundle / 'bin/openssl')
-    add_libraries(bundle, [executable, bundle / 'libexec/python3.13',
-                           bundle / 'bin/openssl',
+    add_libraries(bundle, [executable, worker, bundle / 'bin/openssl',
                            runtime / 'DiStefano/build/HandoffKeyShare',
                            runtime / 'DiStefano/build/HandoffPartyKrrw',
                            runtime / 'DiStefano/build/HandoffPrefix',
                            runtime / 'DiStefano/build/emp-tool/libemp-tool.dylib',
                            runtime / 'MP-SPDZ/mascot-party.x', runtime / 'MP-SPDZ/libSPDZ.so',
-                           runtime / 'request-proof/target/release/handoff-request-proof',
-                           bundle / 'Python.framework/Versions/3.13/lib/python3.13/lib-dynload/_ssl.cpython-313-darwin.so'])
-    wrapper = bundle / 'python'
-    wrapper.write_text('''#!/bin/sh
-set -eu
-bundle=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-export PYTHONHOME="$bundle/Python.framework/Versions/3.13"
-export PYTHONPATH="$bundle/worker:$bundle/pydeps:$bundle"
-export DYLD_LIBRARY_PATH="$bundle/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-export PATH="$bundle/bin:/usr/bin:/bin"
-exec "$bundle/libexec/python3.13" "$@"
-''')
-    wrapper.chmod(0o755)
+                           runtime / 'request-proof/target/release/handoff-request-proof'])
     files = {str(path.relative_to(output)): hashlib.sha256(path.read_bytes()).hexdigest()
              for path in output.rglob('*') if path.is_file() and not path.is_symlink()}
     (output / 'manifest.json').write_text(json.dumps({'role': args.role, 'files': files}, indent=2))
@@ -144,6 +93,6 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--relay', type=Path, required=True)
     parser.add_argument('--verifier', type=Path, required=True)
-    parser.add_argument('--hpack', type=Path, required=True)
+    parser.add_argument('--worker', type=Path, required=True)
     parser.add_argument('--openssl', default='/opt/homebrew/bin/openssl')
     assemble(parser.parse_args())

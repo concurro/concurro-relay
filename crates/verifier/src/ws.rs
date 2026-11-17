@@ -55,34 +55,54 @@ impl WsVerifier {
             Ok(received) => received,
             Err(reason) => return Ok(Err(reason)),
         };
-        let Some(head_end) = received.windows(HEAD_END.len()).position(|window| window == HEAD_END) else {
+        let Some(head_end) = received
+            .windows(HEAD_END.len())
+            .position(|window| window == HEAD_END)
+        else {
             return Ok(Err("upgrade response is incomplete".into()));
         };
         let head_end = head_end + HEAD_END.len();
         let accepted = wire::parse_response(&received[..head_end]).is_ok_and(|response| {
             let accept = derive_accept_key(key.as_bytes());
             response.status == 101
-                && response.headers.iter().any(|(name, value)| name == "sec-websocket-accept" && *value == accept)
+                && response
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "sec-websocket-accept" && *value == accept)
         });
         if !accepted {
             let status = ws::status(&received[..head_end]).unwrap_or("unreadable");
-            return Ok(Err(format!("provider did not accept the upgrade: status {status}")));
+            return Ok(Err(format!(
+                "provider did not accept the upgrade: status {status}"
+            )));
         }
         let mut inbox = Inbox::default();
         if let Err(error) = inbox.push(&received[head_end..]) {
             return Ok(Err(format!("{error:#}")));
         }
-        Ok(Ok(Self { live, inbox, head: head_end, request_mark: 0, in_flight: None }))
+        Ok(Ok(Self {
+            live,
+            inbox,
+            head: head_end,
+            request_mark: 0,
+            in_flight: None,
+        }))
     }
 
     /// Verifies the relay's proof that it sent exactly the request `frame`.
     /// Returns the response if it has ended, or the ping to answer first.
-    pub async fn turn(&mut self, handle: &mut SessionHandle, frame: &[u8]) -> Result<Result<Progress, String>> {
+    pub async fn turn(
+        &mut self,
+        handle: &mut SessionHandle,
+        frame: &[u8],
+    ) -> Result<Result<Progress, String>> {
         let Ok(text) = ws::client_text(frame) else {
             bail!("frame to verify is not a text message");
         };
         ensure!(self.in_flight.is_none(), "a response is still in flight");
-        let received = self.receive(handle, frame, Some(ws::continued_response(&text))).await?;
+        let received = self
+            .receive(handle, frame, Some(ws::continued_response(&text)))
+            .await?;
         Ok(received.and_then(|next| next.ok_or_else(|| "response is incomplete".into())))
     }
 
@@ -90,20 +110,31 @@ impl WsVerifier {
     /// which answers a ping the provider sent. Returns as [`Self::turn`]
     /// does if a response is in flight, and otherwise any further ping to
     /// answer.
-    pub async fn pong(&mut self, handle: &mut SessionHandle, frame: &[u8]) -> Result<Result<Option<Progress>, String>> {
-        let answers = ws::client_payload(frame, OpCode::Control(Control::Pong)).is_ok_and(|payload| self.inbox.answer(&payload));
+    pub async fn pong(
+        &mut self,
+        handle: &mut SessionHandle,
+        frame: &[u8],
+    ) -> Result<Result<Option<Progress>, String>> {
+        let answers = ws::client_payload(frame, OpCode::Control(Control::Pong))
+            .is_ok_and(|payload| self.inbox.answer(&payload));
         ensure!(answers, "frame to verify does not answer a ping");
         let awaited = self.in_flight.is_some();
-        Ok(self.receive(handle, frame, None).await?.and_then(|next| match next {
-            None if awaited => Err("response is incomplete".into()),
-            next => Ok(next),
-        }))
+        Ok(self
+            .receive(handle, frame, None)
+            .await?
+            .and_then(|next| match next {
+                None if awaited => Err("response is incomplete".into()),
+                next => Ok(next),
+            }))
     }
 
     /// Verifies the relay's proof of what the provider sent while no
     /// request was in flight, the relay having sent nothing. Returns any
     /// ping to answer.
-    pub async fn report(&mut self, handle: &mut SessionHandle) -> Result<Result<Option<Progress>, String>> {
+    pub async fn report(
+        &mut self,
+        handle: &mut SessionHandle,
+    ) -> Result<Result<Option<Progress>, String>> {
         ensure!(self.in_flight.is_none(), "a response is still in flight");
         self.receive(handle, &[], None).await
     }
@@ -136,12 +167,18 @@ impl WsVerifier {
         }
         if let Some(previous) = asks {
             self.request_mark = received.request_mark;
-            self.in_flight = Some(Asked { previous, before: 0 });
+            self.in_flight = Some(Asked {
+                previous,
+                before: 0,
+            });
         }
         // What the provider sent before the request reached it may only be
         // proven now, with a later frame of the same turn.
         if let Some(asked) = &mut self.in_flight {
-            asked.before = self.live.received_before(self.request_mark).saturating_sub(self.head);
+            asked.before = self
+                .live
+                .received_before(self.request_mark)
+                .saturating_sub(self.head);
         }
         let Some(asked) = &self.in_flight else {
             return Ok(Ok(self.inbox.waiting_ping()));

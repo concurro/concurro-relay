@@ -38,11 +38,19 @@ pub fn is_inference(route: Route, path: &str) -> bool {
 
 /// Builds the job for a harness request on `route`, dropping the harness's
 /// own credential and connection headers.
-pub fn job<'a>(route: Route, path: &str, headers: impl IntoIterator<Item = (&'a str, &'a str)>, body: String) -> Result<Job> {
+pub fn job<'a>(
+    route: Route,
+    path: &str,
+    headers: impl IntoIterator<Item = (&'a str, &'a str)>,
+    body: String,
+) -> Result<Job> {
     let mut kept: Vec<(String, String)> = Vec::new();
     for (name, value) in headers {
         let name = name.to_ascii_lowercase();
-        ensure!(name != "content-encoding", "compressed request bodies are not supported");
+        ensure!(
+            name != "content-encoding",
+            "compressed request bodies are not supported"
+        );
         if DROPPED.contains(&name.as_str()) {
             continue;
         }
@@ -62,9 +70,17 @@ pub fn job<'a>(route: Route, path: &str, headers: impl IntoIterator<Item = (&'a 
 
     let path = match route {
         Route::ClaudeSubscription => path.to_owned(),
-        Route::ChatgptSubscription => format!("/backend-api/codex{}", path.strip_prefix("/v1").unwrap_or(path)),
+        Route::ChatgptSubscription => format!(
+            "/backend-api/codex{}",
+            path.strip_prefix("/v1").unwrap_or(path)
+        ),
     };
-    Ok(Job { host: route.host().into(), path, headers: kept, body: body.into_bytes() })
+    Ok(Job {
+        host: route.host().into(),
+        path,
+        headers: kept,
+        body: body.into_bytes(),
+    })
 }
 
 #[cfg(test)]
@@ -80,19 +96,42 @@ mod tests {
             ("anthropic-beta", "b"),
             ("user-agent", "cli"),
         ];
-        let job = job(Route::ClaudeSubscription, "/v1/messages?beta=true", headers, "{}".into()).unwrap();
+        let job = job(
+            Route::ClaudeSubscription,
+            "/v1/messages?beta=true",
+            headers,
+            "{}".into(),
+        )
+        .unwrap();
         assert_eq!(job.host, "api.anthropic.com");
         assert_eq!(job.path, "/v1/messages?beta=true");
         assert_eq!(
             job.headers,
-            [("anthropic-beta".to_owned(), "a, b, oauth-2025-04-20".to_owned()), ("user-agent".to_owned(), "cli".to_owned())]
+            [
+                (
+                    "anthropic-beta".to_owned(),
+                    "a, b, oauth-2025-04-20".to_owned()
+                ),
+                ("user-agent".to_owned(), "cli".to_owned())
+            ]
         );
     }
 
     #[test]
     fn chatgpt_job_maps_the_path() {
         let mapped = job(Route::ChatgptSubscription, "/v1/responses", [], "{}".into()).unwrap();
-        assert_eq!((mapped.host.as_str(), mapped.path.as_str()), ("chatgpt.com", "/backend-api/codex/responses"));
-        assert!(job(Route::ChatgptSubscription, "/v1/responses", [("content-encoding", "zstd")], "{}".into()).is_err());
+        assert_eq!(
+            (mapped.host.as_str(), mapped.path.as_str()),
+            ("chatgpt.com", "/backend-api/codex/responses")
+        );
+        assert!(
+            job(
+                Route::ChatgptSubscription,
+                "/v1/responses",
+                [("content-encoding", "zstd")],
+                "{}".into()
+            )
+            .is_err()
+        );
     }
 }

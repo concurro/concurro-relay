@@ -9,7 +9,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use serde::Deserialize;
+use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
@@ -20,21 +21,47 @@ use tokio::{
     time::{self, Duration},
 };
 
-use crate::{identity, route::Route};
+use concurro_relay_protocol::{identity, route::Route};
+
+pub mod bootstrap;
+pub mod helpers;
+pub mod ingress;
+pub mod proof;
+pub mod session;
+pub mod worker;
+pub use concurro_relay_native_transport as transport;
 
 static WORKER_GROUPS: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
 
 /// Own the native worker process group and its local bridge sockets.
 struct NativeSession {
+    /// Private directory containing this session's Unix sockets.
+    socket_dir: PathBuf,
     control_path: PathBuf,
     auxiliary_path: PathBuf,
     worker_group: Option<i32>,
 }
 
 impl NativeSession {
+    /// Create a private short socket directory apart from the evidence path.
+    fn create(output_root: PathBuf) -> Result<(Self, PathBuf)> {
+        let id = u64::from_be_bytes(identity::random());
+        let session = output_root.join(format!("concurro-native-{id:016x}"));
+        fs::create_dir_all(&session)?;
+        fs::set_permissions(&session, fs::Permissions::from_mode(0o700))?;
+        let socket_dir = env::temp_dir().join(format!("cn-{id:016x}"));
+        fs::create_dir(&socket_dir)?;
+        let control_path = socket_dir.join("control.sock");
+        let auxiliary_path = socket_dir.join("aux.sock");
+        let native = Self::new(socket_dir.clone(), control_path, auxiliary_path);
+        fs::set_permissions(&socket_dir, fs::Permissions::from_mode(0o700))?;
+        Ok((native, session))
+    }
+
     /// Track sockets before spawning, so startup errors remove them too.
-    fn new(control_path: PathBuf, auxiliary_path: PathBuf) -> Self {
+    fn new(socket_dir: PathBuf, control_path: PathBuf, auxiliary_path: PathBuf) -> Self {
         Self {
+            socket_dir,
             control_path,
             auxiliary_path,
             worker_group: None,
@@ -70,6 +97,7 @@ impl Drop for NativeSession {
         self.stop();
         let _ = fs::remove_file(&self.control_path);
         let _ = fs::remove_file(&self.auxiliary_path);
+        let _ = fs::remove_dir(&self.socket_dir);
     }
 }
 
@@ -98,7 +126,7 @@ pub async fn shutdown_signal() -> Result<()> {
 }
 
 /// The local role to run on an authenticated relay link.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum NativeRole {
     /// The credential-owning relay process.
     Sponsor,
@@ -107,7 +135,7 @@ pub enum NativeRole {
 }
 
 /// One Sponsor-observed proved prompt and its Concurro-reported provider usage.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct NativeAudit {
     /// Final request record number on this TLS connection.
     pub turn: usize,
@@ -139,7 +167,7 @@ pub struct NativeOptions {
     pub role: NativeRole,
     /// Provider route served by this session.
     pub route: Route,
-    /// Host whose TLS certificate the native worker verifies.
+    /// Provider TCP destination; TLS certificate identity is route-bound.
     pub provider_host: String,
     /// Provider TCP port.
     pub provider_port: u16,
@@ -175,24 +203,25 @@ where
     P: AsyncRead + AsyncWrite + Unpin,
 {
     let bundle = bundle()?;
-    let session = env::var_os("CONCURRO_NATIVE_OUTPUT")
+    let output_root = env::var_os("CONCURRO_NATIVE_OUTPUT")
         .map(PathBuf::from)
         .unwrap_or_else(env::temp_dir);
-    let session = session.join(format!(
-        "concurro-native-{:016x}",
-        u64::from_be_bytes(identity::random())
-    ));
-    fs::create_dir_all(&session)?;
-    fs::set_permissions(&session, fs::Permissions::from_mode(0o700))?;
-    let control_path = session.join("control.sock");
-    let auxiliary_path = session.join("aux.sock");
-    let mut native_session = NativeSession::new(control_path.clone(), auxiliary_path.clone());
+    let (mut native_session, session) = NativeSession::create(output_root)?;
+    let control_path = native_session.control_path.clone();
+    let auxiliary_path = native_session.auxiliary_path.clone();
     let control_listener = UnixListener::bind(&control_path)?;
     let auxiliary_listener = UnixListener::bind(&auxiliary_path)?;
-    let mut command = Command::new(bundle.join("python"));
+    let worker = env::var_os("CONCURRO_NATIVE_RUST_WORKER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| bundle.join("concurro-native-worker"));
+    let mut command = Command::new(worker);
     command.as_std_mut().process_group(0);
     command
-        .arg(bundle.join("worker/role.py"))
+        .env("DYLD_LIBRARY_PATH", bundle.join("lib"))
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", bundle.join("bin").display()),
+        )
         .arg("--role")
         .arg(options.role.argument())
         .arg("--route")
@@ -227,7 +256,10 @@ where
     let mut worker = command.spawn().context("start bundled native TLS worker")?;
     native_session.worker(worker.id().context("native worker has no pid")? as i32);
     let stdout_task = {
-        let stdout = worker.stdout.take().expect("native worker has piped stdout");
+        let stdout = worker
+            .stdout
+            .take()
+            .expect("native worker has piped stdout");
         let audit = options.audit;
         let ready = options.ready;
         tokio::spawn(async move {
@@ -263,10 +295,9 @@ where
                 .await?;
             drop(stdin);
         }
-        let (worker_control, _) =
-            time::timeout(Duration::from_secs(30), control_listener.accept())
-                .await
-                .context("native worker did not connect its control socket")??;
+        let (worker_control, _) = time::timeout(Duration::from_secs(30), control_listener.accept())
+            .await
+            .context("native worker did not connect its control socket")??;
         let (worker_auxiliary, _) =
             time::timeout(Duration::from_secs(30), auxiliary_listener.accept())
                 .await
@@ -308,4 +339,79 @@ where
     let audit_result = stdout_task.await?;
     result?;
     audit_result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env, fs,
+        os::unix::{ffi::OsStrExt, fs::PermissionsExt, process::CommandExt},
+        time::Duration,
+    };
+
+    use tokio::{net::UnixListener, process::Command, time};
+
+    use super::{NativeSession, identity};
+
+    /// Keep socket paths short and clean each session without deleting evidence.
+    #[tokio::test]
+    async fn socket_paths_and_independent_cleanup() {
+        let root = env::temp_dir()
+            .join(format!(
+                "native-phase1-{:016x}",
+                u64::from_be_bytes(identity::random())
+            ))
+            .join("e".repeat(160));
+        let (first, first_evidence) = NativeSession::create(root.clone()).unwrap();
+        let (second, second_evidence) = NativeSession::create(root.clone()).unwrap();
+        assert!(first.control_path.as_os_str().as_bytes().len() < 104);
+        assert_eq!(
+            fs::metadata(&first.socket_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let first_control = UnixListener::bind(&first.control_path).unwrap();
+        let first_auxiliary = UnixListener::bind(&first.auxiliary_path).unwrap();
+        let second_control = UnixListener::bind(&second.control_path).unwrap();
+        let first_socket_dir = first.socket_dir.clone();
+        let second_socket_dir = second.socket_dir.clone();
+        drop((first_control, first_auxiliary, second_control));
+        drop(first);
+        assert!(!first_socket_dir.exists());
+        assert!(second_socket_dir.exists());
+        assert!(first_evidence.exists());
+        drop(second);
+        assert!(!second_socket_dir.exists());
+        assert!(second_evidence.exists());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    /// Stop an isolated worker process group as the bridge does on cancellation.
+    #[tokio::test]
+    async fn worker_process_group_cleanup() {
+        let root = env::temp_dir().join(format!(
+            "native-process-test-{:016x}",
+            u64::from_be_bytes(identity::random())
+        ));
+        let (mut session, _) = NativeSession::create(root.clone()).unwrap();
+        let mut command = Command::new("/bin/sleep");
+        command.arg("60");
+        command.as_std_mut().process_group(0);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().unwrap() as i32;
+        assert_ne!(pid, unsafe { libc::getpgrp() });
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid);
+        session.worker(pid);
+        session.stop();
+        let status = time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!status.success());
+        drop(session);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

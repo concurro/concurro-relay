@@ -5,7 +5,6 @@
 pub mod identity;
 pub mod link;
 pub mod meter;
-pub mod native;
 pub mod route;
 pub mod timing;
 pub mod wire;
@@ -26,7 +25,9 @@ pub enum Roots {
 impl Roots {
     pub fn store(self) -> RootCertStore {
         match self {
-            Self::Fixture => RootCertStore { roots: vec![CertificateDer(CA_CERT_DER.to_vec())] },
+            Self::Fixture => RootCertStore {
+                roots: vec![CertificateDer(CA_CERT_DER.to_vec())],
+            },
             Self::Mozilla => RootCertStore::mozilla(),
         }
     }

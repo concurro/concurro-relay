@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 concurro-relay-protocol.workspace = true
+concurro-relay-native.workspace = true
 concurro-relay-verifier.workspace = true
 tlsn-server-fixture-certs.workspace = true
 

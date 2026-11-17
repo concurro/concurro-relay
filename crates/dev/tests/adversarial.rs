@@ -4,7 +4,9 @@
 
 mod common;
 
-use std::{assert_matches, future::IntoFuture, net::SocketAddr, ops::Range, pin::pin, time::Duration};
+use std::{
+    assert_matches, future::IntoFuture, net::SocketAddr, ops::Range, pin::pin, time::Duration,
+};
 
 use anyhow::Result;
 use common::{STEP_LIMIT, TOKEN};
@@ -15,8 +17,9 @@ use concurro_relay::{
 };
 use concurro_relay_dev::{
     provider::{
-        CLOSE, CLOSE_HELD, DELAY_HEADER, DUPLICATE_END, FORGED_ID, FORGED_RESPONSE, MISBEHAVE_HEADER, MIXED_ID, PING,
-        PING_GATED, RESPONSE_BYTES_HEADER, STALE_EVENT, WRONG_PARENT,
+        CLOSE, CLOSE_HELD, DELAY_HEADER, DUPLICATE_END, FORGED_ID, FORGED_RESPONSE,
+        MISBEHAVE_HEADER, MIXED_ID, PING, PING_GATED, RESPONSE_BYTES_HEADER, STALE_EVENT,
+        WRONG_PARENT,
     },
     slow::{self, Shape},
 };
@@ -37,7 +40,10 @@ use futures::{AsyncReadExt as _, AsyncWriteExt as _, StreamExt};
 use serde_json::{Value, json};
 use tlsn::{
     Session, SessionHandle,
-    config::{prove::ProveConfig, prover::ProverConfig, tls::TlsClientConfig, tls_commit::proxy::ProxyTlsConfig},
+    config::{
+        prove::ProveConfig, prover::ProverConfig, tls::TlsClientConfig,
+        tls_commit::proxy::ProxyTlsConfig,
+    },
     connection::{DnsName, ServerName},
     transcript::Direction,
 };
@@ -47,7 +53,11 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 fn offer() -> Offer {
-    Offer { credential: CredentialHeader::bearer(), hidden_len: TOKEN.len(), headers: Vec::new() }
+    Offer {
+        credential: CredentialHeader::bearer(),
+        hidden_len: TOKEN.len(),
+        headers: Vec::new(),
+    }
 }
 
 /// The bytes the relay sends for `job`, and where the credential sits.
@@ -90,7 +100,10 @@ impl Sides {
             Some(delay) => {
                 let (relay_stream, relay_far) = common::pair().await;
                 let (verifier_far, verifier_stream) = common::pair().await;
-                let shape = Some(Shape { bits_per_second: 1e9, delay });
+                let shape = Some(Shape {
+                    bits_per_second: 1e9,
+                    delay,
+                });
                 tokio::spawn(slow::join(relay_far, verifier_far, shape, shape));
                 (relay_stream, verifier_stream)
             }
@@ -101,7 +114,13 @@ impl Sides {
         let (driver, verifier_handle) =
             Session::new(Metered::new(verifier_stream, traffic.clone()).compat()).split();
         tokio::spawn(driver);
-        Self { relay_handle, verifier_handle, provider: provider_addr, traffic, pongs: 0 }
+        Self {
+            relay_handle,
+            verifier_handle,
+            provider: provider_addr,
+            traffic,
+            pongs: 0,
+        }
     }
 
     /// Opens a provider connection on both sides.
@@ -109,7 +128,12 @@ impl Sides {
         let (relay, verifier) = time::timeout(STEP_LIMIT, async {
             tokio::join!(
                 LiveRelay::open(&mut self.relay_handle, SERVER_DOMAIN, Roots::Fixture),
-                LiveVerifier::open(&mut self.verifier_handle, SERVER_DOMAIN, self.provider, Roots::Fixture),
+                LiveVerifier::open(
+                    &mut self.verifier_handle,
+                    SERVER_DOMAIN,
+                    self.provider,
+                    Roots::Fixture
+                ),
             )
         })
         .await
@@ -128,7 +152,8 @@ impl Sides {
         let (expected, hidden) = expected(job);
         let verifier_handle = &mut self.verifier_handle;
         let hidden = [hidden];
-        let both = async { tokio::join!(relay, verifier.verify(verifier_handle, &expected, &hidden)) };
+        let both =
+            async { tokio::join!(relay, verifier.verify(verifier_handle, &expected, &hidden)) };
         let verified = match time::timeout(STEP_LIMIT, both).await {
             Ok((_, Ok(Ok(received)))) => Verified::Accepted(received),
             Ok((_, Ok(Err(reason)))) => Verified::Rejected(reason),
@@ -164,7 +189,13 @@ async fn after_one_turn(sides: &mut Sides) -> (LiveRelay, LiveVerifier) {
     let (mut relay, mut verifier) = sides.open().await;
     let job = common::job(900, 256);
     let mut relay_handle = std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
-    let verified = sides.turn(&mut verifier, &job, honest(&mut relay, &mut relay_handle, &job)).await;
+    let verified = sides
+        .turn(
+            &mut verifier,
+            &job,
+            honest(&mut relay, &mut relay_handle, &job),
+        )
+        .await;
     sides.relay_handle = relay_handle;
     assert_matches!(verified, Verified::Accepted(_));
     (relay, verifier)
@@ -187,12 +218,23 @@ async fn each_turn_on_an_open_connection_is_proven() {
     let mut uploads = Vec::new();
     for job in [common::job(20_000, 512), common::job(300, 512)] {
         let before = sides.traffic.read();
-        let verified = sides.turn(&mut verifier, &job, honest(&mut relay, &mut relay_handle, &job)).await;
-        let Verified::Accepted(received) = verified else { panic!("{verified:?}") };
+        let verified = sides
+            .turn(
+                &mut verifier,
+                &job,
+                honest(&mut relay, &mut relay_handle, &job),
+            )
+            .await;
+        let Verified::Accepted(received) = verified else {
+            panic!("{verified:?}")
+        };
         let response = wire::parse_response(&received).unwrap();
         assert_eq!(response.status, 200);
         let body = String::from_utf8_lossy(&response.body).into_owned();
-        assert!(body.contains(&format!("\"input_bytes\":{}", job.body.len())), "{body}");
+        assert!(
+            body.contains(&format!("\"input_bytes\":{}", job.body.len())),
+            "{body}"
+        );
         uploads.push(sides.traffic.read() - before);
     }
     assert!(uploads[1] < uploads[0] / 4, "{uploads:?}");
@@ -209,7 +251,8 @@ async fn inserted_request_is_rejected_at_that_turn() {
     for reveal_inserted in [true, false] {
         let mut sides = Sides::new().await;
         let (mut relay, mut verifier) = after_one_turn(&mut sides).await;
-        let mut relay_handle = std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
+        let mut relay_handle =
+            std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
 
         let (inserted, job) = (common::job(700, 256), common::job(700, 256));
         let cheat = async {
@@ -223,14 +266,32 @@ async fn inserted_request_is_rejected_at_that_turn() {
             relay.read_http_response().await?;
             let snapshot = relay.snapshot().await?;
             let (hidden, misproof) = if reveal_inserted {
-                (vec![shifted(&first_hidden, first), shifted(&second_hidden, second)], Misproof::default())
+                (
+                    vec![
+                        shifted(&first_hidden, first),
+                        shifted(&second_hidden, second),
+                    ],
+                    Misproof::default(),
+                )
             } else {
-                (vec![shifted(&second_hidden, second)], Misproof { reveal_from: Some(second), ..Misproof::default() })
+                (
+                    vec![shifted(&second_hidden, second)],
+                    Misproof {
+                        reveal_from: Some(second),
+                        ..Misproof::default()
+                    },
+                )
             };
-            relay.prove_snapshot(&mut relay_handle, snapshot, &hidden, &misproof).await
+            relay
+                .prove_snapshot(&mut relay_handle, snapshot, &hidden, &misproof)
+                .await
         };
         let verified = sides.turn(&mut verifier, &job, cheat).await;
-        assert_matches!(verified, Verified::Rejected(_), "reveal_inserted={reveal_inserted}");
+        assert_matches!(
+            verified,
+            Verified::Rejected(_),
+            "reveal_inserted={reveal_inserted}"
+        );
     }
 }
 
@@ -243,7 +304,10 @@ async fn omitted_request_is_rejected() {
 
     let job = common::job(700, 256);
     let cheat = async { relay.prove(&mut relay_handle, &[]).await };
-    assert_matches!(sides.turn(&mut verifier, &job, cheat).await, Verified::Rejected(_));
+    assert_matches!(
+        sides.turn(&mut verifier, &job, cheat).await,
+        Verified::Rejected(_)
+    );
 }
 
 /// A request sent after the proof's snapshot was taken is caught by that
@@ -265,7 +329,14 @@ async fn request_sent_after_the_cut_is_rejected_at_that_turn() {
         // the time the proof is offered.
         relay.send(&request(&extra).0).await?;
         relay.read_http_response().await?;
-        relay.prove_snapshot(&mut relay_handle, snapshot, &[shifted(&hidden, start)], &Misproof::default()).await
+        relay
+            .prove_snapshot(
+                &mut relay_handle,
+                snapshot,
+                &[shifted(&hidden, start)],
+                &Misproof::default(),
+            )
+            .await
     };
     let verified = sides.turn(&mut verifier, &job, cheat).await;
     assert_matches!(verified, Verified::Rejected(reason) if reason.contains("beyond what it proved"));
@@ -287,17 +358,37 @@ async fn replayed_snapshot_is_rejected() {
         relay.read_http_response().await?;
         let snapshot = relay.snapshot().await?;
         kept = Some(snapshot.clone());
-        relay.prove_snapshot(&mut relay_handle, snapshot, &[shifted(&hidden, start)], &Misproof::default()).await
+        relay
+            .prove_snapshot(
+                &mut relay_handle,
+                snapshot,
+                &[shifted(&hidden, start)],
+                &Misproof::default(),
+            )
+            .await
     };
-    assert_matches!(sides.turn(&mut verifier, &first, turn_one).await, Verified::Accepted(_));
+    assert_matches!(
+        sides.turn(&mut verifier, &first, turn_one).await,
+        Verified::Accepted(_)
+    );
 
     let second = common::job(700, 256);
     let cheat = async {
         relay.send(&request(&second).0).await?;
         relay.read_http_response().await?;
-        relay.prove_snapshot(&mut relay_handle, kept.take().unwrap(), &[], &Misproof::default()).await
+        relay
+            .prove_snapshot(
+                &mut relay_handle,
+                kept.take().unwrap(),
+                &[],
+                &Misproof::default(),
+            )
+            .await
     };
-    assert_matches!(sides.turn(&mut verifier, &second, cheat).await, Verified::Rejected(_));
+    assert_matches!(
+        sides.turn(&mut verifier, &second, cheat).await,
+        Verified::Rejected(_)
+    );
 }
 
 /// A proof must reveal the sent data from exactly where the last one ended.
@@ -306,7 +397,8 @@ async fn overlapping_or_skipped_prefix_is_rejected() {
     for offset in [-10isize, 10] {
         let mut sides = Sides::new().await;
         let (mut relay, mut verifier) = after_one_turn(&mut sides).await;
-        let mut relay_handle = std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
+        let mut relay_handle =
+            std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
 
         let job = common::job(700, 256);
         let cheat = async {
@@ -315,10 +407,24 @@ async fn overlapping_or_skipped_prefix_is_rejected() {
             relay.send(&bytes).await?;
             relay.read_http_response().await?;
             let snapshot = relay.snapshot().await?;
-            let misproof = Misproof { reveal_from: Some(start.checked_add_signed(offset).unwrap()), ..Misproof::default() };
-            relay.prove_snapshot(&mut relay_handle, snapshot, &[shifted(&hidden, start)], &misproof).await
+            let misproof = Misproof {
+                reveal_from: Some(start.checked_add_signed(offset).unwrap()),
+                ..Misproof::default()
+            };
+            relay
+                .prove_snapshot(
+                    &mut relay_handle,
+                    snapshot,
+                    &[shifted(&hidden, start)],
+                    &misproof,
+                )
+                .await
         };
-        assert_matches!(sides.turn(&mut verifier, &job, cheat).await, Verified::Rejected(_), "offset={offset}");
+        assert_matches!(
+            sides.turn(&mut verifier, &job, cheat).await,
+            Verified::Rejected(_),
+            "offset={offset}"
+        );
     }
 }
 
@@ -329,7 +435,8 @@ async fn wrong_record_count_is_not_accepted() {
     for claimed in [0, 1_000] {
         let mut sides = Sides::new().await;
         let (mut relay, mut verifier) = after_one_turn(&mut sides).await;
-        let mut relay_handle = std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
+        let mut relay_handle =
+            std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
 
         let job = common::job(700, 256);
         let cheat = async {
@@ -338,11 +445,24 @@ async fn wrong_record_count_is_not_accepted() {
             relay.send(&bytes).await?;
             relay.read_http_response().await?;
             let snapshot = relay.snapshot().await?;
-            let misproof = Misproof { tags_from: Some(claimed), ..Misproof::default() };
-            relay.prove_snapshot(&mut relay_handle, snapshot, &[shifted(&hidden, start)], &misproof).await
+            let misproof = Misproof {
+                tags_from: Some(claimed),
+                ..Misproof::default()
+            };
+            relay
+                .prove_snapshot(
+                    &mut relay_handle,
+                    snapshot,
+                    &[shifted(&hidden, start)],
+                    &misproof,
+                )
+                .await
         };
         let verified = sides.turn(&mut verifier, &job, cheat).await;
-        assert!(!matches!(verified, Verified::Accepted(_)), "claimed={claimed}");
+        assert!(
+            !matches!(verified, Verified::Accepted(_)),
+            "claimed={claimed}"
+        );
     }
 }
 
@@ -363,7 +483,9 @@ async fn snapshot_from_another_connection_is_rejected() {
             relay.read_http_response().await?;
         }
         let other = relay_b.snapshot().await?;
-        relay_a.prove_snapshot(&mut relay_handle, other, &[hidden], &Misproof::default()).await
+        relay_a
+            .prove_snapshot(&mut relay_handle, other, &[hidden], &Misproof::default())
+            .await
     };
     let verified = sides.turn(&mut verifier_a, &job, cheat).await;
     assert_matches!(verified, Verified::Rejected(_));
@@ -384,7 +506,14 @@ async fn proof_cut_before_the_response_yields_no_response() {
         let (bytes, hidden) = request(&job);
         relay.send(&bytes).await?;
         let snapshot = relay.snapshot_after_sending().await?;
-        relay.prove_snapshot(&mut relay_handle, snapshot, &[shifted(&hidden, start)], &Misproof::default()).await
+        relay
+            .prove_snapshot(
+                &mut relay_handle,
+                snapshot,
+                &[shifted(&hidden, start)],
+                &Misproof::default(),
+            )
+            .await
     };
     let verified = sides.turn(&mut verifier, &job, early).await;
     assert_matches!(verified, Verified::Accepted(received) if received.is_empty());
@@ -400,23 +529,37 @@ async fn first_proof_hiding_nothing_does_not_disclose_the_client_key() {
     for credential in ["", "x"] {
         let mut sides = Sides::new().await;
         let (mut relay, mut verifier) = sides.open().await;
-        let offer = Offer { hidden_len: credential.len(), ..offer() };
+        let offer = Offer {
+            hidden_len: credential.len(),
+            ..offer()
+        };
         let job = common::job(20_000, 256);
-        let (bytes, hidden) = wire::encode_request_on(&job, &offer, credential.as_bytes(), "keep-alive");
-        let (expected, _) = wire::encode_request_on(&job, &offer, &vec![0; credential.len()], "keep-alive");
-        let hidden: Vec<_> = Some(hidden).into_iter().filter(|range| !range.is_empty()).collect();
+        let (bytes, hidden) =
+            wire::encode_request_on(&job, &offer, credential.as_bytes(), "keep-alive");
+        let (expected, _) =
+            wire::encode_request_on(&job, &offer, &vec![0; credential.len()], "keep-alive");
+        let hidden: Vec<_> = Some(hidden)
+            .into_iter()
+            .filter(|range| !range.is_empty())
+            .collect();
 
         let relayed = async {
             relay.send(&bytes).await?;
             relay.read_http_response().await?;
             relay.prove(&mut sides.relay_handle, &hidden).await
         };
-        let (relayed, verified) = tokio::join!(relayed, verifier.verify(&mut sides.verifier_handle, &expected, &hidden));
+        let (relayed, verified) = tokio::join!(
+            relayed,
+            verifier.verify(&mut sides.verifier_handle, &expected, &hidden)
+        );
         relayed.unwrap();
         verified.unwrap().unwrap();
         uploads.push(sides.traffic.read());
     }
-    assert!(uploads[0].abs_diff(uploads[1]) < uploads[1] / 20, "{uploads:?}");
+    assert!(
+        uploads[0].abs_diff(uploads[1]) < uploads[1] / 20,
+        "{uploads:?}"
+    );
 }
 
 /// A provider connection which closes while a turn of another connection on
@@ -427,10 +570,16 @@ async fn closing_a_connection_does_not_disturb_a_proof_on_another() {
         let mut sides = Sides::new().await;
         let (mut relay_a, mut verifier_a) = sides.open().await;
         let (mut relay_b, mut verifier_b) = sides.open().await;
-        let mut relay_handle = std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
+        let mut relay_handle =
+            std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
         let job = common::job(4_000, 256);
-        for (relay, verifier) in [(&mut relay_a, &mut verifier_a), (&mut relay_b, &mut verifier_b)] {
-            let verified = sides.turn(verifier, &job, honest(relay, &mut relay_handle, &job)).await;
+        for (relay, verifier) in [
+            (&mut relay_a, &mut verifier_a),
+            (&mut relay_b, &mut verifier_b),
+        ] {
+            let verified = sides
+                .turn(verifier, &job, honest(relay, &mut relay_handle, &job))
+                .await;
             assert_matches!(verified, Verified::Accepted(_));
         }
 
@@ -438,7 +587,11 @@ async fn closing_a_connection_does_not_disturb_a_proof_on_another() {
             let (closed, _) = tokio::join!(relay_a.close(), verifier_a.close());
             closed
         };
-        let proving = sides.turn(&mut verifier_b, &job, honest(&mut relay_b, &mut relay_handle, &job));
+        let proving = sides.turn(
+            &mut verifier_b,
+            &job,
+            honest(&mut relay_b, &mut relay_handle, &job),
+        );
         let (closed, verified) = tokio::join!(closing, proving);
         closed.unwrap();
         assert_matches!(verified, Verified::Accepted(_));
@@ -456,22 +609,41 @@ async fn session_survives_a_connection_closing_over_a_slow_link() {
         let mut sides = Sides::over(Some(LINK_DELAY)).await;
         let (mut relay_a, mut verifier_a) = sides.open().await;
         let (mut relay_b, mut verifier_b) = sides.open().await;
-        let mut relay_handle = std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
+        let mut relay_handle =
+            std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
         let job = common::job(2_000, 2_000);
-        for (relay, verifier) in [(&mut relay_a, &mut verifier_a), (&mut relay_b, &mut verifier_b)] {
-            let verified = sides.turn(verifier, &job, honest(relay, &mut relay_handle, &job)).await;
+        for (relay, verifier) in [
+            (&mut relay_a, &mut verifier_a),
+            (&mut relay_b, &mut verifier_b),
+        ] {
+            let verified = sides
+                .turn(verifier, &job, honest(relay, &mut relay_handle, &job))
+                .await;
             assert_matches!(verified, Verified::Accepted(_));
         }
         let (closed, _) = tokio::join!(relay_a.close(), verifier_a.close());
         closed.unwrap();
 
-        let verified = sides.turn(&mut verifier_b, &job, honest(&mut relay_b, &mut relay_handle, &job)).await;
+        let verified = sides
+            .turn(
+                &mut verifier_b,
+                &job,
+                honest(&mut relay_b, &mut relay_handle, &job),
+            )
+            .await;
         assert_matches!(verified, Verified::Accepted(_));
 
         sides.relay_handle = relay_handle;
         let (mut relay_c, mut verifier_c) = sides.open().await;
-        let mut relay_handle = std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
-        let verified = sides.turn(&mut verifier_c, &job, honest(&mut relay_c, &mut relay_handle, &job)).await;
+        let mut relay_handle =
+            std::mem::replace(&mut sides.relay_handle, placeholder_handle().await);
+        let verified = sides
+            .turn(
+                &mut verifier_c,
+                &job,
+                honest(&mut relay_c, &mut relay_handle, &job),
+            )
+            .await;
         assert_matches!(verified, Verified::Accepted(_));
     }
 }
@@ -485,7 +657,8 @@ async fn provider_closing_during_a_proof_does_not_reject_an_honest_relay() {
         let mut sides = Sides::over(Some(LINK_DELAY)).await;
         let (mut relay, mut verifier) = sides.open().await;
         let job = common::job(2_000, 256);
-        let closing = |credential: &[u8]| wire::encode_request_on(&job, &offer(), credential, "close");
+        let closing =
+            |credential: &[u8]| wire::encode_request_on(&job, &offer(), credential, "close");
         let (bytes, hidden) = closing(TOKEN.as_bytes());
         let (expected, _) = closing(&vec![0; TOKEN.len()]);
         let hidden = [hidden];
@@ -495,7 +668,10 @@ async fn provider_closing_during_a_proof_does_not_reject_an_honest_relay() {
             relay.read_http_response().await?;
             relay.prove(&mut sides.relay_handle, &hidden).await
         };
-        let (relayed, verified) = tokio::join!(relayed, verifier.verify(&mut sides.verifier_handle, &expected, &hidden));
+        let (relayed, verified) = tokio::join!(
+            relayed,
+            verifier.verify(&mut sides.verifier_handle, &expected, &hidden)
+        );
         relayed.unwrap();
         let response = wire::parse_response(&verified.unwrap().unwrap()).unwrap();
         assert_eq!(response.status, 200);
@@ -512,12 +688,18 @@ async fn rejected_proof_closes_the_session() {
 
     let job = common::job(700, 256);
     let cheat = async { relay.prove(&mut relay_handle, &[]).await };
-    assert_matches!(sides.turn(&mut verifier, &job, cheat).await, Verified::Rejected(_));
+    assert_matches!(
+        sides.turn(&mut verifier, &job, cheat).await,
+        Verified::Rejected(_)
+    );
 
     let (expected, hidden) = expected(&job);
     let hidden = [hidden];
     let again = verifier.verify(&mut sides.verifier_handle, &expected, &hidden);
-    assert_matches!(time::timeout(Duration::from_secs(5), again).await, Ok(Ok(Err(_))));
+    assert_matches!(
+        time::timeout(Duration::from_secs(5), again).await,
+        Ok(Ok(Err(_)))
+    );
 }
 
 const WS_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -528,7 +710,9 @@ fn ws_policy() -> Policy {
         host: SERVER_DOMAIN.into(),
         paths: vec![common::PATH.into()],
         headers: vec![RESPONSE_BYTES_HEADER.into(), MISBEHAVE_HEADER.into()],
-        body_fields: ["type", "model", "store", "input", "previous_response_id"].map(Into::into).to_vec(),
+        body_fields: ["type", "model", "store", "input", "previous_response_id"]
+            .map(Into::into)
+            .to_vec(),
     }
 }
 
@@ -536,14 +720,23 @@ fn ws_policy() -> Policy {
 fn ws_job(misbehaviour: Option<&str>) -> Job {
     let mut headers = vec![(RESPONSE_BYTES_HEADER.to_owned(), "2048".to_owned())];
     headers.extend(misbehaviour.map(|kind| (MISBEHAVE_HEADER.to_owned(), kind.to_owned())));
-    Job { host: SERVER_DOMAIN.into(), path: common::PATH.into(), headers, body: Vec::new() }
+    Job {
+        host: SERVER_DOMAIN.into(),
+        path: common::PATH.into(),
+        headers,
+        body: Vec::new(),
+    }
 }
 
 /// The message asking for a response, with `fields` laid over an allowed
 /// request.
 fn ws_message(fields: Value) -> String {
-    let mut request = json!({"type": "response.create", "model": "test-model", "store": false, "input": "list"});
-    request.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+    let mut request =
+        json!({"type": "response.create", "model": "test-model", "store": false, "input": "list"});
+    request
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
     request.to_string()
 }
 
@@ -558,8 +751,24 @@ impl Sides {
         let (job, offer) = (ws_job(misbehaviour), offer());
         let (relay, verifier) = time::timeout(STEP_LIMIT, async {
             tokio::join!(
-                WsRelay::open(&mut self.relay_handle, &job, &offer, TOKEN.as_bytes(), WS_KEY, ws_policy(), Roots::Fixture),
-                WsVerifier::open(&mut self.verifier_handle, &job, &offer, &[], WS_KEY, self.provider, Roots::Fixture),
+                WsRelay::open(
+                    &mut self.relay_handle,
+                    &job,
+                    &offer,
+                    TOKEN.as_bytes(),
+                    WS_KEY,
+                    ws_policy(),
+                    Roots::Fixture
+                ),
+                WsVerifier::open(
+                    &mut self.verifier_handle,
+                    &job,
+                    &offer,
+                    &[],
+                    WS_KEY,
+                    self.provider,
+                    Roots::Fixture
+                ),
             )
         })
         .await
@@ -570,21 +779,37 @@ impl Sides {
     /// Runs one turn on both sides, answering the pings which interrupt it,
     /// and returns the provider's messages as the verifier accepted them.
     /// Ends as soon as either side fails.
-    async fn ws_turn(&mut self, relay: &mut WsRelay, verifier: &mut WsVerifier, frame: &[u8]) -> Result<Vec<Message>, String> {
+    async fn ws_turn(
+        &mut self,
+        relay: &mut WsRelay,
+        verifier: &mut WsVerifier,
+        frame: &[u8],
+    ) -> Result<Vec<Message>, String> {
         let relayed = async {
-            relay.turn(&mut self.relay_handle, frame).await.map_err(|error| format!("{error:#}"))?
+            relay
+                .turn(&mut self.relay_handle, frame)
+                .await
+                .map_err(|error| format!("{error:#}"))?
         };
         let verified = async {
-            verifier.turn(&mut self.verifier_handle, frame).await.map_err(|error| format!("{error:#}"))?
+            verifier
+                .turn(&mut self.verifier_handle, frame)
+                .await
+                .map_err(|error| format!("{error:#}"))?
         };
         let both = async { tokio::try_join!(relayed, verified) };
-        let (_, mut progress) = time::timeout(STEP_LIMIT, both).await.map_err(|_| "turn did not finish in time")??;
+        let (_, mut progress) = time::timeout(STEP_LIMIT, both)
+            .await
+            .map_err(|_| "turn did not finish in time")??;
         loop {
             match progress {
                 Progress::Response(messages) => return Ok(messages),
                 Progress::Ping(payload) => {
                     let pong = ws::pong_frame(&payload, PONG_MASK);
-                    progress = self.ws_pong(relay, verifier, &pong).await?.ok_or("no response in flight")?;
+                    progress = self
+                        .ws_pong(relay, verifier, &pong)
+                        .await?
+                        .ok_or("no response in flight")?;
                     self.pongs += 1;
                 }
             }
@@ -598,7 +823,15 @@ impl Sides {
         let (relay, verifier) = time::timeout(STEP_LIMIT, async {
             tokio::join!(
                 Credulous::open(&mut self.relay_handle, &job, &offer),
-                WsVerifier::open(&mut self.verifier_handle, &job, &offer, &[], WS_KEY, self.provider, Roots::Fixture),
+                WsVerifier::open(
+                    &mut self.verifier_handle,
+                    &job,
+                    &offer,
+                    &[],
+                    WS_KEY,
+                    self.provider,
+                    Roots::Fixture
+                ),
             )
         })
         .await
@@ -608,11 +841,21 @@ impl Sides {
 
     /// Runs one turn with a relay which checks nothing, returning what the
     /// verifier alone concluded.
-    async fn ws_turn_unchecked(&mut self, relay: &mut Credulous, verifier: &mut WsVerifier, frame: &[u8]) -> Result<Vec<Message>, String> {
+    async fn ws_turn_unchecked(
+        &mut self,
+        relay: &mut Credulous,
+        verifier: &mut WsVerifier,
+        frame: &[u8],
+    ) -> Result<Vec<Message>, String> {
         let both = async {
-            tokio::join!(relay.turn(&mut self.relay_handle, frame), verifier.turn(&mut self.verifier_handle, frame))
+            tokio::join!(
+                relay.turn(&mut self.relay_handle, frame),
+                verifier.turn(&mut self.verifier_handle, frame)
+            )
         };
-        let (relayed, verified) = time::timeout(STEP_LIMIT, both).await.map_err(|_| "turn did not finish in time")?;
+        let (relayed, verified) = time::timeout(STEP_LIMIT, both)
+            .await
+            .map_err(|_| "turn did not finish in time")?;
         relayed.unwrap();
         match verified.map_err(|error| format!("{error:#}"))?? {
             Progress::Response(messages) => Ok(messages),
@@ -622,15 +865,28 @@ impl Sides {
 
     /// Has the relay send `frame` as a pong, and the verifier check it did.
     /// Returns what the verifier says comes next.
-    async fn ws_pong(&mut self, relay: &mut WsRelay, verifier: &mut WsVerifier, frame: &[u8]) -> Result<Option<Progress>, String> {
+    async fn ws_pong(
+        &mut self,
+        relay: &mut WsRelay,
+        verifier: &mut WsVerifier,
+        frame: &[u8],
+    ) -> Result<Option<Progress>, String> {
         let relayed = async {
-            relay.pong(&mut self.relay_handle, frame).await.map_err(|error| format!("{error:#}"))?
+            relay
+                .pong(&mut self.relay_handle, frame)
+                .await
+                .map_err(|error| format!("{error:#}"))?
         };
         let verified = async {
-            verifier.pong(&mut self.verifier_handle, frame).await.map_err(|error| format!("{error:#}"))?
+            verifier
+                .pong(&mut self.verifier_handle, frame)
+                .await
+                .map_err(|error| format!("{error:#}"))?
         };
         let both = async { tokio::try_join!(relayed, verified) };
-        let (relayed, verified) = time::timeout(STEP_LIMIT, both).await.map_err(|_| "pong did not finish in time")??;
+        let (relayed, verified) = time::timeout(STEP_LIMIT, both)
+            .await
+            .map_err(|_| "pong did not finish in time")??;
         assert_eq!(relayed, verified, "the sides disagree on what comes next");
         Ok(verified)
     }
@@ -652,7 +908,10 @@ impl Credulous {
         let mut response = Vec::new();
         let head_end = loop {
             response.extend(live.read().await?);
-            if let Some(at) = response.windows(HEAD_END.len()).position(|window| window == HEAD_END) {
+            if let Some(at) = response
+                .windows(HEAD_END.len())
+                .position(|window| window == HEAD_END)
+            {
                 break at + HEAD_END.len();
             }
         };
@@ -674,7 +933,9 @@ impl Credulous {
         let snapshot = self.live.snapshot().await?;
         self.inbox.push(&self.live.take_arrived())?;
         let _ = self.inbox.take_turn(&asked);
-        self.live.prove_snapshot(handle, snapshot, &[], &Misproof::default()).await
+        self.live
+            .prove_snapshot(handle, snapshot, &[], &Misproof::default())
+            .await
     }
 }
 
@@ -691,19 +952,36 @@ async fn websocket_turns_are_proven_and_continue_a_response() {
     let (mut relay, mut verifier) = sides.open_ws(None).await;
 
     let before = sides.traffic.read();
-    let first = sides.ws_turn(&mut relay, &mut verifier, &ws_request(json!({"input": "p".repeat(20_000)}))).await.unwrap();
+    let first = sides
+        .ws_turn(
+            &mut relay,
+            &mut verifier,
+            &ws_request(json!({"input": "p".repeat(20_000)})),
+        )
+        .await
+        .unwrap();
     let first_upload = sides.traffic.read() - before;
     let id = ws::completed_response(&first).unwrap();
 
     let before = sides.traffic.read();
-    let second = sides.ws_turn(&mut relay, &mut verifier, &ws_request(json!({"previous_response_id": id}))).await.unwrap();
+    let second = sides
+        .ws_turn(
+            &mut relay,
+            &mut verifier,
+            &ws_request(json!({"previous_response_id": id})),
+        )
+        .await
+        .unwrap();
     let second_upload = sides.traffic.read() - before;
 
     let completed = last_event(&second);
     assert_eq!(completed["type"], "response.completed");
     assert_eq!(completed["response"]["previous_response_id"], id);
     assert_eq!(completed["response"]["store"], false);
-    assert!(second_upload < first_upload / 4, "{first_upload} then {second_upload}");
+    assert!(
+        second_upload < first_upload / 4,
+        "{first_upload} then {second_upload}"
+    );
 }
 
 /// The relay sends nothing for a message its policy does not allow.
@@ -712,7 +990,14 @@ async fn relay_refuses_websocket_messages_outside_policy() {
     let mut sides = Sides::new().await;
     let (mut relay, mut verifier) = sides.open_ws(None).await;
     let (mut other_relay, mut other_verifier) = sides.open_ws(None).await;
-    let elsewhere = sides.ws_turn(&mut other_relay, &mut other_verifier, &ws_request(json!({}))).await.unwrap();
+    let elsewhere = sides
+        .ws_turn(
+            &mut other_relay,
+            &mut other_verifier,
+            &ws_request(json!({})),
+        )
+        .await
+        .unwrap();
     let elsewhere = ws::completed_response(&elsewhere).unwrap();
 
     let unstated = json!({"type": "response.create", "model": "test-model", "input": "list"});
@@ -722,21 +1007,40 @@ async fn relay_refuses_websocket_messages_outside_policy() {
         frame
     };
     let refused = [
-        (ws_request(json!({"store": true})), "does not disable storage"),
-        (ws::text_frame(&unstated.to_string(), [1, 2, 3, 4]), "does not disable storage"),
-        (ws_request(json!({"type": "response.cancel"})), "not a request for a response"),
+        (
+            ws_request(json!({"store": true})),
+            "does not disable storage",
+        ),
+        (
+            ws::text_frame(&unstated.to_string(), [1, 2, 3, 4]),
+            "does not disable storage",
+        ),
+        (
+            ws_request(json!({"type": "response.cancel"})),
+            "not a request for a response",
+        ),
         (ws_request(json!({"metadata": {}})), "field not allowed"),
-        (ws_request(json!({"previous_response_id": elsewhere})), UNKNOWN_RESPONSE),
+        (
+            ws_request(json!({"previous_response_id": elsewhere})),
+            UNKNOWN_RESPONSE,
+        ),
         (unmasked, "not exactly one masked frame"),
     ];
     let sent = relay.sent();
     for (frame, reason) in refused {
-        let refusal = relay.turn(&mut sides.relay_handle, &frame).await.unwrap().unwrap_err();
+        let refusal = relay
+            .turn(&mut sides.relay_handle, &frame)
+            .await
+            .unwrap()
+            .unwrap_err();
         assert!(refusal.contains(reason), "{refusal}");
     }
     assert_eq!(relay.sent(), sent);
 
-    sides.ws_turn(&mut relay, &mut verifier, &ws_request(json!({}))).await.unwrap();
+    sides
+        .ws_turn(&mut relay, &mut verifier, &ws_request(json!({})))
+        .await
+        .unwrap();
 }
 
 /// The relay answers a ping only with the pong the gateway orders, once,
@@ -749,20 +1053,38 @@ async fn pings_are_answered_only_as_the_gateway_orders() {
     for turn in 1..=2 {
         let sent = relay.sent();
         let frame = ws_request(json!({}));
-        let messages = sides.ws_turn(&mut relay, &mut verifier, &frame).await.unwrap();
+        let messages = sides
+            .ws_turn(&mut relay, &mut verifier, &frame)
+            .await
+            .unwrap();
         assert_eq!(last_event(&messages)["type"], "response.completed");
 
         let unasked = ws::pong_frame(b"never pinged", PONG_MASK);
-        assert!(relay.pong(&mut sides.relay_handle, &unasked).await.unwrap().is_err());
+        assert!(
+            relay
+                .pong(&mut sides.relay_handle, &unasked)
+                .await
+                .unwrap()
+                .is_err()
+        );
 
         // The ping may have arrived with the response it preceded.
         let pong = ws::pong_frame(b"spike", PONG_MASK);
         if sides.pongs < turn {
-            assert_eq!(sides.ws_pong(&mut relay, &mut verifier, &pong).await, Ok(None));
+            assert_eq!(
+                sides.ws_pong(&mut relay, &mut verifier, &pong).await,
+                Ok(None)
+            );
             sides.pongs += 1;
         }
         assert_eq!(relay.sent(), sent + frame.len() + pong.len());
-        assert!(relay.pong(&mut sides.relay_handle, &pong).await.unwrap().is_err());
+        assert!(
+            relay
+                .pong(&mut sides.relay_handle, &pong)
+                .await
+                .unwrap()
+                .is_err()
+        );
         assert_eq!(relay.sent(), sent + frame.len() + pong.len());
     }
 }
@@ -778,10 +1100,16 @@ async fn ping_during_a_response_is_answered_before_it_ends() {
     for turn in 1..=2 {
         let sent = relay.sent();
         let frame = ws_request(json!({}));
-        let messages = sides.ws_turn(&mut relay, &mut verifier, &frame).await.unwrap();
+        let messages = sides
+            .ws_turn(&mut relay, &mut verifier, &frame)
+            .await
+            .unwrap();
         assert_eq!(last_event(&messages)["type"], "response.completed");
         assert_eq!(sides.pongs, turn);
-        assert_eq!(relay.sent(), sent + frame.len() + ws::pong_frame(b"gate", PONG_MASK).len());
+        assert_eq!(
+            relay.sent(),
+            sent + frame.len() + ws::pong_frame(b"gate", PONG_MASK).len()
+        );
     }
 }
 
@@ -793,11 +1121,20 @@ async fn relay_record_of_response_ids_authenticates_nothing() {
     let mut sides = Sides::new().await;
     let (mut relay, mut verifier) = sides.open_ws(Some(FORGED_ID)).await;
 
-    let first = sides.ws_turn(&mut relay, &mut verifier, &ws_request(json!({}))).await.unwrap();
-    assert_eq!(ws::completed_response(&first).as_deref(), Some(FORGED_RESPONSE));
+    let first = sides
+        .ws_turn(&mut relay, &mut verifier, &ws_request(json!({})))
+        .await
+        .unwrap();
+    assert_eq!(
+        ws::completed_response(&first).as_deref(),
+        Some(FORGED_RESPONSE)
+    );
 
     let frame = ws_request(json!({"previous_response_id": FORGED_RESPONSE}));
-    let second = sides.ws_turn(&mut relay, &mut verifier, &frame).await.unwrap();
+    let second = sides
+        .ws_turn(&mut relay, &mut verifier, &frame)
+        .await
+        .unwrap();
     assert_eq!(last_event(&second)["type"], "error");
 }
 
@@ -810,7 +1147,10 @@ async fn provider_drop_mid_response_yields_no_response() {
 
     let sent = relay.sent();
     let frame = ws_request(json!({}));
-    sides.ws_turn(&mut relay, &mut verifier, &frame).await.unwrap_err();
+    sides
+        .ws_turn(&mut relay, &mut verifier, &frame)
+        .await
+        .unwrap_err();
     assert_eq!(relay.sent(), sent + frame.len());
 }
 
@@ -826,7 +1166,10 @@ async fn verifier_refuses_responses_which_are_not_the_turns() {
     for (misbehaviour, reason) in at_once {
         let mut sides = Sides::new().await;
         let (mut relay, mut verifier) = sides.open_credulous(misbehaviour).await;
-        let refusal = sides.ws_turn_unchecked(&mut relay, &mut verifier, &ws_request(json!({}))).await.unwrap_err();
+        let refusal = sides
+            .ws_turn_unchecked(&mut relay, &mut verifier, &ws_request(json!({})))
+            .await
+            .unwrap_err();
         assert!(refusal.contains(reason), "{misbehaviour}: {refusal}");
     }
 
@@ -834,10 +1177,19 @@ async fn verifier_refuses_responses_which_are_not_the_turns() {
     for misbehaviour in [DUPLICATE_END, STALE_EVENT] {
         let mut sides = Sides::new().await;
         let (mut relay, mut verifier) = sides.open_credulous(misbehaviour).await;
-        sides.ws_turn_unchecked(&mut relay, &mut verifier, &ws_request(json!({}))).await.unwrap();
+        sides
+            .ws_turn_unchecked(&mut relay, &mut verifier, &ws_request(json!({})))
+            .await
+            .unwrap();
         time::sleep(Duration::from_millis(100)).await;
-        let refusal = sides.ws_turn_unchecked(&mut relay, &mut verifier, &ws_request(json!({}))).await.unwrap_err();
-        assert!(refusal.contains("before the request"), "{misbehaviour}: {refusal}");
+        let refusal = sides
+            .ws_turn_unchecked(&mut relay, &mut verifier, &ws_request(json!({})))
+            .await
+            .unwrap_err();
+        assert!(
+            refusal.contains("before the request"),
+            "{misbehaviour}: {refusal}"
+        );
     }
 }
 
@@ -847,7 +1199,12 @@ async fn relay_abandons_responses_which_are_not_the_turns() {
     for misbehaviour in [CLOSE_HELD, MIXED_ID, WRONG_PARENT] {
         let mut sides = Sides::new().await;
         let (mut relay, _verifier) = sides.open_ws(Some(misbehaviour)).await;
-        let abandoned = time::timeout(STEP_LIMIT, relay.turn(&mut sides.relay_handle, &ws_request(json!({})))).await.unwrap();
+        let abandoned = time::timeout(
+            STEP_LIMIT,
+            relay.turn(&mut sides.relay_handle, &ws_request(json!({}))),
+        )
+        .await
+        .unwrap();
         assert!(abandoned.is_err(), "{misbehaviour}");
     }
 }
@@ -859,9 +1216,21 @@ async fn websocket_offer_is_checked_before_the_upgrade() {
     let mut sides = Sides::new().await;
     let injected = vec![("x-account".to_owned(), "a\r\nx-evil: 1".to_owned())];
     let offers = [
-        Offer { headers: injected, ..offer() },
-        Offer { headers: vec![("x-other".into(), "a".into())], ..offer() },
-        Offer { credential: CredentialHeader { name: "cookie".into(), prefix: String::new() }, ..offer() },
+        Offer {
+            headers: injected,
+            ..offer()
+        },
+        Offer {
+            headers: vec![("x-other".into(), "a".into())],
+            ..offer()
+        },
+        Offer {
+            credential: CredentialHeader {
+                name: "cookie".into(),
+                prefix: String::new(),
+            },
+            ..offer()
+        },
     ];
     for offer in offers {
         let opened = WsVerifier::open(
@@ -917,7 +1286,8 @@ enum Predicate {
 const SMUGGLED: &str = "\r\nx-evil: 1";
 
 /// The body a [`Cheat::SubstituteBody`] relay has the provider process.
-const SUBSTITUTE_BODY: &str = r#"{"model":"attacker-model","stream":true,"input":"attacker prompt"}"#;
+const SUBSTITUTE_BODY: &str =
+    r#"{"model":"attacker-model","stream":true,"input":"attacker prompt"}"#;
 
 /// Rejection because the proof found a hidden byte below `0x20`.
 const CONTROL_CHARACTER: &str = "contains a byte below 0x20";
@@ -938,7 +1308,12 @@ fn substitution() -> Vec<u8> {
 
 /// Performs the jobs ordered on a link as a relay modified by `cheat` and
 /// `predicate` would.
-async fn modified_relay(control: TcpStream, proofs: TcpStream, cheat: Cheat, predicate: Predicate) -> Result<()> {
+async fn modified_relay(
+    control: TcpStream,
+    proofs: TcpStream,
+    cheat: Cheat,
+    predicate: Predicate,
+) -> Result<()> {
     let (driver, mut handle) = Session::new(proofs.compat()).split();
     tokio::spawn(driver);
     let (orders, mut notices) = io::split(control);
@@ -954,20 +1329,35 @@ async fn modified_relay(control: TcpStream, proofs: TcpStream, cheat: Cheat, pre
             Cheat::SubstituteBody => credential = substitution(),
             _ => {}
         }
-        let offer = Offer { credential: CredentialHeader::bearer(), hidden_len: credential.len(), headers: Vec::new() };
+        let offer = Offer {
+            credential: CredentialHeader::bearer(),
+            hidden_len: credential.len(),
+            headers: Vec::new(),
+        };
         wire::send(&mut notices, &Notice::Offer(offer.clone())).await?;
         let (request, mut hidden) = wire::encode_request(&job, &offer, &credential);
         if cheat == Cheat::OverRedact {
             hidden.end += 16;
         }
-        let server = if cheat == Cheat::WrongServer { "evil.example" } else { job.host.as_str() };
+        let server = if cheat == Cheat::WrongServer {
+            "evil.example"
+        } else {
+            job.host.as_str()
+        };
 
         let prover = handle
             .new_prover(ProverConfig::builder().build()?)?
-            .commit(ProxyTlsConfig::builder().server_name(DnsName::try_from(server)?).build()?)
+            .commit(
+                ProxyTlsConfig::builder()
+                    .server_name(DnsName::try_from(server)?)
+                    .build()?,
+            )
             .await?;
         let (mut tls, prover) = prover.connect(
-            TlsClientConfig::builder().server_name(ServerName::Dns(server.try_into()?)).root_store(Roots::Fixture.store()).build()?,
+            TlsClientConfig::builder()
+                .server_name(ServerName::Dns(server.try_into()?))
+                .root_store(Roots::Fixture.store())
+                .build()?,
         )?;
         let prover = tokio::spawn(prover.into_future());
         tls.write_all(&request).await?;
@@ -1001,19 +1391,44 @@ async fn modified_relay(control: TcpStream, proofs: TcpStream, cheat: Cheat, pre
 /// Has a relay modified by `cheat` and `predicate` perform `job` against a
 /// provider which is `lenient` about the credential's length or not.
 /// Returns the verifier's verdict, and the link if it may be used again.
-async fn cheated(job: &Job, cheat: Cheat, predicate: Predicate, lenient: bool) -> (Result<Verdict>, Option<Link<TcpStream>>) {
-    let expect = Expect { provider: common::provider(lenient).await, roots: Roots::Fixture, relay_headers: Vec::new() };
+async fn cheated(
+    job: &Job,
+    cheat: Cheat,
+    predicate: Predicate,
+    lenient: bool,
+) -> (Result<Verdict>, Option<Link<TcpStream>>) {
+    let expect = Expect {
+        provider: common::provider(lenient).await,
+        roots: Roots::Fixture,
+        relay_headers: Vec::new(),
+    };
     let (relay_control, control) = common::pair().await;
     let (relay_proofs, proofs) = common::pair().await;
-    tokio::spawn(modified_relay(relay_control, relay_proofs, cheat, predicate));
-    time::timeout(STEP_LIMIT, Link::new(control, proofs).exchange(job, &expect)).await.expect("exchange ends in time")
+    tokio::spawn(modified_relay(
+        relay_control,
+        relay_proofs,
+        cheat,
+        predicate,
+    ));
+    time::timeout(
+        STEP_LIMIT,
+        Link::new(control, proofs).exchange(job, &expect),
+    )
+    .await
+    .expect("exchange ends in time")
 }
 
 /// The relay the tests below modify is verified when it departs in
 /// nothing, so what they reject is rejected for its departure.
 #[tokio::test(flavor = "multi_thread")]
 async fn unmodified_relay_is_verified() {
-    let (verdict, link) = cheated(&common::job(1024, 1024), Cheat::None, Predicate::Full, false).await;
+    let (verdict, link) = cheated(
+        &common::job(1024, 1024),
+        Cheat::None,
+        Predicate::Full,
+        false,
+    )
+    .await;
     assert_matches!(verdict, Ok(Verdict::Verified(response)) if response.status == 200);
     assert!(link.is_some());
 }
@@ -1024,7 +1439,8 @@ async fn unmodified_relay_is_verified() {
 #[tokio::test(flavor = "multi_thread")]
 async fn altered_over_redacted_and_misdirected_requests_are_rejected() {
     for cheat in [Cheat::AlterBody, Cheat::OverRedact, Cheat::WrongServer] {
-        let (verdict, link) = cheated(&common::job(1024, 1024), cheat, Predicate::Full, false).await;
+        let (verdict, link) =
+            cheated(&common::job(1024, 1024), cheat, Predicate::Full, false).await;
         assert_matches!(verdict, Ok(Verdict::Rejected(_)), "{cheat:?}");
         assert!(link.is_none(), "{cheat:?}");
     }
@@ -1036,7 +1452,13 @@ async fn altered_over_redacted_and_misdirected_requests_are_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn smuggled_header_is_rejected() {
     for lenient in [false, true] {
-        let (verdict, _) = cheated(&common::job(1024, 1024), Cheat::SmuggleHeader, Predicate::Full, lenient).await;
+        let (verdict, _) = cheated(
+            &common::job(1024, 1024),
+            Cheat::SmuggleHeader,
+            Predicate::Full,
+            lenient,
+        )
+        .await;
         assert_matches!(verdict, Ok(Verdict::Rejected(reason)) if reason.contains(CONTROL_CHARACTER), "lenient={lenient}");
     }
 }
@@ -1046,7 +1468,13 @@ async fn smuggled_header_is_rejected() {
 /// proof over them.
 #[tokio::test(flavor = "multi_thread")]
 async fn body_substituted_in_hidden_bytes_is_rejected() {
-    let (verdict, link) = cheated(&common::job(1024, 1024), Cheat::SubstituteBody, Predicate::Full, false).await;
+    let (verdict, link) = cheated(
+        &common::job(1024, 1024),
+        Cheat::SubstituteBody,
+        Predicate::Full,
+        false,
+    )
+    .await;
     assert_matches!(verdict, Ok(Verdict::Rejected(reason)) if reason.contains(CONTROL_CHARACTER));
     assert!(link.is_none());
 }
@@ -1056,10 +1484,26 @@ async fn body_substituted_in_hidden_bytes_is_rejected() {
 /// relay which leaves it out is rejected too.
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_or_misplaced_proof_over_the_hidden_bytes_is_rejected() {
-    for predicate in [Predicate::Omit, Predicate::Shrink(TOKEN.len()), Predicate::Move] {
-        let (verdict, _) = cheated(&common::job(1024, 1024), Cheat::SubstituteBody, predicate, false).await;
+    for predicate in [
+        Predicate::Omit,
+        Predicate::Shrink(TOKEN.len()),
+        Predicate::Move,
+    ] {
+        let (verdict, _) = cheated(
+            &common::job(1024, 1024),
+            Cheat::SubstituteBody,
+            predicate,
+            false,
+        )
+        .await;
         assert_matches!(verdict, Ok(Verdict::Rejected(reason)) if reason.contains(NOT_PROVEN), "{predicate:?}");
     }
-    let (verdict, _) = cheated(&common::job(1024, 1024), Cheat::None, Predicate::Omit, false).await;
+    let (verdict, _) = cheated(
+        &common::job(1024, 1024),
+        Cheat::None,
+        Predicate::Omit,
+        false,
+    )
+    .await;
     assert_matches!(verdict, Ok(Verdict::Rejected(reason)) if reason.contains(NOT_PROVEN));
 }

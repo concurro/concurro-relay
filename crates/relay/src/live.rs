@@ -12,7 +12,10 @@ use concurro_relay_protocol::Roots;
 use futures::{AsyncReadExt as _, AsyncWriteExt as _};
 use tlsn::{
     ProxySnapshot, SessionHandle,
-    config::{prove::ProveConfig, prover::ProverConfig, tls::TlsClientConfig, tls_commit::proxy::ProxyTlsConfig},
+    config::{
+        prove::ProveConfig, prover::ProverConfig, tls::TlsClientConfig,
+        tls_commit::proxy::ProxyTlsConfig,
+    },
     connection::{DnsName, ServerName},
     prover::{ProverControl, TlsConnection},
     rangeset::set::RangeSet,
@@ -66,10 +69,18 @@ impl LiveRelay {
         opened
     }
 
-    async fn open_unguarded(handle: &mut SessionHandle, server: &str, roots: Roots) -> Result<Self> {
+    async fn open_unguarded(
+        handle: &mut SessionHandle,
+        server: &str,
+        roots: Roots,
+    ) -> Result<Self> {
         let prover = handle
             .new_prover(ProverConfig::builder().build()?)?
-            .commit(ProxyTlsConfig::builder().server_name(DnsName::try_from(server)?).build()?)
+            .commit(
+                ProxyTlsConfig::builder()
+                    .server_name(DnsName::try_from(server)?)
+                    .build()?,
+            )
             .await?;
         let (tls, prover) = prover.connect(
             TlsClientConfig::builder()
@@ -83,7 +94,19 @@ impl LiveRelay {
         let connection = tokio::spawn(async move {
             let _ = prover.carry().await;
         });
-        Ok(Self { tls, control, connection, server: server.to_owned(), sent: 0, received: 0, proven: 0, proven_received: 0, proven_records: 0, unread: Vec::new(), abandoned: false })
+        Ok(Self {
+            tls,
+            control,
+            connection,
+            server: server.to_owned(),
+            sent: 0,
+            received: 0,
+            proven: 0,
+            proven_received: 0,
+            proven_records: 0,
+            unread: Vec::new(),
+            abandoned: false,
+        })
     }
 
     /// Offset the next sent byte will have in the connection's sent data.
@@ -154,9 +177,14 @@ impl LiveRelay {
     /// Proves everything sent and received since the last proof, keeping the
     /// `hidden` ranges of the sent data private and proving that each of
     /// their bytes is at least `0x20`.
-    pub async fn prove(&mut self, handle: &mut SessionHandle, hidden: &[Range<usize>]) -> Result<()> {
+    pub async fn prove(
+        &mut self,
+        handle: &mut SessionHandle,
+        hidden: &[Range<usize>],
+    ) -> Result<()> {
         let snapshot = self.snapshot().await?;
-        self.prove_snapshot(handle, snapshot, hidden, &Misproof::default()).await
+        self.prove_snapshot(handle, snapshot, hidden, &Misproof::default())
+            .await
     }
 
     /// Takes a snapshot holding exactly what this side has written and
@@ -165,7 +193,10 @@ impl LiveRelay {
         let deadline = time::Instant::now() + QUIET_LIMIT;
         loop {
             match self.control.snapshot() {
-                Ok(snapshot) if snapshot.len_sent() == self.sent && snapshot.len_received() == self.received => {
+                Ok(snapshot)
+                    if snapshot.len_sent() == self.sent
+                        && snapshot.len_received() == self.received =>
+                {
                     return Ok(snapshot);
                 }
                 _ if time::Instant::now() >= deadline => bail!("connection did not go quiet"),
@@ -204,11 +235,16 @@ impl LiveRelay {
         hidden: &[Range<usize>],
         misproof: &Misproof,
     ) -> Result<()> {
-        ensure!(!self.abandoned, "connection was abandoned after a failed proof");
+        ensure!(
+            !self.abandoned,
+            "connection was abandoned after a failed proof"
+        );
         // Abandoned until proven otherwise, so that a proof which is
         // cancelled part-way counts as failed.
         self.abandoned = true;
-        let proven = self.prove_unguarded(handle, snapshot, hidden, misproof).await;
+        let proven = self
+            .prove_unguarded(handle, snapshot, hidden, misproof)
+            .await;
         match proven {
             Ok(()) => self.abandoned = false,
             Err(_) => handle.close(),
@@ -226,7 +262,11 @@ impl LiveRelay {
         let (sent, received) = (snapshot.len_sent(), snapshot.len_received());
         let mut prover = handle
             .new_prover(ProverConfig::builder().build()?)?
-            .commit(ProxyTlsConfig::builder().server_name(DnsName::try_from(self.server.as_str())?).build()?)
+            .commit(
+                ProxyTlsConfig::builder()
+                    .server_name(DnsName::try_from(self.server.as_str())?)
+                    .build()?,
+            )
             .await?
             .attach(snapshot, misproof.tags_from.unwrap_or(self.proven_records))
             .await?;

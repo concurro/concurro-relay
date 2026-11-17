@@ -1,0 +1,13 @@
+[package]
+name = "native-port-feasibility"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+hpack = "=0.3.0"
+httlib-hpack = "=0.1.3"
+rcgen = "=0.13.2"
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }

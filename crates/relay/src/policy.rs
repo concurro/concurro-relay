@@ -43,7 +43,9 @@ impl ThreadParents {
     /// Records the message in `response` if the provider accepted the
     /// request.
     pub fn record(&self, response: &[u8]) {
-        let Ok(response) = wire::parse_response(response) else { return };
+        let Ok(response) = wire::parse_response(response) else {
+            return;
+        };
         if response.status == 200
             && let Some(id) = wire::message_id(&response.body)
         {
@@ -62,8 +64,10 @@ impl Policy {
         self.check_route(job)?;
         // One encoding header is allowed beyond the allowlist. Its value is
         // checked when the body is decoded.
-        let (encodings, others): (Vec<_>, Vec<_>) =
-            job.headers.iter().partition(|(name, _)| name == wire::CONTENT_ENCODING);
+        let (encodings, others): (Vec<_>, Vec<_>) = job
+            .headers
+            .iter()
+            .partition(|(name, _)| name == wire::CONTENT_ENCODING);
         if encodings.len() > 1 {
             return Err("more than one content encoding".into());
         }
@@ -125,7 +129,10 @@ impl Policy {
         Ok(())
     }
 
-    fn check_headers<'a>(&self, headers: impl IntoIterator<Item = &'a (String, String)>) -> Result<(), String> {
+    fn check_headers<'a>(
+        &self,
+        headers: impl IntoIterator<Item = &'a (String, String)>,
+    ) -> Result<(), String> {
         for (name, value) in headers {
             if !self.headers.contains(name) {
                 return Err(format!("header not allowed: {name}"));
@@ -213,7 +220,9 @@ mod tests {
             host: "provider.example".into(),
             paths: vec!["/v1/responses".into()],
             headers: vec!["content-type".into()],
-            body_fields: ["type", "store", "previous_response_id", "thread", "input"].map(Into::into).to_vec(),
+            body_fields: ["type", "store", "previous_response_id", "thread", "input"]
+                .map(Into::into)
+                .to_vec(),
         }
     }
 
@@ -221,7 +230,10 @@ mod tests {
         Job {
             host: "provider.example".into(),
             path: "/v1/responses".into(),
-            headers: headers.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect(),
+            headers: headers
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
             body: body.as_bytes().to_vec(),
         }
     }
@@ -233,13 +245,19 @@ mod tests {
         compressed.compress().unwrap();
         assert_matches!(policy.check(&compressed, &parents), Ok(()));
 
-        compressed.headers.push((wire::CONTENT_ENCODING.into(), "identity\r\nx-evil: 1".into()));
+        compressed.headers.push((
+            wire::CONTENT_ENCODING.into(),
+            "identity\r\nx-evil: 1".into(),
+        ));
         assert_matches!(policy.check(&compressed, &parents), Err(_));
 
         let injected = job(&[(wire::CONTENT_ENCODING, "identity\r\nx-evil: 1")], "{}");
         assert_matches!(policy.check(&injected, &parents), Err(_));
         assert_matches!(policy.check_target(&injected), Err(_));
-        assert_matches!(policy.check_target(&job(&[(wire::CONTENT_ENCODING, wire::ZSTD)], "")), Err(_));
+        assert_matches!(
+            policy.check_target(&job(&[(wire::CONTENT_ENCODING, wire::ZSTD)], "")),
+            Err(_)
+        );
     }
 
     #[test]

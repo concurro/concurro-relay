@@ -13,7 +13,10 @@ pub struct Laps {
 
 impl Laps {
     pub fn start() -> Self {
-        Self { last: Instant::now(), laps: Vec::new() }
+        Self {
+            last: Instant::now(),
+            laps: Vec::new(),
+        }
     }
 
     /// Closes the phase running since the previous lap, in seconds.

@@ -30,7 +30,9 @@ impl Server {
     pub async fn connect(&self) -> Result<Connection> {
         let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         if let Some(path) = &self.ca_file {
-            for certificate in CertificateDer::pem_file_iter(path).with_context(|| format!("could not read {}", path.display()))? {
+            for certificate in CertificateDer::pem_file_iter(path)
+                .with_context(|| format!("could not read {}", path.display()))?
+            {
                 roots.add(certificate?)?;
             }
         }
@@ -38,10 +40,19 @@ impl Server {
             .with_safe_default_protocol_versions()?
             .with_root_certificates(roots)
             .with_no_client_auth();
-        let host = self.address.rsplit_once(':').map_or(self.address.as_str(), |(host, _)| host);
-        let name = ServerName::try_from(host.to_owned()).with_context(|| format!("{host} is not a server name"))?;
-        let stream = TcpStream::connect(&self.address).await.with_context(|| format!("could not reach {}", self.address))?;
+        let host = self
+            .address
+            .rsplit_once(':')
+            .map_or(self.address.as_str(), |(host, _)| host);
+        let name = ServerName::try_from(host.to_owned())
+            .with_context(|| format!("{host} is not a server name"))?;
+        let stream = TcpStream::connect(&self.address)
+            .await
+            .with_context(|| format!("could not reach {}", self.address))?;
         stream.set_nodelay(true)?;
-        TlsConnector::from(Arc::new(config)).connect(name, stream).await.with_context(|| format!("could not secure the connection to {}", self.address))
+        TlsConnector::from(Arc::new(config))
+            .connect(name, stream)
+            .await
+            .with_context(|| format!("could not secure the connection to {}", self.address))
     }
 }

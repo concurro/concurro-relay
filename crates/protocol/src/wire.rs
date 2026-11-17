@@ -32,10 +32,16 @@ const MAX_DECODED_BODY: usize = 64 << 20;
 impl Job {
     /// The body with any compression removed.
     pub fn decoded_body(&self) -> Result<Vec<u8>, String> {
-        match self.headers.iter().find(|(name, _)| name == CONTENT_ENCODING) {
+        match self
+            .headers
+            .iter()
+            .find(|(name, _)| name == CONTENT_ENCODING)
+        {
             None => Ok(self.body.clone()),
-            Some((_, encoding)) if encoding == ZSTD => zstd::bulk::decompress(&self.body, MAX_DECODED_BODY)
-                .map_err(|_| "body is not valid zstd".to_owned()),
+            Some((_, encoding)) if encoding == ZSTD => {
+                zstd::bulk::decompress(&self.body, MAX_DECODED_BODY)
+                    .map_err(|_| "body is not valid zstd".to_owned())
+            }
             Some((_, encoding)) => Err(format!("content encoding not allowed: {encoding}")),
         }
     }
@@ -43,7 +49,9 @@ impl Job {
     /// Compresses the body, which must not already be compressed.
     pub fn compress(&mut self) -> Result<()> {
         ensure!(
-            self.headers.iter().all(|(name, _)| name != CONTENT_ENCODING),
+            self.headers
+                .iter()
+                .all(|(name, _)| name != CONTENT_ENCODING),
             "body is already encoded"
         );
         self.body = zstd::bulk::compress(&self.body, ZSTD_LEVEL)?;
@@ -71,7 +79,9 @@ mod body_format {
     pub fn serialize<S: Serializer>(body: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
         match std::str::from_utf8(body) {
             Ok(text) => Body::Text(text.to_owned()),
-            Err(_) => Body::Binary { base64: STANDARD.encode(body) },
+            Err(_) => Body::Binary {
+                base64: STANDARD.encode(body),
+            },
         }
         .serialize(serializer)
     }
@@ -94,7 +104,10 @@ pub struct CredentialHeader {
 
 impl CredentialHeader {
     pub fn bearer() -> Self {
-        Self { name: "authorization".into(), prefix: "Bearer ".into() }
+        Self {
+            name: "authorization".into(),
+            prefix: "Bearer ".into(),
+        }
     }
 }
 
@@ -206,12 +219,21 @@ pub fn parse_response(received: &[u8]) -> Result<HttpResponse, String> {
         .iter()
         .any(|(name, value)| name == "transfer-encoding" && value.eq_ignore_ascii_case("chunked"));
     // Digits only: `parse` alone would also take a sign.
-    let digits = |value: &String| value.bytes().all(|byte| byte.is_ascii_digit()).then(|| value.parse::<usize>().ok()).flatten();
+    let digits = |value: &String| {
+        value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| value.parse::<usize>().ok())
+            .flatten()
+    };
     // An interim response is not the response, whatever it declares.
     if (100..200).contains(&status) && !BODILESS.contains(&status) {
         return Err("response is an interim one".into());
     }
-    let mut lengths = headers.iter().filter(|(name, _)| name == "content-length").map(|(_, value)| digits(value));
+    let mut lengths = headers
+        .iter()
+        .filter(|(name, _)| name == "content-length")
+        .map(|(_, value)| digits(value));
     let length = lengths.next();
     if lengths.next().is_some() || (chunked && length.is_some()) {
         return Err("response declares its length more than once".into());
@@ -226,7 +248,11 @@ pub fn parse_response(received: &[u8]) -> Result<HttpResponse, String> {
         (false, None) if body.is_empty() && BODILESS.contains(&status) => Vec::new(),
         (false, None) => return Err("response body is not delimited".into()),
     };
-    Ok(HttpResponse { status, headers, body })
+    Ok(HttpResponse {
+        status,
+        headers,
+        body,
+    })
 }
 
 /// Removes HTTP/1.1 chunked transfer encoding from a whole body, which has
@@ -235,9 +261,16 @@ fn dechunk(mut raw: &[u8]) -> Option<Vec<u8>> {
     let mut body = Vec::new();
     loop {
         let line_end = raw.windows(2).position(|w| w == b"\r\n")?;
-        let size = std::str::from_utf8(&raw[..line_end]).ok()?.split(';').next()?.trim();
+        let size = std::str::from_utf8(&raw[..line_end])
+            .ok()?
+            .split(';')
+            .next()?
+            .trim();
         // Hex digits only: `from_str_radix` alone would also take a sign.
-        let size = size.bytes().all(|byte| byte.is_ascii_hexdigit()).then(|| usize::from_str_radix(size, 16).ok())??;
+        let size = size
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+            .then(|| usize::from_str_radix(size, 16).ok())??;
         raw = &raw[line_end + 2..];
         if size == 0 {
             return (raw == b"\r\n").then_some(body);
@@ -280,8 +313,18 @@ mod tests {
         assert!(parse_response(b"HTTP/1.1 100 Continue\r\n\r\n").is_err());
         assert!(parse_response(b"HTTP/1.1 100 Continue\r\ncontent-length: 0\r\n\r\n").is_err());
         assert!(parse_response(b"HTTP/1.1 200 OK\r\ncontent-length: +5\r\n\r\nhello").is_err());
-        assert!(parse_response(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\ncontent-length: 9\r\n\r\nhello").is_err());
-        assert_eq!(parse_response(b"HTTP/1.1 101 Switching Protocols\r\n\r\n").unwrap().status, 101);
+        assert!(
+            parse_response(
+                b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\ncontent-length: 9\r\n\r\nhello"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            parse_response(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+                .unwrap()
+                .status,
+            101
+        );
     }
 
     #[test]

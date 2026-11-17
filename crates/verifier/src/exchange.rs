@@ -70,18 +70,29 @@ impl Pending {
 
 /// Forwards the relay's exchange with the provider and verifies its proof
 /// over `handle`'s session.
-pub async fn verify(handle: &mut SessionHandle, job: &Job, pending: Pending, expect: &Expect) -> Result<Verdict> {
+pub async fn verify(
+    handle: &mut SessionHandle,
+    job: &Job,
+    pending: Pending,
+    expect: &Expect,
+) -> Result<Verdict> {
     let Pending { expected, hidden } = pending;
 
     let mut laps = Laps::start();
-    let verifier =
-        handle.new_verifier(VerifierConfig::builder().root_store(expect.roots.store()).build()?)?;
+    let verifier = handle.new_verifier(
+        VerifierConfig::builder()
+            .root_store(expect.roots.store())
+            .build()?,
+    )?;
 
     let VerifierCommitStart::Proxy(verifier) = verifier.commit().await? else {
         return Ok(Verdict::Rejected("relay did not request proxy mode".into()));
     };
     if verifier.config().server_name().as_str() != job.host {
-        let reason = format!("relay targeted {}", verifier.config().server_name().as_str());
+        let reason = format!(
+            "relay targeted {}",
+            verifier.config().server_name().as_str()
+        );
         verifier.reject(Some(&reason)).await?;
         return Ok(Verdict::Rejected(reason));
     }
@@ -100,7 +111,14 @@ pub async fn verify(handle: &mut SessionHandle, job: &Job, pending: Pending, exp
         verifier.reject(Some(reason)).await?;
         return Ok(Verdict::Rejected(reason.into()));
     }
-    let (VerifierOutput { server_name, transcript, .. }, verifier) = match verifier.accept().await {
+    let (
+        VerifierOutput {
+            server_name,
+            transcript,
+            ..
+        },
+        verifier,
+    ) = match verifier.accept().await {
         Ok(accepted) => accepted,
         Err(error) => return Ok(Verdict::Rejected(format!("proof failed: {error}"))),
     };
@@ -122,9 +140,15 @@ pub async fn verify(handle: &mut SessionHandle, job: &Job, pending: Pending, exp
 
 /// Checks what the relay offers to add to the request.
 pub fn admit(offer: &Offer, relay_headers: &[String]) -> Result<(), String> {
-    let credential = (offer.credential.name.as_str(), offer.credential.prefix.as_str());
+    let credential = (
+        offer.credential.name.as_str(),
+        offer.credential.prefix.as_str(),
+    );
     if !CREDENTIAL_HEADERS.contains(&credential) {
-        return Err(format!("credential header not allowed: {}", offer.credential.name));
+        return Err(format!(
+            "credential header not allowed: {}",
+            offer.credential.name
+        ));
     }
     for (name, value) in &offer.headers {
         if !relay_headers.contains(name) {
@@ -139,7 +163,11 @@ pub fn admit(offer: &Offer, relay_headers: &[String]) -> Result<(), String> {
 
 /// Checks the proven transcript against the `expected` request, in which
 /// only `hidden` may be undisclosed, and parses the response.
-fn check(transcript: &PartialTranscript, expected: &[u8], hidden: Range<usize>) -> Result<Response, String> {
+fn check(
+    transcript: &PartialTranscript,
+    expected: &[u8],
+    hidden: Range<usize>,
+) -> Result<Response, String> {
     if transcript.len_sent() != expected.len() {
         return Err(format!(
             "request is {} bytes, expected {}",
@@ -151,7 +179,11 @@ fn check(transcript: &PartialTranscript, expected: &[u8], hidden: Range<usize>) 
         return Err("hidden request bytes are not exactly the credential".into());
     }
     // Unauthenticated bytes read back as zero, matching the zeroed credential.
-    if transcript.sent_unsafe(expected.len()).map_err(|e| e.to_string())? != expected {
+    if transcript
+        .sent_unsafe(expected.len())
+        .map_err(|e| e.to_string())?
+        != expected
+    {
         return Err("request differs from the one asked for".into());
     }
     if !transcript.received_unauthed().is_empty() {
@@ -160,8 +192,17 @@ fn check(transcript: &PartialTranscript, expected: &[u8], hidden: Range<usize>) 
     let received = transcript
         .received_unsafe(transcript.len_received())
         .map_err(|e| e.to_string())?;
-    let wire::HttpResponse { status, headers, body } = wire::parse_response(&received)?;
-    Ok(Response { status, headers, body, laps: Laps::start() })
+    let wire::HttpResponse {
+        status,
+        headers,
+        body,
+    } = wire::parse_response(&received)?;
+    Ok(Response {
+        status,
+        headers,
+        body,
+        laps: Laps::start(),
+    })
 }
 
 #[cfg(test)]
@@ -171,14 +212,35 @@ mod tests {
     #[test]
     fn admit_rejects_unexpected_relay_additions() {
         let offer = |name: &str, headers: Vec<(String, String)>| Offer {
-            credential: wire::CredentialHeader { name: name.into(), prefix: "".into() },
+            credential: wire::CredentialHeader {
+                name: name.into(),
+                prefix: "".into(),
+            },
             hidden_len: 8,
             headers,
         };
         let allowed = ["account".to_owned()];
-        assert!(admit(&offer("x-api-key", vec![("account".into(), "abc".into())]), &allowed).is_ok());
+        assert!(
+            admit(
+                &offer("x-api-key", vec![("account".into(), "abc".into())]),
+                &allowed
+            )
+            .is_ok()
+        );
         assert!(admit(&offer("cookie", Vec::new()), &allowed).is_err());
-        assert!(admit(&offer("x-api-key", vec![("other".into(), "abc".into())]), &allowed).is_err());
-        assert!(admit(&offer("x-api-key", vec![("account".into(), "a\r\nb: c".into())]), &allowed).is_err());
+        assert!(
+            admit(
+                &offer("x-api-key", vec![("other".into(), "abc".into())]),
+                &allowed
+            )
+            .is_err()
+        );
+        assert!(
+            admit(
+                &offer("x-api-key", vec![("account".into(), "a\r\nb: c".into())]),
+                &allowed
+            )
+            .is_err()
+        );
     }
 }

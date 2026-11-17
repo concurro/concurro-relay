@@ -48,6 +48,9 @@ impl FromStr for Route {
     type Err = String;
 
     fn from_str(id: &str) -> Result<Self, Self::Err> {
-        Self::ALL.into_iter().find(|route| route.id() == id).ok_or_else(|| format!("unknown route: {id}"))
+        Self::ALL
+            .into_iter()
+            .find(|route| route.id() == id)
+            .ok_or_else(|| format!("unknown route: {id}"))
     }
 }

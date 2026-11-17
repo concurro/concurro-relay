@@ -18,7 +18,9 @@ use http_body_util::{BodyExt, Full};
 use hyper::{
     Request, Response, StatusCode,
     body::{Bytes, Incoming},
-    header::{AUTHORIZATION, CONNECTION, CONTENT_TYPE, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, UPGRADE},
+    header::{
+        AUTHORIZATION, CONNECTION, CONTENT_TYPE, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, UPGRADE,
+    },
     server::conn::http1,
     service::service_fn,
     upgrade::{self, Upgraded},
@@ -31,13 +33,13 @@ use rustls::{
     version::TLS12,
 };
 use serde_json::{Value, json};
+use tlsn_server_fixture_certs::{SERVER_CERT_DER, SERVER_KEY_DER};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
 };
-use tlsn_server_fixture_certs::{SERVER_CERT_DER, SERVER_KEY_DER};
 
 /// Request header selecting the approximate response body size.
 pub const RESPONSE_BYTES_HEADER: &str = "x-spike-response-bytes";
@@ -132,10 +134,21 @@ async fn handle(
     request: Request<Incoming>,
     config: &ProviderConfig,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    let header = |name: &str| request.headers().get(name).and_then(|value| value.to_str().ok());
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+    };
     let websocket = header(UPGRADE.as_str())
         .is_some_and(|protocol| protocol.eq_ignore_ascii_case("websocket"))
-        .then(|| derive_accept_key(header(SEC_WEBSOCKET_KEY.as_str()).unwrap_or_default().as_bytes()));
+        .then(|| {
+            derive_accept_key(
+                header(SEC_WEBSOCKET_KEY.as_str())
+                    .unwrap_or_default()
+                    .as_bytes(),
+            )
+        });
     let misbehaviour = header(MISBEHAVE_HEADER).map(str::to_owned);
     let presented = header(AUTHORIZATION.as_str()).unwrap_or_default();
     let authorized = if config.lenient {
@@ -143,7 +156,9 @@ async fn handle(
     } else {
         presented == format!("Bearer {}", config.token)
     };
-    let size = header(RESPONSE_BYTES_HEADER).and_then(|value| value.parse().ok()).unwrap_or(2048);
+    let size = header(RESPONSE_BYTES_HEADER)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2048);
     let saw_evil = request.headers().contains_key("x-evil");
     if let Some(delay) = header(DELAY_HEADER).and_then(|value| value.parse().ok()) {
         tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -152,7 +167,9 @@ async fn handle(
     if authorized && let Some(accept) = websocket {
         tokio::spawn(async move {
             if let Ok(upgraded) = upgrade::on(request).await {
-                let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
+                let socket =
+                    WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None)
+                        .await;
                 let _ = converse(socket, size, misbehaviour.as_deref()).await;
             }
         });
@@ -167,9 +184,22 @@ async fn handle(
 
     let (status, content_type, body) = if authorized {
         let zstd = header("content-encoding") == Some("zstd");
-        let body = request.into_body().collect().await.map(|body| body.to_bytes()).unwrap_or_default();
-        let body = if zstd { zstd::decode_all(&body[..]).unwrap_or_default() } else { body.to_vec() };
-        (StatusCode::OK, "text/event-stream", events(size, &body, saw_evil))
+        let body = request
+            .into_body()
+            .collect()
+            .await
+            .map(|body| body.to_bytes())
+            .unwrap_or_default();
+        let body = if zstd {
+            zstd::decode_all(&body[..]).unwrap_or_default()
+        } else {
+            body.to_vec()
+        };
+        (
+            StatusCode::OK,
+            "text/event-stream",
+            events(size, &body, saw_evil),
+        )
     } else {
         let error = r#"{"error":{"type":"authentication_error"}}"#.to_owned();
         (StatusCode::UNAUTHORIZED, "application/json", error)
@@ -193,29 +223,51 @@ async fn converse(
     let event = |event: Value| Message::Text(event.to_string().into());
     let mut issued = HashSet::new();
     while let Some(message) = socket.next().await {
-        let Message::Text(text) = message? else { continue };
+        let Message::Text(text) = message? else {
+            continue;
+        };
         let request: Value = serde_json::from_str(text.as_str()).unwrap_or_default();
         let previous = request["previous_response_id"].as_str();
         if previous.is_some_and(|id| !issued.contains(id)) {
-            socket.send(event(json!({"type": "error", "error": {"code": "previous_response_not_found"}}))).await?;
+            socket
+                .send(event(
+                    json!({"type": "error", "error": {"code": "previous_response_not_found"}}),
+                ))
+                .await?;
             continue;
         }
         let issue = format!("resp_mock_{}", ISSUED.fetch_add(1, Ordering::Relaxed));
-        let id = if misbehaviour == Some(FORGED_ID) { FORGED_RESPONSE } else { &issue };
+        let id = if misbehaviour == Some(FORGED_ID) {
+            FORGED_RESPONSE
+        } else {
+            &issue
+        };
         if misbehaviour == Some(PING) {
             socket.send(Message::Ping("spike".into())).await?;
         }
-        socket.send(event(json!({"type": "codex.rate_limits"}))).await?;
-        let parent = if misbehaviour == Some(WRONG_PARENT) { Some("resp_other") } else { previous };
+        socket
+            .send(event(json!({"type": "codex.rate_limits"})))
+            .await?;
+        let parent = if misbehaviour == Some(WRONG_PARENT) {
+            Some("resp_other")
+        } else {
+            previous
+        };
         let created = json!({"id": id, "previous_response_id": parent, "store": request["store"]});
-        socket.send(event(json!({"type": "response.created", "sequence_number": 0, "response": created}))).await?;
+        socket
+            .send(event(
+                json!({"type": "response.created", "sequence_number": 0, "response": created}),
+            ))
+            .await?;
         if misbehaviour == Some(PING_GATED) {
             socket.send(Message::Ping("gate".into())).await?;
             while !matches!(socket.next().await, Some(Ok(Message::Pong(_))) | None) {}
         }
         let deltas = size / 256;
         let delta = |sequence: usize| {
-            event(json!({"type": "response.output_text.delta", "sequence_number": sequence, "delta": "x".repeat(200)}))
+            event(
+                json!({"type": "response.output_text.delta", "sequence_number": sequence, "delta": "x".repeat(200)}),
+            )
         };
         for sequence in 1..=deltas {
             socket.send(delta(sequence)).await?;

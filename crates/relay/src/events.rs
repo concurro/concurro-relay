@@ -2,7 +2,8 @@
 
 use std::fmt;
 
-use concurro_relay_protocol::{native::NativeAudit, route::Route};
+use concurro_relay_native::NativeAudit;
+use concurro_relay_protocol::route::Route;
 
 /// The state of one of the relay's links to Concurro.
 #[derive(Clone, Debug, PartialEq)]
@@ -34,12 +35,25 @@ pub struct Exchange {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
-    Link { link: usize, state: LinkState },
-    Proved { link: usize, exchange: Exchange },
+    Link {
+        link: usize,
+        state: LinkState,
+    },
+    Proved {
+        link: usize,
+        exchange: Exchange,
+    },
     /// A native TLS request proved by Sponsor, with usage reported by Concurro.
-    NativeAudit { link: usize, route: Route, audit: NativeAudit },
+    NativeAudit {
+        link: usize,
+        route: Route,
+        audit: NativeAudit,
+    },
     /// The relay did not perform a request, and why.
-    Refused { link: usize, reason: String },
+    Refused {
+        link: usize,
+        reason: String,
+    },
 }
 
 /// A number of bytes as a person reads it.
@@ -84,9 +98,16 @@ impl fmt::Display for Event {
             Self::Link { link, state } => write!(f, "link {link} {state}"),
             Self::Proved { link, exchange } => write!(f, "link {link} {exchange}"),
             Self::NativeAudit { link, route, audit } => write!(
-                f, "link {link} {} proved request {} (sha256 {}); Concurro-reported provider usage: {}",
-                route.label(), audit.turn, audit.sha256,
-                audit.usage.as_ref().map(ToString::to_string).unwrap_or_else(|| "unavailable".into()),
+                f,
+                "link {link} {} proved request {} (sha256 {}); Concurro-reported provider usage: {}",
+                route.label(),
+                audit.turn,
+                audit.sha256,
+                audit
+                    .usage
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "unavailable".into()),
             ),
             Self::Refused { link, reason } => write!(f, "link {link} refused a request: {reason}"),
         }

@@ -28,7 +28,11 @@ pub const PROTOCOL_VERSION: u32 = 4;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Order {
     /// Start one native TLS 1.3 session on the authenticated link pair.
-    NativeStart { route: Route, provider_host: String, provider_port: u16 },
+    NativeStart {
+        route: Route,
+        provider_host: String,
+        provider_port: u16,
+    },
     /// Perform one request on a provider connection of its own, and prove
     /// the exchange.
     Job(Job),
@@ -186,7 +190,13 @@ where
         Answer::Refused(reason) => bail!(Refusal(reason)),
         other => bail!("verifier answered a hello with {other:?}"),
     };
-    wire::send(stream, &Proof { signature: identity.sign(&signed(&challenge, hello)) }).await?;
+    wire::send(
+        stream,
+        &Proof {
+            signature: identity.sign(&signed(&challenge, hello)),
+        },
+    )
+    .await?;
     match wire::recv(stream).await? {
         Answer::Welcome => Ok(()),
         Answer::Refused(reason) => bail!(Refusal(reason)),
@@ -203,7 +213,11 @@ where
     let challenge = identity::random();
     wire::send(stream, &Answer::Challenge(challenge)).await?;
     let proof: Proof = wire::recv(stream).await?;
-    Ok(identity::verify(public_key, &signed(&challenge, hello), &proof.signature))
+    Ok(identity::verify(
+        public_key,
+        &signed(&challenge, hello),
+        &proof.signature,
+    ))
 }
 
 /// A verifier's refusal of a relay, which trying again will not change.
@@ -225,17 +239,32 @@ mod tests {
     use super::*;
 
     fn link(relay: &str) -> Hello {
-        Hello::Link { version: PROTOCOL_VERSION, relay: relay.into(), link: 1, slot: 1, role: Role::Control }
+        Hello::Link {
+            version: PROTOCOL_VERSION,
+            relay: relay.into(),
+            link: 1,
+            slot: 1,
+            role: Role::Control,
+        }
     }
 
     /// Runs both ends of a challenge, the verifier judging `judged` while
     /// the relay presents `presented`.
-    async fn challenged(presented: Hello, judged: Hello, identity: &Identity, public_key: &[u8]) -> bool {
+    async fn challenged(
+        presented: Hello,
+        judged: Hello,
+        identity: &Identity,
+        public_key: &[u8],
+    ) -> bool {
         let (mut relay, mut verifier) = io::duplex(4096);
         let verify = async {
             let _: Hello = wire::recv(&mut verifier).await.unwrap();
             let proven = challenge(&mut verifier, &judged, public_key).await.unwrap();
-            let answer = if proven { Answer::Welcome } else { Answer::Refused("unknown relay".into()) };
+            let answer = if proven {
+                Answer::Welcome
+            } else {
+                Answer::Refused("unknown relay".into())
+            };
             wire::send(&mut verifier, &answer).await.unwrap();
             proven
         };

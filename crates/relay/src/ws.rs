@@ -50,7 +50,10 @@ impl WsRelay {
         let mut response = Vec::new();
         let head_end = loop {
             response.extend(live.read().await?);
-            if let Some(at) = response.windows(HEAD_END.len()).position(|window| window == HEAD_END) {
+            if let Some(at) = response
+                .windows(HEAD_END.len())
+                .position(|window| window == HEAD_END)
+            {
                 break at + HEAD_END.len();
             }
         };
@@ -61,8 +64,18 @@ impl WsRelay {
             inbox.push(&response[head_end..])?;
         }
         live.prove(handle, &[hidden]).await?;
-        ensure!(status == Some("101"), "provider refused the upgrade with status {}", status.unwrap_or("unreadable"));
-        Ok(Self { live, inbox, policy, responses: HashSet::new(), in_flight: None })
+        ensure!(
+            status == Some("101"),
+            "provider refused the upgrade with status {}",
+            status.unwrap_or("unreadable")
+        );
+        Ok(Self {
+            live,
+            inbox,
+            policy,
+            responses: HashSet::new(),
+            in_flight: None,
+        })
     }
 
     /// Bytes sent to the provider so far.
@@ -73,18 +86,29 @@ impl WsRelay {
     /// Sends the client frame `frame` if the policy allows its message,
     /// then waits and proves as [`Self::pong`] does. A refusal sends
     /// nothing.
-    pub async fn turn(&mut self, handle: &mut SessionHandle, frame: &[u8]) -> Result<Result<Progress, String>> {
+    pub async fn turn(
+        &mut self,
+        handle: &mut SessionHandle,
+        frame: &[u8],
+    ) -> Result<Result<Progress, String>> {
         if let Err(reason) = self.send_request(frame).await? {
             return Ok(Err(reason));
         }
-        self.advance(handle).await?.context("nothing to prove after the request").map(Ok)
+        self.advance(handle)
+            .await?
+            .context("nothing to prove after the request")
+            .map(Ok)
     }
 
     /// Sends the pong `frame` if it answers a ping this connection received
     /// and has not answered. If a response is in flight, waits for it to
     /// end or for another ping. Proves everything sent and received up to
     /// then.
-    pub async fn pong(&mut self, handle: &mut SessionHandle, frame: &[u8]) -> Result<Result<Option<Progress>, String>> {
+    pub async fn pong(
+        &mut self,
+        handle: &mut SessionHandle,
+        frame: &[u8],
+    ) -> Result<Result<Option<Progress>, String>> {
         if let Err(reason) = self.send_pong(frame).await? {
             return Ok(Err(reason));
         }
@@ -114,8 +138,13 @@ impl WsRelay {
     /// Sends the pong `frame` if it answers a ping this connection received
     /// and has not answered. A refusal sends nothing.
     pub async fn send_pong(&mut self, frame: &[u8]) -> Result<Result<(), String>> {
-        let answered = ws::client_payload(frame, OpCode::Control(Control::Pong))
-            .and_then(|payload| self.inbox.answer(&payload).then_some(()).ok_or("no such ping to answer".into()));
+        let answered =
+            ws::client_payload(frame, OpCode::Control(Control::Pong)).and_then(|payload| {
+                self.inbox
+                    .answer(&payload)
+                    .then_some(())
+                    .ok_or("no such ping to answer".into())
+            });
         if let Err(reason) = answered {
             return Ok(Err(reason));
         }
@@ -140,7 +169,9 @@ impl WsRelay {
 
     /// Waits for the response in flight, if any, to end or for a ping.
     pub async fn settle(&mut self) -> Result<()> {
-        let Some(asked) = &self.in_flight else { return Ok(()) };
+        let Some(asked) = &self.in_flight else {
+            return Ok(());
+        };
         loop {
             if self.inbox.can_progress(asked).map_err(anyhow::Error::msg)? {
                 return Ok(());
@@ -171,7 +202,9 @@ impl WsRelay {
             self.in_flight = None;
             self.responses.extend(ws::completed_response(messages));
         }
-        self.live.prove_snapshot(handle, snapshot, &[], &Misproof::default()).await?;
+        self.live
+            .prove_snapshot(handle, snapshot, &[], &Misproof::default())
+            .await?;
         Ok(progress)
     }
 

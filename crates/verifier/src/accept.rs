@@ -76,12 +76,18 @@ where
 {
     /// An acceptor which sends each link it has paired on `ready`.
     pub fn new(registry: Arc<R>, ready: UnboundedSender<Accepted<S>>) -> Self {
-        Self { registry, halves: Mutex::default(), ready }
+        Self {
+            registry,
+            halves: Mutex::default(),
+            ready,
+        }
     }
 
     /// Handles one connection from its first message.
     pub async fn accept(&self, stream: S) -> Result<()> {
-        time::timeout(HELLO_LIMIT, self.greet(stream)).await.context("relay did not identify itself in time")?
+        time::timeout(HELLO_LIMIT, self.greet(stream))
+            .await
+            .context("relay did not identify itself in time")?
     }
 
     async fn greet(&self, mut stream: S) -> Result<()> {
@@ -89,7 +95,10 @@ where
         let answer = match &hello {
             Hello::Register(registration) => match outdated(registration.version) {
                 Some(reason) => Answer::Refused(reason),
-                None => self.registry.register(registration.clone()).map_or_else(Answer::Refused, Answer::DeviceCode),
+                None => self
+                    .registry
+                    .register(registration.clone())
+                    .map_or_else(Answer::Refused, Answer::DeviceCode),
             },
             Hello::Poll { device_code } => match self.registry.poll(device_code) {
                 Ok(Some(registered)) => Answer::Registered(registered),
@@ -103,7 +112,13 @@ where
                 }
                 Err(reason) => Answer::Refused(reason),
             },
-            Hello::Link { version, relay, link, slot, role } => {
+            Hello::Link {
+                version,
+                relay,
+                link,
+                slot,
+                role,
+            } => {
                 let proven = match outdated(*version) {
                     Some(reason) => Err(reason),
                     None => self.proven(&mut stream, &hello, relay).await?,
@@ -121,12 +136,23 @@ where
 
     /// Has the relay which sent `hello` prove that it is the registered
     /// relay `relay`.
-    async fn proven(&self, stream: &mut S, hello: &Hello, relay: &str) -> Result<Result<(), String>> {
+    async fn proven(
+        &self,
+        stream: &mut S,
+        hello: &Hello,
+        relay: &str,
+    ) -> Result<Result<(), String>> {
         let Some(public_key) = self.registry.public_key(relay) else {
-            return Ok(Err("this relay is not registered; run `concurro-relay login`".into()));
+            return Ok(Err(
+                "this relay is not registered; run `concurro-relay login`".into(),
+            ));
         };
         let proven = link::challenge(stream, hello, &public_key).await?;
-        Ok(if proven { Ok(()) } else { Err("the relay's key is not the one it registered".into()) })
+        Ok(if proven {
+            Ok(())
+        } else {
+            Err("the relay's key is not the one it registered".into())
+        })
     }
 
     /// Keeps `stream` until its link's other connection arrives, or pairs
@@ -145,13 +171,23 @@ where
                 return;
             }
         };
-        let _ = self.ready.send(Accepted { relay: key.0, number: key.1, slot: key.2, control, proofs });
+        let _ = self.ready.send(Accepted {
+            relay: key.0,
+            number: key.1,
+            slot: key.2,
+            control,
+            proofs,
+        });
     }
 }
 
 /// Accepts relays' connections on `listener`, secured by `tls`, until the
 /// listener fails.
-pub async fn serve<R: Registry>(listener: TcpListener, tls: TlsAcceptor, acceptor: Arc<Acceptor<R, TlsStream<TcpStream>>>) {
+pub async fn serve<R: Registry>(
+    listener: TcpListener,
+    tls: TlsAcceptor,
+    acceptor: Arc<Acceptor<R, TlsStream<TcpStream>>>,
+) {
     while let Ok((stream, _)) = listener.accept().await {
         let (tls, acceptor) = (tls.clone(), acceptor.clone());
         tokio::spawn(async move {

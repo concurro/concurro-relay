@@ -83,19 +83,38 @@ impl Setup {
     fn new(server: Option<Server>, credentials: &Source) -> Self {
         let choices = plain::logins(credentials, &Route::ALL)
             .into_iter()
-            .map(|(route, login)| Choice { route, selected: login.is_ok(), login })
+            .map(|(route, login)| Choice {
+                route,
+                selected: login.is_ok(),
+                login,
+            })
             .collect();
-        let (address, ca_file) = server.map_or_else(Default::default, |server| (server.address, server.ca_file));
-        Self { address, ca_file, choices, focus: 0, error: None, asking: false }
+        let (address, ca_file) =
+            server.map_or_else(Default::default, |server| (server.address, server.ca_file));
+        Self {
+            address,
+            ca_file,
+            choices,
+            focus: 0,
+            error: None,
+            asking: false,
+        }
     }
 
     fn selected(&self) -> Vec<Route> {
-        self.choices.iter().filter(|choice| choice.selected).map(|choice| choice.route).collect()
+        self.choices
+            .iter()
+            .filter(|choice| choice.selected)
+            .map(|choice| choice.route)
+            .collect()
     }
 
     /// The first chosen route the relay has no credential for.
     fn missing(&self) -> Option<Route> {
-        self.choices.iter().find(|choice| choice.selected && choice.login.is_err()).map(|choice| choice.route)
+        self.choices
+            .iter()
+            .find(|choice| choice.selected && choice.login.is_err())
+            .map(|choice| choice.route)
     }
 
     /// Looks again for each route's credential.
@@ -200,22 +219,45 @@ impl Dashboard {
             }
             Event::Proved { exchange, .. } => {
                 self.upload += exchange.upload;
-                if let Some(at) = self.logins.iter().position(|(route, _)| *route == exchange.route) {
+                if let Some(at) = self
+                    .logins
+                    .iter()
+                    .position(|(route, _)| *route == exchange.route)
+                {
                     self.proved[at] += 1;
                 }
-                let (request, response) = (mem::take(&mut exchange.request), mem::take(&mut exchange.response));
-                said = Some((transcript::request_text(&request), transcript::response_text(&response)));
+                let (request, response) = (
+                    mem::take(&mut exchange.request),
+                    mem::take(&mut exchange.response),
+                );
+                said = Some((
+                    transcript::request_text(&request),
+                    transcript::response_text(&response),
+                ));
             }
             Event::NativeAudit { route, audit, .. } => {
                 if let Some(at) = self.logins.iter().position(|(served, _)| served == route) {
                     self.proved[at] += 1;
                 }
-                let usage = audit.usage.as_ref().map(ToString::to_string).unwrap_or_else(|| "unavailable".into());
-                said = Some((mem::take(&mut audit.prompt), format!("Concurro-reported provider usage: {usage}")));
+                let usage = audit
+                    .usage
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "unavailable".into());
+                said = Some((
+                    mem::take(&mut audit.prompt),
+                    format!("Concurro-reported provider usage: {usage}"),
+                ));
             }
             Event::Refused { .. } => {}
         }
-        self.activity.push_back(Entry { at: Instant::now(), event, said, open: false, side: Side::Request });
+        self.activity.push_back(Entry {
+            at: Instant::now(),
+            event,
+            said,
+            open: false,
+            side: Side::Request,
+        });
         if self.activity.len() > ACTIVITY_KEPT {
             self.activity.pop_front();
             self.selected = self.selected.saturating_sub(1);
@@ -240,7 +282,10 @@ impl Dashboard {
     /// Acts on a key, returning whether it asks to quit.
     fn key(&mut self, key: KeyCode) -> bool {
         let last = self.activity.len().saturating_sub(1);
-        let exchange = self.activity.get_mut(self.selected).filter(|entry| entry.said.is_some());
+        let exchange = self
+            .activity
+            .get_mut(self.selected)
+            .filter(|entry| entry.said.is_some());
         match key {
             KeyCode::Char('q') | KeyCode::Esc => return true,
             KeyCode::Up | KeyCode::Char('k') => self.select(self.selected.saturating_sub(1)),
@@ -263,7 +308,11 @@ impl Dashboard {
             }
             KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
                 if let Some(entry) = exchange {
-                    entry.side = if entry.side == Side::Request { Side::Response } else { Side::Request };
+                    entry.side = if entry.side == Side::Request {
+                        Side::Response
+                    } else {
+                        Side::Request
+                    };
                     entry.open = true;
                     self.paged = false;
                 }
@@ -341,7 +390,11 @@ impl App {
     /// Starts serving as the relay registered in the store.
     fn serve(&mut self) -> Result<()> {
         let relay = plain::relay(&self.store)?;
-        self.state.screen = Screen::Dashboard(Dashboard::new(relay.registration.clone(), &self.credentials, self.links));
+        self.state.screen = Screen::Dashboard(Dashboard::new(
+            relay.registration.clone(),
+            &self.credentials,
+            self.links,
+        ));
         let (events, mut reported) = mpsc::unbounded_channel();
         self.serving = Some(tokio::spawn(link::run(Arc::new(relay), self.links, events)));
         let messages = self.messages.clone();
@@ -370,7 +423,8 @@ impl App {
                 if let Screen::Dashboard(dashboard) = &mut self.state.screen
                     && self.state.ticks % LOGIN_CHECK_TICKS == 0
                 {
-                    dashboard.logins = plain::logins(&self.credentials, &dashboard.registration.routes);
+                    dashboard.logins =
+                        plain::logins(&self.credentials, &dashboard.registration.routes);
                 }
             }
             Message::Begun(Ok(pending)) => {
@@ -379,7 +433,11 @@ impl App {
                 let waiting = tokio::spawn(async move {
                     let _ = messages.send(Message::Approved(pending.approved(&store).await));
                 });
-                self.state.screen = Screen::Approval(Approval { device, since: Instant::now(), waiting });
+                self.state.screen = Screen::Approval(Approval {
+                    device,
+                    since: Instant::now(),
+                    waiting,
+                });
             }
             Message::Approved(Ok(_)) => {
                 if let Err(error) = self.serve() {
@@ -397,7 +455,9 @@ impl App {
                 self.state.screen = Screen::Setup;
                 self.advance();
             }
-            Message::Begun(Err(error)) | Message::Approved(Err(error)) | Message::CodexDone(Err(error)) => {
+            Message::Begun(Err(error))
+            | Message::Approved(Err(error))
+            | Message::CodexDone(Err(error)) => {
                 self.fail(format!("{error:#}"));
             }
             Message::Relay(event) => {
@@ -421,7 +481,10 @@ impl App {
                 // Registering again keeps the provider sign-ins.
                 let registration = &dashboard.registration;
                 let setup = &mut self.state.setup;
-                (setup.address, setup.ca_file) = (registration.server.address.clone(), registration.server.ca_file.clone());
+                (setup.address, setup.ca_file) = (
+                    registration.server.address.clone(),
+                    registration.server.ca_file.clone(),
+                );
                 for choice in &mut setup.choices {
                     choice.selected = registration.routes.contains(&choice.route);
                 }
@@ -445,13 +508,15 @@ impl App {
                     entry.token.pop();
                 }
                 KeyCode::Char(typed) if !typed.is_whitespace() => entry.token.push(typed),
-                KeyCode::Enter => match plain::keep_token(&self.store, Route::ClaudeSubscription, &entry.token) {
-                    Ok(()) => {
-                        self.state.screen = Screen::Setup;
-                        self.advance();
+                KeyCode::Enter => {
+                    match plain::keep_token(&self.store, Route::ClaudeSubscription, &entry.token) {
+                        Ok(()) => {
+                            self.state.screen = Screen::Setup;
+                            self.advance();
+                        }
+                        Err(error) => entry.error = Some(format!("{error:#}")),
                     }
-                    Err(error) => entry.error = Some(format!("{error:#}")),
-                },
+                }
                 _ => {}
             },
             Screen::Codex(codex) => {
@@ -471,7 +536,9 @@ impl App {
     fn advance(&mut self) {
         self.state.setup.refresh(&self.credentials);
         match self.state.setup.missing() {
-            Some(Route::ClaudeSubscription) => self.state.screen = Screen::Token(TokenEntry::default()),
+            Some(Route::ClaudeSubscription) => {
+                self.state.screen = Screen::Token(TokenEntry::default())
+            }
             Some(Route::ChatgptSubscription) => {
                 let (said, mut printed) = mpsc::unbounded_channel();
                 let (store, messages) = (self.store.clone(), self.messages.clone());
@@ -490,7 +557,10 @@ impl App {
                     };
                     let _ = messages.send(Message::CodexDone(signed_in.await));
                 });
-                self.state.screen = Screen::Codex(CodexLogin { said: Vec::new(), signing_in });
+                self.state.screen = Screen::Codex(CodexLogin {
+                    said: Vec::new(),
+                    signing_in,
+                });
             }
             None => self.begin(),
         }
@@ -501,7 +571,10 @@ impl App {
         let setup = &mut self.state.setup;
         setup.error = None;
         setup.asking = true;
-        let server = Server { address: setup.address.trim().to_owned(), ca_file: setup.ca_file.clone() };
+        let server = Server {
+            address: setup.address.trim().to_owned(),
+            ca_file: setup.ca_file.clone(),
+        };
         let (name, routes, messages) = (self.name.clone(), setup.selected(), self.messages.clone());
         tokio::spawn(async move {
             let _ = messages.send(Message::Begun(login::begin(server, name, routes).await));
@@ -544,7 +617,12 @@ impl App {
 /// A duration as hours, minutes and seconds.
 fn clock(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
-    format!("{:02}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)
+    format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
 }
 
 fn spinner(ticks: usize) -> &'static str {
@@ -560,12 +638,27 @@ fn login_span(login: &Result<String, String>) -> Span<'static> {
 }
 
 fn setup_lines(setup: &Setup, ticks: usize) -> (Vec<Line<'static>>, &'static str) {
-    let marker = |focused: bool| if focused { "› ".cyan().bold() } else { "  ".into() };
-    let cursor = if setup.focus == 0 && !setup.asking { "▏" } else { "" };
+    let marker = |focused: bool| {
+        if focused {
+            "› ".cyan().bold()
+        } else {
+            "  ".into()
+        }
+    };
+    let cursor = if setup.focus == 0 && !setup.asking {
+        "▏"
+    } else {
+        ""
+    };
     let mut lines = vec![
         Line::from("Sign in".bold()),
         Line::default(),
-        Line::from(vec![marker(setup.focus == 0), "Concurro address  ".into(), setup.address.clone().bold(), cursor.into()]),
+        Line::from(vec![
+            marker(setup.focus == 0),
+            "Concurro address  ".into(),
+            setup.address.clone().bold(),
+            cursor.into(),
+        ]),
         Line::default(),
         Line::from("  Routes to serve"),
     ];
@@ -580,7 +673,10 @@ fn setup_lines(setup: &Setup, ticks: usize) -> (Vec<Line<'static>>, &'static str
     }
     lines.push(Line::default());
     if setup.asking {
-        lines.push(Line::from(vec![format!("  {} ", spinner(ticks)).cyan(), "Asking Concurro for a code…".into()]));
+        lines.push(Line::from(vec![
+            format!("  {} ", spinner(ticks)).cyan(),
+            "Asking Concurro for a code…".into(),
+        ]));
     } else if let Some(error) = &setup.error {
         lines.push(Line::from(format!("  {error}").red()));
     }
@@ -592,10 +688,21 @@ fn token_lines(entry: &TokenEntry) -> (Vec<Line<'static>>, &'static str) {
     let mut lines = vec![
         Line::from("Claude token".bold()),
         Line::default(),
-        Line::from("  The relay keeps a Claude token of its own, since Claude Code's login lasts only hours."),
-        Line::from(vec!["  Run ".into(), "claude setup-token".cyan(), " in another terminal and paste the token it prints.".into()]),
+        Line::from(
+            "  The relay keeps a Claude token of its own, since Claude Code's login lasts only hours.",
+        ),
+        Line::from(vec![
+            "  Run ".into(),
+            "claude setup-token".cyan(),
+            " in another terminal and paste the token it prints.".into(),
+        ]),
         Line::default(),
-        Line::from(vec!["› ".cyan().bold(), "Token  ".into(), hidden.into(), "▏".into()]),
+        Line::from(vec![
+            "› ".cyan().bold(),
+            "Token  ".into(),
+            hidden.into(),
+            "▏".into(),
+        ]),
         Line::default(),
         Line::from("  It is kept in this machine's keychain and sent only to Anthropic.".dim()),
     ];
@@ -617,19 +724,35 @@ fn codex_lines(codex: &CodexLogin, ticks: usize) -> (Vec<Line<'static>>, &'stati
         Line::default(),
     ];
     let skipped = codex.said.len().saturating_sub(CODEX_LINES_SHOWN);
-    lines.extend(codex.said.iter().skip(skipped).map(|line| Line::from(format!("  {line}"))));
+    lines.extend(
+        codex
+            .said
+            .iter()
+            .skip(skipped)
+            .map(|line| Line::from(format!("  {line}"))),
+    );
     lines.push(Line::default());
-    lines.push(Line::from(vec![format!("  {} ", spinner(ticks)).cyan(), "Waiting for you to finish in the browser…".into()]));
+    lines.push(Line::from(vec![
+        format!("  {} ", spinner(ticks)).cyan(),
+        "Waiting for you to finish in the browser…".into(),
+    ]));
     (lines, "esc cancel")
 }
 
 fn approval_lines(approval: &Approval, ticks: usize) -> (Vec<Line<'static>>, &'static str) {
-    let left = Duration::from_secs(approval.device.expires_secs).saturating_sub(approval.since.elapsed());
+    let left =
+        Duration::from_secs(approval.device.expires_secs).saturating_sub(approval.since.elapsed());
     let lines = vec![
         Line::from("Approve this relay".bold()),
         Line::default(),
-        Line::from(vec!["  Open  ".into(), approval.device.verification_uri.clone().cyan()]),
-        Line::from(vec!["  Code  ".into(), approval.device.user_code.clone().bold()]),
+        Line::from(vec![
+            "  Open  ".into(),
+            approval.device.verification_uri.clone().cyan(),
+        ]),
+        Line::from(vec![
+            "  Code  ".into(),
+            approval.device.user_code.clone().bold(),
+        ]),
         Line::default(),
         Line::from(vec![
             format!("  {} ", spinner(ticks)).cyan(),
@@ -645,7 +768,10 @@ fn approval_lines(approval: &Approval, ticks: usize) -> (Vec<Line<'static>>, &'s
 fn wrapped(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     for line in text.lines() {
-        let line: Vec<char> = line.chars().map(|shown| if shown.is_control() { ' ' } else { shown }).collect();
+        let line: Vec<char> = line
+            .chars()
+            .map(|shown| if shown.is_control() { ' ' } else { shown })
+            .collect();
         if line.is_empty() {
             lines.push(String::new());
         }
@@ -663,7 +789,11 @@ fn wrapped(text: &str, width: usize) -> Vec<String> {
 /// The line which heads `entry` in the activity list, `since` being when
 /// the relay started.
 fn entry_line(entry: &Entry, selected: bool, since: Instant) -> Line<'static> {
-    let cursor = if selected { "› ".cyan().bold() } else { "  ".into() };
+    let cursor = if selected {
+        "› ".cyan().bold()
+    } else {
+        "  ".into()
+    };
     let fold = match (&entry.said, entry.open) {
         (None, _) => "  ",
         (Some(_), false) => "▸ ",
@@ -675,15 +805,27 @@ fn entry_line(entry: &Entry, selected: bool, since: Instant) -> Line<'static> {
         Event::Proved { exchange, .. } => spans.extend([
             format!("{:<22}", exchange.route.label()).into(),
             format!("{:<18}", exchange.model.as_deref().unwrap_or("")).cyan(),
-            format!("sent {:>9}  received {:>9}  ", events::size(exchange.sent as u64), events::size(exchange.received as u64)).into(),
-            format!("{:>9} up  {:.1}s", events::size(exchange.upload), exchange.seconds).dim(),
+            format!(
+                "sent {:>9}  received {:>9}  ",
+                events::size(exchange.sent as u64),
+                events::size(exchange.received as u64)
+            )
+            .into(),
+            format!(
+                "{:>9} up  {:.1}s",
+                events::size(exchange.upload),
+                exchange.seconds
+            )
+            .dim(),
         ]),
         Event::NativeAudit { route, audit, .. } => spans.extend([
             format!("{:<22}", route.label()).into(),
             format!("proved request {}  ", audit.turn).cyan(),
             format!("sha256 {}", audit.sha256).dim(),
         ]),
-        Event::Refused { reason, .. } => spans.extend(["refused  ".yellow(), reason.clone().into()]),
+        Event::Refused { reason, .. } => {
+            spans.extend(["refused  ".yellow(), reason.clone().into()])
+        }
         Event::Link { link, state } => spans.push(format!("link {link} {state}").red()),
     }
     let line = Line::from(spans);
@@ -694,20 +836,36 @@ fn entry_line(entry: &Entry, selected: bool, since: Instant) -> Line<'static> {
 /// which each entry starts.
 fn activity_lines(dashboard: &Dashboard, width: usize) -> (Vec<Line<'static>>, Vec<usize>) {
     if dashboard.activity.is_empty() {
-        return (vec![Line::from("  Waiting for Concurro to send a request.".dim())], Vec::new());
+        return (
+            vec![Line::from(
+                "  Waiting for Concurro to send a request.".dim(),
+            )],
+            Vec::new(),
+        );
     }
     let (mut lines, mut starts) = (Vec::new(), Vec::new());
     for (at, entry) in dashboard.activity.iter().enumerate() {
         starts.push(lines.len());
         lines.push(entry_line(entry, at == dashboard.selected, dashboard.since));
-        let (true, Some((request, response))) = (entry.open, &entry.said) else { continue };
+        let (true, Some((request, response))) = (entry.open, &entry.said) else {
+            continue;
+        };
         let (text, sides) = match entry.side {
             Side::Request => (request, ["request".bold().underlined(), "response".dim()]),
             Side::Response => (response, ["request".dim(), "response".bold().underlined()]),
         };
         let [first, second] = sides;
-        lines.push(Line::from(vec!["      ".into(), first, "  ".into(), second]));
-        lines.extend(wrapped(text, width.saturating_sub(6)).into_iter().map(|line| Line::from(format!("      {line}"))));
+        lines.push(Line::from(vec![
+            "      ".into(),
+            first,
+            "  ".into(),
+            second,
+        ]));
+        lines.extend(
+            wrapped(text, width.saturating_sub(6))
+                .into_iter()
+                .map(|line| Line::from(format!("      {line}"))),
+        );
         lines.push(Line::default());
     }
     (lines, starts)
@@ -720,7 +878,11 @@ fn summary_lines(dashboard: &Dashboard) -> Vec<Line<'static>> {
         Line::from(vec![
             "Signed in as ".into(),
             registration.login.clone().bold(),
-            format!(" · relay {} ({}) · {}", registration.name, registration.relay, registration.server.address).into(),
+            format!(
+                " · relay {} ({}) · {}",
+                registration.name, registration.relay, registration.server.address
+            )
+            .into(),
             format!(" · up {}", clock(dashboard.since.elapsed())).dim(),
         ]),
         Line::default(),
@@ -745,41 +907,68 @@ fn summary_lines(dashboard: &Dashboard) -> Vec<Line<'static>> {
         links.push(shown);
     }
     lines.push(Line::from(links));
-    if dashboard.links.iter().all(|state| matches!(state, LinkState::Refused(_))) {
-        lines.push(Line::from("  Concurro refused this relay. Press r to register it again; your sign-ins are kept.".yellow()));
+    if dashboard
+        .links
+        .iter()
+        .all(|state| matches!(state, LinkState::Refused(_)))
+    {
+        lines.push(Line::from(
+            "  Concurro refused this relay. Press r to register it again; your sign-ins are kept."
+                .yellow(),
+        ));
     }
     lines.push(Line::default());
     let proved: usize = dashboard.proved.iter().sum();
     lines.push(Line::from(vec![
         "Activity".bold(),
-        format!("  {proved} proved, {} uploaded", events::size(dashboard.upload)).dim(),
+        format!(
+            "  {proved} proved, {} uploaded",
+            events::size(dashboard.upload)
+        )
+        .dim(),
     ]));
     lines
 }
 
 fn draw(frame: &mut Frame, state: &State) {
-    let [header, body, footer] =
-        Layout::vertical([Constraint::Length(4), Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    let [header, body, footer] = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
 
     let title = format!(" Concurro relay v{} ", env!("CARGO_PKG_VERSION"));
     let about = Paragraph::new(vec![
         Line::from("Keeps your provider login on this machine and proves each request"),
         Line::from("to Concurro without revealing it.".dim()),
     ])
-    .block(Block::bordered().border_type(BorderType::Rounded).title(title.bold()).padding(Padding::horizontal(1)));
+    .block(
+        Block::bordered()
+            .border_type(BorderType::Rounded)
+            .title(title.bold())
+            .padding(Padding::horizontal(1)),
+    );
     frame.render_widget(about, header);
 
     let padded = Block::new().padding(Padding::new(2, 2, 1, 0));
     let hints = match &state.screen {
         Screen::Dashboard(dashboard) => {
             let summary = summary_lines(dashboard);
-            let [above, list] = Layout::vertical([Constraint::Length(summary.len() as u16 + 1), Constraint::Min(0)]).areas(body);
+            let [above, list] = Layout::vertical([
+                Constraint::Length(summary.len() as u16 + 1),
+                Constraint::Min(0),
+            ])
+            .areas(body);
             frame.render_widget(Paragraph::new(summary).block(padded), above);
             let (lines, starts) = activity_lines(dashboard, list.width.saturating_sub(4) as usize);
             let height = list.height as usize;
             let top = dashboard.scrolled(&starts, lines.len(), height);
             let shown: Vec<Line> = lines.into_iter().skip(top).take(height).collect();
-            frame.render_widget(Paragraph::new(shown).block(Block::new().padding(Padding::horizontal(2))), list);
+            frame.render_widget(
+                Paragraph::new(shown).block(Block::new().padding(Padding::horizontal(2))),
+                list,
+            );
             "↑↓ select · enter open · tab request/response · pgup/pgdn scroll · r register again · q quit"
         }
         screen => {
@@ -790,11 +979,19 @@ fn draw(frame: &mut Frame, state: &State) {
                 Screen::Approval(approval) => approval_lines(approval, state.ticks),
                 Screen::Dashboard(_) => unreachable!("the dashboard is drawn above"),
             };
-            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(padded), body);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .block(padded),
+                body,
+            );
             hints
         }
     };
-    frame.render_widget(Paragraph::new(Line::from(format!("  {hints}").dim())), footer);
+    frame.render_widget(
+        Paragraph::new(Line::from(format!("  {hints}").dim())),
+        footer,
+    );
 }
 
 /// Sends the person's key presses on `messages` until `stop` is set.
@@ -814,7 +1011,11 @@ fn read_keys(messages: UnboundedSender<Message>, stop: Arc<AtomicBool>) {
     }
 }
 
-async fn run_in(terminal: &mut DefaultTerminal, mut app: App, mut received: mpsc::UnboundedReceiver<Message>) -> Result<()> {
+async fn run_in(
+    terminal: &mut DefaultTerminal,
+    mut app: App,
+    mut received: mpsc::UnboundedReceiver<Message>,
+) -> Result<()> {
     let mut ticks = time::interval(TICK);
     while !app.quit {
         terminal.draw(|frame| draw(frame, &app.state))?;
@@ -834,8 +1035,21 @@ async fn run_in(terminal: &mut DefaultTerminal, mut app: App, mut received: mpsc
 pub async fn run(store: Store, server: Option<Server>, name: String, links: usize) -> Result<()> {
     let credentials = Source::Kept(store.clone());
     let (messages, received) = mpsc::unbounded_channel();
-    let state = State { screen: Screen::Setup, setup: Setup::new(server, &credentials), ticks: 0 };
-    let mut app = App { state, store, credentials, name, links, messages: messages.clone(), serving: None, quit: false };
+    let state = State {
+        screen: Screen::Setup,
+        setup: Setup::new(server, &credentials),
+        ticks: 0,
+    };
+    let mut app = App {
+        state,
+        store,
+        credentials,
+        name,
+        links,
+        messages: messages.clone(),
+        serving: None,
+        quit: false,
+    };
     if app.store.load()?.is_some() {
         app.serve()?;
     }
@@ -862,18 +1076,33 @@ mod tests {
     use crate::{credentials::Credential, events::Exchange};
 
     fn credentials() -> Source {
-        Source::Fixed(Credential { token: "token".into(), headers: Vec::new() })
+        Source::Fixed(Credential {
+            token: "token".into(),
+            headers: Vec::new(),
+        })
     }
 
     /// What `state` looks like on a terminal of 110 by 24.
     fn shown(state: &State) -> String {
         let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
         terminal.draw(|frame| draw(frame, state)).unwrap();
-        terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect()
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
     }
 
     fn setup() -> Setup {
-        Setup::new(Some(Server { address: "localhost:7443".into(), ca_file: None }), &credentials())
+        Setup::new(
+            Some(Server {
+                address: "localhost:7443".into(),
+                ca_file: None,
+            }),
+            &credentials(),
+        )
     }
 
     #[test]
@@ -881,29 +1110,76 @@ mod tests {
         let mut setup = setup();
         setup.choices[0].login = Err("needs a token from `claude setup-token`".into());
         setup.choices[0].selected = false;
-        let screen = shown(&State { screen: Screen::Setup, setup, ticks: 0 });
-        for expected in ["Sign in", "localhost:7443", "[ ] Claude subscription", "needs a token", "[x] ChatGPT subscription", "ready"] {
-            assert!(screen.contains(expected), "{expected} is missing from: {screen}");
+        let screen = shown(&State {
+            screen: Screen::Setup,
+            setup,
+            ticks: 0,
+        });
+        for expected in [
+            "Sign in",
+            "localhost:7443",
+            "[ ] Claude subscription",
+            "needs a token",
+            "[x] ChatGPT subscription",
+            "ready",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "{expected} is missing from: {screen}"
+            );
         }
     }
 
     #[test]
     fn token_entry_never_shows_the_token() {
-        let entry = TokenEntry { token: "sk-ant-oat01-secret".into(), error: Some("that is not a token".into()) };
-        let screen = shown(&State { screen: Screen::Token(entry), setup: setup(), ticks: 0 });
-        for expected in ["Claude token", "claude setup-token", "•••", "that is not a token"] {
-            assert!(screen.contains(expected), "{expected} is missing from: {screen}");
+        let entry = TokenEntry {
+            token: "sk-ant-oat01-secret".into(),
+            error: Some("that is not a token".into()),
+        };
+        let screen = shown(&State {
+            screen: Screen::Token(entry),
+            setup: setup(),
+            ticks: 0,
+        });
+        for expected in [
+            "Claude token",
+            "claude setup-token",
+            "•••",
+            "that is not a token",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "{expected} is missing from: {screen}"
+            );
         }
         assert!(!screen.contains("secret"));
     }
 
     #[tokio::test]
     async fn codex_sign_in_shows_what_codex_says() {
-        let said = vec!["Open this link in your browser".to_owned(), "   https://auth.example/device".to_owned()];
-        let codex = CodexLogin { said, signing_in: tokio::spawn(async {}) };
-        let screen = shown(&State { screen: Screen::Codex(codex), setup: setup(), ticks: 0 });
-        for expected in ["ChatGPT sign-in", "Your own Codex login is not touched", "https://auth.example/device", "Waiting for you"] {
-            assert!(screen.contains(expected), "{expected} is missing from: {screen}");
+        let said = vec![
+            "Open this link in your browser".to_owned(),
+            "   https://auth.example/device".to_owned(),
+        ];
+        let codex = CodexLogin {
+            said,
+            signing_in: tokio::spawn(async {}),
+        };
+        let screen = shown(&State {
+            screen: Screen::Codex(codex),
+            setup: setup(),
+            ticks: 0,
+        });
+        for expected in [
+            "ChatGPT sign-in",
+            "Your own Codex login is not touched",
+            "https://auth.example/device",
+            "Waiting for you",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "{expected} is missing from: {screen}"
+            );
         }
     }
 
@@ -928,17 +1204,36 @@ mod tests {
             interval_secs: 1,
             expires_secs: 600,
         };
-        let approval = Approval { device, since: Instant::now(), waiting: tokio::spawn(async {}) };
-        let screen = shown(&State { screen: Screen::Approval(approval), setup: setup(), ticks: 3 });
-        for expected in ["Approve this relay", "https://concurro.example/relay", "BCDF-GHJK", "Waiting for approval"] {
-            assert!(screen.contains(expected), "{expected} is missing from: {screen}");
+        let approval = Approval {
+            device,
+            since: Instant::now(),
+            waiting: tokio::spawn(async {}),
+        };
+        let screen = shown(&State {
+            screen: Screen::Approval(approval),
+            setup: setup(),
+            ticks: 3,
+        });
+        for expected in [
+            "Approve this relay",
+            "https://concurro.example/relay",
+            "BCDF-GHJK",
+            "Waiting for approval",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "{expected} is missing from: {screen}"
+            );
         }
         assert!(!screen.contains("secret"));
     }
 
     fn registration() -> Registration {
         Registration {
-            server: Server { address: "localhost:7443".into(), ca_file: None },
+            server: Server {
+                address: "localhost:7443".into(),
+                ca_file: None,
+            },
             relay: "relay-1a2b".into(),
             login: "octocat".into(),
             name: "laptop".into(),
@@ -957,25 +1252,44 @@ mod tests {
             download: 1_600_000,
             seconds: 2.9,
             request: serde_json::json!({"input": asked}).to_string(),
-            response: format!("data: {}\n\n", serde_json::json!({"type": "response.output_text.delta", "delta": answered})),
+            response: format!(
+                "data: {}\n\n",
+                serde_json::json!({"type": "response.output_text.delta", "delta": answered})
+            ),
         };
         Event::Proved { link: 1, exchange }
     }
 
     fn dashboard_state(dashboard: Dashboard) -> State {
-        State { screen: Screen::Dashboard(dashboard), setup: setup(), ticks: 0 }
+        State {
+            screen: Screen::Dashboard(dashboard),
+            setup: setup(),
+            ticks: 0,
+        }
     }
 
     #[test]
     fn dashboard_counts_what_was_proved_and_shows_what_went_wrong() {
         let mut dashboard = Dashboard::new(registration(), &credentials(), 2);
-        dashboard.apply(Event::Link { link: 1, state: LinkState::Up });
+        dashboard.apply(Event::Link {
+            link: 1,
+            state: LinkState::Up,
+        });
         dashboard.apply(exchange("what is here?", "two files"));
-        dashboard.apply(Event::Refused { link: 1, reason: "body field not allowed: tools".into() });
-        dashboard.apply(Event::Link { link: 2, state: LinkState::Down("connection reset".into()) });
+        dashboard.apply(Event::Refused {
+            link: 1,
+            reason: "body field not allowed: tools".into(),
+        });
+        dashboard.apply(Event::Link {
+            link: 2,
+            state: LinkState::Down("connection reset".into()),
+        });
 
         let screen = shown(&dashboard_state(dashboard));
-        assert!(!screen.contains("what is here?"), "a closed entry shows no text: {screen}");
+        assert!(
+            !screen.contains("what is here?"),
+            "a closed entry shows no text: {screen}"
+        );
         for expected in [
             "Signed in as octocat",
             "relay laptop (relay-1a2b)",
@@ -988,17 +1302,33 @@ mod tests {
             "body field not allowed: tools",
             "link 2 down: connection reset",
         ] {
-            assert!(screen.contains(expected), "{expected} is missing from: {screen}");
+            assert!(
+                screen.contains(expected),
+                "{expected} is missing from: {screen}"
+            );
         }
     }
 
     #[test]
     fn a_refused_relay_is_told_how_to_register_again() {
         let mut dashboard = Dashboard::new(registration(), &credentials(), 1);
-        assert!(!shown(&dashboard_state(Dashboard::new(registration(), &credentials(), 1))).contains("register it again"));
-        dashboard.apply(Event::Link { link: 1, state: LinkState::Refused("this relay is not registered".into()) });
+        assert!(
+            !shown(&dashboard_state(Dashboard::new(
+                registration(),
+                &credentials(),
+                1
+            )))
+            .contains("register it again")
+        );
+        dashboard.apply(Event::Link {
+            link: 1,
+            state: LinkState::Refused("this relay is not registered".into()),
+        });
         let screen = shown(&dashboard_state(dashboard));
-        assert!(screen.contains("Press r to register it again; your sign-ins are kept."), "{screen}");
+        assert!(
+            screen.contains("Press r to register it again; your sign-ins are kept."),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -1011,23 +1341,38 @@ mod tests {
         assert!(!dashboard.key(KeyCode::Up));
         dashboard.key(KeyCode::Enter);
         dashboard.apply(exchange("third question", "third answer"));
-        assert_eq!(dashboard.selected, 0, "a cursor which was moved stays where it is");
+        assert_eq!(
+            dashboard.selected, 0,
+            "a cursor which was moved stays where it is"
+        );
         let mut state = dashboard_state(dashboard);
         let screen = shown(&state);
-        assert!(screen.contains("first question") && !screen.contains("first answer"), "{screen}");
+        assert!(
+            screen.contains("first question") && !screen.contains("first answer"),
+            "{screen}"
+        );
         assert!(!screen.contains("second question"));
 
-        let Screen::Dashboard(dashboard) = &mut state.screen else { unreachable!() };
+        let Screen::Dashboard(dashboard) = &mut state.screen else {
+            unreachable!()
+        };
         dashboard.key(KeyCode::Tab);
         let screen = shown(&state);
-        assert!(screen.contains("first answer") && !screen.contains("first question"), "{screen}");
+        assert!(
+            screen.contains("first answer") && !screen.contains("first question"),
+            "{screen}"
+        );
 
-        let Screen::Dashboard(dashboard) = &mut state.screen else { unreachable!() };
+        let Screen::Dashboard(dashboard) = &mut state.screen else {
+            unreachable!()
+        };
         dashboard.key(KeyCode::Enter);
         dashboard.key(KeyCode::End);
         assert!(dashboard.following);
         assert!(!shown(&state).contains("first answer"));
-        let Screen::Dashboard(dashboard) = &mut state.screen else { unreachable!() };
+        let Screen::Dashboard(dashboard) = &mut state.screen else {
+            unreachable!()
+        };
         assert!(dashboard.key(KeyCode::Char('q')));
     }
 
@@ -1035,19 +1380,31 @@ mod tests {
     fn a_long_entry_starts_at_the_top_and_pages() {
         let mut dashboard = Dashboard::new(registration(), &credentials(), 1);
         dashboard.apply(exchange("short", "short"));
-        let long: String = (1..=60).map(|line| format!("line {line} of the answer\n")).collect();
+        let long: String = (1..=60)
+            .map(|line| format!("line {line} of the answer\n"))
+            .collect();
         dashboard.apply(exchange("long question", &long));
         dashboard.key(KeyCode::Tab);
         let mut state = dashboard_state(dashboard);
         let screen = shown(&state);
-        assert!(screen.contains("line 1 of the answer") && !screen.contains("line 40 of the answer"), "{screen}");
+        assert!(
+            screen.contains("line 1 of the answer") && !screen.contains("line 40 of the answer"),
+            "{screen}"
+        );
 
-        let Screen::Dashboard(dashboard) = &mut state.screen else { unreachable!() };
+        let Screen::Dashboard(dashboard) = &mut state.screen else {
+            unreachable!()
+        };
         dashboard.key(KeyCode::PageDown);
         dashboard.key(KeyCode::PageDown);
         let screen = shown(&state);
-        assert!(!screen.contains("line 1 of the answer") && screen.contains("line 20 of the answer"), "{screen}");
-        let Screen::Dashboard(dashboard) = &mut state.screen else { unreachable!() };
+        assert!(
+            !screen.contains("line 1 of the answer") && screen.contains("line 20 of the answer"),
+            "{screen}"
+        );
+        let Screen::Dashboard(dashboard) = &mut state.screen else {
+            unreachable!()
+        };
         dashboard.key(KeyCode::Up);
         assert!(shown(&state).contains("sent   68.0 KB"));
     }
@@ -1058,7 +1415,14 @@ mod tests {
         for _ in 0..TEXT_KEPT + 3 {
             dashboard.apply(exchange("question", "answer"));
         }
-        assert_eq!(dashboard.activity.iter().filter(|entry| entry.said.is_some()).count(), TEXT_KEPT);
+        assert_eq!(
+            dashboard
+                .activity
+                .iter()
+                .filter(|entry| entry.said.is_some())
+                .count(),
+            TEXT_KEPT
+        );
         assert!(dashboard.activity[2].said.is_none() && dashboard.activity[3].said.is_some());
     }
 }

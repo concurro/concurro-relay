@@ -9,12 +9,18 @@ fn text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
         Value::Array(parts) => {
-            let texts: Vec<String> = parts.iter().map(text).filter(|text| !text.is_empty()).collect();
+            let texts: Vec<String> = parts
+                .iter()
+                .map(text)
+                .filter(|text| !text.is_empty())
+                .collect();
             texts.join("\n")
         }
-        Value::Object(fields) => {
-            ["text", "content", "output"].iter().find_map(|name| fields.get(*name)).map(text).unwrap_or_default()
-        }
+        Value::Object(fields) => ["text", "content", "output"]
+            .iter()
+            .find_map(|name| fields.get(*name))
+            .map(text)
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -22,8 +28,13 @@ fn text(value: &Value) -> String {
 /// What the newest item of the conversation in a request body says. A body
 /// which holds no conversation is given whole.
 pub fn request_text(body: &str) -> String {
-    let Ok(request) = serde_json::from_str::<Value>(body) else { return body.to_owned() };
-    let newest = match [&request["messages"], &request["input"]].into_iter().find(|items| !items.is_null()) {
+    let Ok(request) = serde_json::from_str::<Value>(body) else {
+        return body.to_owned();
+    };
+    let newest = match [&request["messages"], &request["input"]]
+        .into_iter()
+        .find(|items| !items.is_null())
+    {
         Some(Value::Array(items)) => items.last().map(text),
         Some(other) => Some(text(other)),
         None => None,
@@ -39,21 +50,36 @@ pub fn request_text(body: &str) -> String {
 pub fn response_text(body: &str) -> String {
     let mut said = String::new();
     for line in body.lines() {
-        let Some(data) = line.strip_prefix("data:") else { continue };
-        let Ok(event) = serde_json::from_str::<Value>(data.trim()) else { continue };
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let Ok(event) = serde_json::from_str::<Value>(data.trim()) else {
+            continue;
+        };
         // Where a tool call starts, one provider names the tool in a
         // block and the other in an item.
-        let starts = event["type"].as_str().is_some_and(|kind| kind.ends_with("_start") || kind.ends_with(".added"));
-        let tool = [&event["content_block"]["name"], &event["item"]["name"]].into_iter().find_map(Value::as_str);
+        let starts = event["type"]
+            .as_str()
+            .is_some_and(|kind| kind.ends_with("_start") || kind.ends_with(".added"));
+        let tool = [&event["content_block"]["name"], &event["item"]["name"]]
+            .into_iter()
+            .find_map(Value::as_str);
         if let (true, Some(tool)) = (starts, tool) {
             said.push_str(&format!("\n[tool {tool}] "));
         }
         match &event["delta"] {
             Value::String(delta) => said.push_str(delta),
-            delta => ["text", "partial_json", "thinking"].iter().filter_map(|name| delta[*name].as_str()).for_each(|part| said.push_str(part)),
+            delta => ["text", "partial_json", "thinking"]
+                .iter()
+                .filter_map(|name| delta[*name].as_str())
+                .for_each(|part| said.push_str(part)),
         }
     }
-    if said.trim().is_empty() { body.to_owned() } else { said.trim().to_owned() }
+    if said.trim().is_empty() {
+        body.to_owned()
+    } else {
+        said.trim().to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -63,7 +89,15 @@ mod tests {
     use super::*;
 
     fn stream(events: &[Value]) -> String {
-        events.iter().map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap())).collect()
+        events
+            .iter()
+            .map(|event| {
+                format!(
+                    "event: {}\ndata: {event}\n\n",
+                    event["type"].as_str().unwrap()
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -82,7 +116,10 @@ mod tests {
             {"type": "function_call_output", "call_id": "c", "output": "exit 0"},
         ]});
         assert_eq!(request_text(&input.to_string()), "exit 0");
-        assert_eq!(request_text(&json!({"input": "plain"}).to_string()), "plain");
+        assert_eq!(
+            request_text(&json!({"input": "plain"}).to_string()),
+            "plain"
+        );
 
         assert!(request_text(r#"{"model":"m"}"#).contains("\"model\": \"m\""));
         assert_eq!(request_text("not json"), "not json");
@@ -97,7 +134,10 @@ mod tests {
             json!({"type": "content_block_start", "content_block": {"type": "tool_use", "name": "Bash"}}),
             json!({"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": "{\"command\":\"ls\"}"}}),
         ]);
-        assert_eq!(response_text(&anthropic), "Looking now.\n[tool Bash] {\"command\":\"ls\"}");
+        assert_eq!(
+            response_text(&anthropic),
+            "Looking now.\n[tool Bash] {\"command\":\"ls\"}"
+        );
 
         let openai = stream(&[
             json!({"type": "response.created", "response": {"id": "resp_1"}}),
@@ -108,6 +148,9 @@ mod tests {
         ]);
         assert_eq!(response_text(&openai), "Done\n[tool shell] {}");
 
-        assert_eq!(response_text(r#"{"error":{"type":"authentication_error"}}"#), r#"{"error":{"type":"authentication_error"}}"#);
+        assert_eq!(
+            response_text(r#"{"error":{"type":"authentication_error"}}"#),
+            r#"{"error":{"type":"authentication_error"}}"#
+        );
     }
 }

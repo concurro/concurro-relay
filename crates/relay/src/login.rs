@@ -38,7 +38,13 @@ pub async fn begin(server: Server, name: String, routes: Vec<Route>) -> Result<P
     };
     let mut connection = server.connect().await?;
     match link::greet(&mut connection, &Hello::Register(registration)).await? {
-        Answer::DeviceCode(device) => Ok(Pending { server, name, routes, private_key, device }),
+        Answer::DeviceCode(device) => Ok(Pending {
+            server,
+            name,
+            routes,
+            private_key,
+            device,
+        }),
         Answer::Refused(reason) => bail!(Refusal(reason)),
         other => bail!("Concurro answered a registration with {other:?}"),
     }
@@ -56,7 +62,9 @@ impl Pending {
                 bail!("the code expired before it was approved");
             }
             let mut connection = self.server.connect().await?;
-            let poll = Hello::Poll { device_code: self.device.device_code.clone() };
+            let poll = Hello::Poll {
+                device_code: self.device.device_code.clone(),
+            };
             let registered = match link::greet(&mut connection, &poll).await? {
                 Answer::Pending => continue,
                 Answer::Registered(registered) => registered,
@@ -82,10 +90,19 @@ impl Pending {
 /// The local state is removed even if Concurro cannot be told, so that a
 /// relay can always be signed out.
 pub async fn logout(store: &Store) -> Result<bool> {
-    let Some((registration, identity)) = store.load()? else { return Ok(false) };
+    let Some((registration, identity)) = store.load()? else {
+        return Ok(false);
+    };
     let withdrawn = async {
         let mut connection = registration.server.connect().await?;
-        link::present(&mut connection, &Hello::Deregister { relay: registration.relay.clone() }, &identity).await
+        link::present(
+            &mut connection,
+            &Hello::Deregister {
+                relay: registration.relay.clone(),
+            },
+            &identity,
+        )
+        .await
     };
     let withdrawn = withdrawn.await;
     store.clear()?;

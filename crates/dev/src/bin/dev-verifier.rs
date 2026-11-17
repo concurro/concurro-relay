@@ -10,10 +10,10 @@ use std::{collections::HashMap, fs, net::SocketAddr, path::PathBuf, sync::Arc, t
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use concurro_relay_dev::{gateway::Gateway, registry::DevRegistry, tls};
+use concurro_relay_native::{self as native, NativeOptions, NativeRole};
 use concurro_relay_protocol::{
     Roots,
     link::{Notice, Order},
-    native::{self, NativeOptions, NativeRole},
     route::Route,
     wire,
 };
@@ -62,13 +62,22 @@ impl NativeRouter {
             *owner = Some((relay.clone(), slot));
         }
         drop(owner);
-        self.endpoints.lock().await.push(NativeEndpoint { id, relay, slot, route, address });
+        self.endpoints.lock().await.push(NativeEndpoint {
+            id,
+            relay,
+            slot,
+            route,
+            address,
+        });
         self.available.notify_waiters();
     }
 
     /// Remove a worker when its authenticated link has ended.
     async fn remove(&self, id: usize) {
-        self.endpoints.lock().await.retain(|endpoint| endpoint.id != id);
+        self.endpoints
+            .lock()
+            .await
+            .retain(|endpoint| endpoint.id != id);
     }
 
     /// Select only the worker owned by the shared ingress's original link.
@@ -265,8 +274,14 @@ async fn main() -> Result<()> {
                 "native TLS 1.3 relay on {} (certificate in {}); {}",
                 args.relay_listen,
                 args.certificate.display(),
-                if router.is_some() { format!("legacy CLI ingress on {} plus dedicated leases", args.listen) }
-                else { "dedicated CLI ingresses".to_owned() }
+                if router.is_some() {
+                    format!(
+                        "legacy CLI ingress on {} plus dedicated leases",
+                        args.listen
+                    )
+                } else {
+                    "dedicated CLI ingresses".to_owned()
+                }
             );
             let mut accepted = accepted;
             let mut next_id = 0;
@@ -285,10 +300,16 @@ async fn main() -> Result<()> {
                 let route = args.routes[(number.saturating_sub(1) as usize) % args.routes.len()];
                 next_id += 1;
                 let (host_override, port_override) = match route {
-                    Route::ClaudeSubscription => (&args.provider_claude_host, args.provider_claude_port),
-                    Route::ChatgptSubscription => (&args.provider_codex_host, args.provider_codex_port),
+                    Route::ClaudeSubscription => {
+                        (&args.provider_claude_host, args.provider_claude_port)
+                    }
+                    Route::ChatgptSubscription => {
+                        (&args.provider_codex_host, args.provider_codex_port)
+                    }
                 };
-                let provider_host = host_override.clone().or_else(|| args.provider_host.clone())
+                let provider_host = host_override
+                    .clone()
+                    .or_else(|| args.provider_host.clone())
                     .unwrap_or_else(|| route.host().to_owned());
                 let provider_port = port_override.unwrap_or(args.provider_port);
                 let provider_ca = args.provider_ca.clone();

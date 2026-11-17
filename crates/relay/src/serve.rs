@@ -6,11 +6,11 @@
 use std::{env, future::IntoFuture, ops::Range, path::PathBuf, pin::pin, time::Instant};
 
 use anyhow::{Context, Result, bail};
+use concurro_relay_native::{self as native, NativeOptions, NativeRole};
 use concurro_relay_protocol::{
     Roots,
     link::{self, Notice, Order},
     meter::Counters,
-    native::{self, NativeOptions, NativeRole},
     route::Route,
     wire::{self, Job, Offer},
     ws::{self, Progress},
@@ -58,19 +58,28 @@ impl RelayConfig {
     fn route(&self, host: &str) -> Result<(&Served, Credential), String> {
         let served = self.served.iter().find(|served| served.policy.host == host);
         let served = served.ok_or_else(|| format!("host not served: {host}"))?;
-        let credential = self.credentials.load(served.route).map_err(|error| format!("{error:#}"))?;
+        let credential = self
+            .credentials
+            .load(served.route)
+            .map_err(|error| format!("{error:#}"))?;
         Ok((served, credential))
     }
 }
 
 /// What the relay adds to a request on `served` to carry `credential`.
 fn offer(served: &Served, credential: Credential) -> Offer {
-    Offer { credential: served.credential_header.clone(), hidden_len: credential.token.len(), headers: credential.headers }
+    Offer {
+        credential: served.credential_header.clone(),
+        hidden_len: credential.token.len(),
+        headers: credential.headers,
+    }
 }
 
 /// The model a request body asks for.
 fn model(body: &str) -> Option<String> {
-    serde_json::from_str::<Value>(body).ok()?["model"].as_str().map(str::to_owned)
+    serde_json::from_str::<Value>(body).ok()?["model"]
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// A link's traffic counters and where it reports, for timing an exchange
@@ -90,11 +99,23 @@ struct Timed {
 
 impl Reporter<'_> {
     fn start(&self) -> Timed {
-        Timed { started: Instant::now(), upload: self.traffic.written(), download: self.traffic.read() }
+        Timed {
+            started: Instant::now(),
+            upload: self.traffic.written(),
+            download: self.traffic.read(),
+        }
     }
 
     /// Reports that the exchange `timed` was proved.
-    fn proved(&self, timed: &Timed, route: Route, sent: usize, received: usize, request: String, response: String) {
+    fn proved(
+        &self,
+        timed: &Timed,
+        route: Route,
+        sent: usize,
+        received: usize,
+        request: String,
+        response: String,
+    ) {
         let exchange = Exchange {
             route,
             model: model(&request),
@@ -106,11 +127,17 @@ impl Reporter<'_> {
             request,
             response,
         };
-        let _ = self.events.send(Event::Proved { link: self.link, exchange });
+        let _ = self.events.send(Event::Proved {
+            link: self.link,
+            exchange,
+        });
     }
 
     fn refused(&self, reason: String) {
-        let _ = self.events.send(Event::Refused { link: self.link, reason });
+        let _ = self.events.send(Event::Refused {
+            link: self.link,
+            reason,
+        });
     }
 }
 
@@ -133,16 +160,33 @@ fn admit(job: &Job, config: &RelayConfig) -> Result<(Admitted, Offer), String> {
     let offer = offer(served, credential);
     let (request, hidden) = wire::encode_request(job, &offer, token.as_bytes());
     let body = String::from_utf8_lossy(&job.decoded_body().unwrap_or_default()).into_owned();
-    Ok((Admitted { route: served.route, body, request, hidden, server: job.host.clone() }, offer))
+    Ok((
+        Admitted {
+            route: served.route,
+            body,
+            request,
+            hidden,
+            server: job.host.clone(),
+        },
+        offer,
+    ))
 }
 
 /// Performs an admitted job and proves the exchange over `handle`'s
 /// session. Returns what the provider sent.
-async fn prove(handle: &mut SessionHandle, admitted: &Admitted, config: &RelayConfig) -> Result<Vec<u8>> {
+async fn prove(
+    handle: &mut SessionHandle,
+    admitted: &Admitted,
+    config: &RelayConfig,
+) -> Result<Vec<u8>> {
     let server = admitted.server.as_str();
     let prover = handle
         .new_prover(ProverConfig::builder().build()?)?
-        .commit(ProxyTlsConfig::builder().server_name(DnsName::try_from(server)?).build()?)
+        .commit(
+            ProxyTlsConfig::builder()
+                .server_name(DnsName::try_from(server)?)
+                .build()?,
+        )
         .await?;
     let (mut tls, prover) = prover.connect(
         TlsClientConfig::builder()
@@ -196,17 +240,31 @@ async fn perform(
     };
     let timed = reporter.start();
     let received = prove(handle, &admitted, config).await?;
-    let response = wire::parse_response(&received).map_or_else(|_| received.clone(), |response| response.body);
+    let response =
+        wire::parse_response(&received).map_or_else(|_| received.clone(), |response| response.body);
     let response = String::from_utf8_lossy(&response).into_owned();
-    reporter.proved(&timed, admitted.route, admitted.request.len(), received.len(), admitted.body, response);
+    reporter.proved(
+        &timed,
+        admitted.route,
+        admitted.request.len(),
+        received.len(),
+        admitted.body,
+        response,
+    );
     Ok(true)
 }
 
 /// The WebSocket connection `job` asks for, as the relay would open it, or
 /// the reason it will not.
-fn admit_connection<'a>(job: &Job, config: &'a RelayConfig) -> Result<(&'a Served, &'a Policy, Credential), String> {
+fn admit_connection<'a>(
+    job: &Job,
+    config: &'a RelayConfig,
+) -> Result<(&'a Served, &'a Policy, Credential), String> {
     let (served, credential) = config.route(&job.host)?;
-    let policy = served.websocket.as_ref().ok_or_else(|| format!("{} has no WebSocket connections", served.route.label()))?;
+    let policy = served
+        .websocket
+        .as_ref()
+        .ok_or_else(|| format!("{} has no WebSocket connections", served.route.label()))?;
     policy.check_target(job)?;
     Ok((served, policy, credential))
 }
@@ -214,7 +272,11 @@ fn admit_connection<'a>(job: &Job, config: &'a RelayConfig) -> Result<(&'a Serve
 /// A response's events as a stream of them, which is how a response to a
 /// single request arrives and how it is shown.
 fn as_stream(messages: &[Message]) -> String {
-    messages.iter().filter_map(|message| message.to_text().ok().filter(|_| message.is_text())).map(|event| format!("data: {event}\n")).collect()
+    messages
+        .iter()
+        .filter_map(|message| message.to_text().ok().filter(|_| message.is_text()))
+        .map(|event| format!("data: {event}\n"))
+        .collect()
 }
 
 /// Opens the WebSocket connection Concurro ordered for `job`, if the
@@ -240,7 +302,16 @@ async fn carry(
     let token = credential.token.clone();
     let offer = offer(served, credential);
     wire::send(notices, &Notice::Offer(offer.clone())).await?;
-    let mut relay = WsRelay::open(handle, job, &offer, token.as_bytes(), key, policy.clone(), config.roots).await?;
+    let mut relay = WsRelay::open(
+        handle,
+        job,
+        &offer,
+        token.as_bytes(),
+        key,
+        policy.clone(),
+        config.roots,
+    )
+    .await?;
 
     let mut turns = 0;
     // The request in flight, with when it was sent.
@@ -267,7 +338,9 @@ async fn carry(
                 }
                 sent
             }
-            Order::Pong { payload, mask } => relay.send_pong(&ws::pong_frame(&payload, mask)).await?,
+            Order::Pong { payload, mask } => {
+                relay.send_pong(&ws::pong_frame(&payload, mask)).await?
+            }
             Order::Report if relay.has_unproven() => Ok(()),
             Order::Report => Err("nothing to report".into()),
             Order::Close => return relay.close().await.map(|()| turns),
@@ -287,7 +360,14 @@ async fn carry(
         {
             turns += 1;
             let received = messages.iter().map(Message::len).sum();
-            reporter.proved(&timed, served.route, sent, received, text, as_stream(&messages));
+            reporter.proved(
+                &timed,
+                served.route,
+                sent,
+                received,
+                text,
+                as_stream(&messages),
+            );
         }
     }
 }
@@ -314,9 +394,17 @@ where
         Ok(order) => order,
         Err(_) => return Ok(0),
     };
-    if let Order::NativeStart { route, provider_host, provider_port } = &first {
+    if let Order::NativeStart {
+        route,
+        provider_host,
+        provider_port,
+    } = &first
+    {
         let credential = config.credentials.load(*route)?;
-        let account = credential.headers.iter().find(|(name, _)| name.eq_ignore_ascii_case("chatgpt-account-id"))
+        let account = credential
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("chatgpt-account-id"))
             .map(|(_, value)| value.clone());
         wire::send(&mut control, &Notice::NativeReady).await?;
         let (audit, mut reported) = mpsc::unbounded_channel();
@@ -327,19 +415,25 @@ where
                 let _ = events.send(Event::NativeAudit { link, route, audit });
             }
         });
-        let result = native::bridge(control, proofs, NativeOptions {
-            role: NativeRole::Sponsor,
-            route,
-            provider_host: provider_host.clone(),
-            provider_port: *provider_port,
-            provider_ca: env::var_os("CONCURRO_NATIVE_PROVIDER_CA").map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/etc/ssl/cert.pem")),
-            listen: None,
-            token: Some(credential.token),
-            account,
-            audit: Some(audit),
-            ready: None,
-        }).await;
+        let result = native::bridge(
+            control,
+            proofs,
+            NativeOptions {
+                role: NativeRole::Sponsor,
+                route,
+                provider_host: provider_host.clone(),
+                provider_port: *provider_port,
+                provider_ca: env::var_os("CONCURRO_NATIVE_PROVIDER_CA")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("/etc/ssl/cert.pem")),
+                listen: None,
+                token: Some(credential.token),
+                account,
+                audit: Some(audit),
+                ready: None,
+            },
+        )
+        .await;
         forward.await?;
         result?;
         return Ok(1);
@@ -348,14 +442,34 @@ where
     let driver = tokio::spawn(driver);
     let (orders, mut notices) = io::split(control);
     let mut orders = pin!(link::incoming::<_, Order>(orders));
-    let reporter = Reporter { link, traffic, events };
+    let reporter = Reporter {
+        link,
+        traffic,
+        events,
+    };
     let mut served = 0;
     let mut first = Some(first);
     // A failure to read the next order means Concurro ended the link.
-    while let Some(Ok(order)) = match first.take() { Some(order) => Some(Ok(order)), None => orders.next().await } {
+    while let Some(Ok(order)) = match first.take() {
+        Some(order) => Some(Ok(order)),
+        None => orders.next().await,
+    } {
         served += match order {
-            Order::Job(job) => usize::from(perform(&job, &mut handle, &mut notices, config, &reporter).await?),
-            Order::Open { job, key } => carry(&job, &key, &mut handle, &mut orders, &mut notices, config, &reporter).await?,
+            Order::Job(job) => {
+                usize::from(perform(&job, &mut handle, &mut notices, config, &reporter).await?)
+            }
+            Order::Open { job, key } => {
+                carry(
+                    &job,
+                    &key,
+                    &mut handle,
+                    &mut orders,
+                    &mut notices,
+                    config,
+                    &reporter,
+                )
+                .await?
+            }
             other => bail!("Concurro gave an order which needs an open connection: {other:?}"),
         };
     }

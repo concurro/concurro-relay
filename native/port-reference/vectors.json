@@ -1,0 +1,68 @@
+{
+  "audit": {
+    "body_sha256": "9653fb65b93f5cc5b8996c1ff479cbc6d40574cc91c81194898c0c37575d9fd1",
+    "prompt_count": 1,
+    "stream": 1
+  },
+  "cancellation": {
+    "next_queued_remains_cancelable": true,
+    "queued_turn": 2
+  },
+  "claim": {
+    "h2": "0101010101010101010101010101010101010101010101010101010101010101",
+    "h3": "0202020202020202020202020202020202020202020202020202020202020202",
+    "iv": "050505050505050505050505",
+    "key": "04040404040404040404040404040404",
+    "key_commitment": "0303030303030303030303030303030303030303030303030303030303030303",
+    "plaintext": "66697874757265",
+    "record": "170303001d43619f4ade440abd84529ca4d37c569f5b6b9f5c6122642d1c5993ece8",
+    "sequence": 3
+  },
+  "control": {
+    "data": "00ff",
+    "kind": "fixture",
+    "turn": 2,
+    "wire": "000000297b226b696e64223a2266697874757265222c2264617461223a224150383d222c227475726e223a327d"
+  },
+  "handshake": {
+    "claude_h2": {
+      "alpn": "h2",
+      "message_type": 1,
+      "session_length": 32
+    },
+    "codex": {
+      "alpn": "http/1.1",
+      "message_type": 1,
+      "session_length": 32
+    }
+  },
+  "hpack": {
+    "first": [
+      [
+        "foo",
+        "bar"
+      ]
+    ],
+    "huffman_authority": "www.example.com",
+    "indexed": [
+      [
+        "foo",
+        "bar"
+      ]
+    ]
+  },
+  "indexed_request": {
+    "auth_index": 62,
+    "bootstrap_sha256": "898d34f8cfd4a302369a650700664e5edcf31d71d07b732315110d7536de983b",
+    "credential_slot": 86,
+    "indexed_headers": "000024010400000003838701116170692e616e7468726f7069632e636f6d040c2f76312f6d65737361676573be",
+    "stream": 3
+  },
+  "record": {
+    "content": "fixture body",
+    "kind": 23,
+    "next_secret": "2cecd0a17506ef5fa73edc062d6e7b5397cf074ec1b4d8f99a120772932f0b45",
+    "wire": "170303001d43619f4ade440abd84529ca4d37c569f5b6b9f5c6122642d1c5993ece8"
+  },
+  "tunnel": "440000000700000003616263"
+}
