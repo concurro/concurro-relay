@@ -101,7 +101,7 @@ impl Verifier {
         ));
 
         Self {
-            gateway: Gateway::new(Route::ChatgptSubscription, expect, false, accepted),
+            gateway: Gateway::new(Route::ChatgptSubscription, expect, false, accepted, None),
             registry,
             server: Server {
                 address,

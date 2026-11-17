@@ -61,6 +61,18 @@ impl Runtime {
         self.root.join("MP-SPDZ").join(path)
     }
 
+    /// Start bundled OpenSSL with its package-local configuration.
+    pub fn openssl(&self) -> Command {
+        let binary = self
+            .root
+            .parent()
+            .expect("packaged runtime has a parent directory")
+            .join("bin/openssl");
+        let mut command = Command::new(&binary);
+        command.env("OPENSSL_CONF", binary.with_file_name("openssl.cnf"));
+        command
+    }
+
     /// Resolve the accepted public handshake circuit.
     pub fn handshake_circuit(&self) -> PathBuf {
         self.distefano("handoff-handshake-shares-cached-hkdf.txt")
@@ -142,7 +154,8 @@ pub async fn exchange_mascot_identity<C: AsyncRead + AsyncWrite + Unpin>(
     tokio::fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).await?;
     let key = directory.join(format!("P{party}.key"));
     let cert = directory.join(format!("P{party}.pem"));
-    let status = Command::new("openssl")
+    let status = runtime
+        .openssl()
         .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout"])
         .arg(&key)
         .arg("-out")
@@ -183,7 +196,8 @@ pub async fn exchange_mascot_identity<C: AsyncRead + AsyncWrite + Unpin>(
     );
     let peer_cert = directory.join(format!("P{opposite}.pem"));
     tokio::fs::write(&peer_cert, &other.data).await?;
-    let checked = Command::new("openssl")
+    let checked = runtime
+        .openssl()
         .args(["x509", "-in"])
         .arg(&peer_cert)
         .args(["-noout", "-subject", "-nameopt", "RFC2253"])
@@ -367,7 +381,8 @@ pub async fn arithmetic_share<C: AsyncRead + AsyncWrite + Unpin>(
         Ok(())
     })
     .await??;
-    let status = Command::new("openssl")
+    let status = runtime
+        .openssl()
         .arg("rehash")
         .arg(
             runtime
@@ -390,7 +405,6 @@ pub async fn arithmetic_share<C: AsyncRead + AsyncWrite + Unpin>(
         .arg(party.to_string())
         .arg("concurro_ectf_field")
         .current_dir(runtime.output.join(format!("{}-mascot", role_name(role))))
-        .env("DYLD_LIBRARY_PATH", runtime.mp_spdz(""))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

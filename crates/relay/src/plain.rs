@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use concurro_relay_protocol::{Roots, route::Route};
+use concurro_relay_protocol::{FIXTURE_PROVIDER_HOST, Roots, route::Route};
 use tokio::{signal, sync::mpsc};
 
 use crate::{
@@ -48,21 +48,34 @@ pub fn logins(credentials: &Source, routes: &[Route]) -> Vec<(Route, Result<Stri
         .collect()
 }
 
-/// The relay registered in `store`, serving real providers with the
-/// logins on this machine.
+/// The relay registered in `store`, using fixture trust only when requested.
 pub fn relay(store: &Store) -> Result<Relay> {
     let (registration, identity) = store
         .load()?
         .context("this relay is not registered; run `concurro-relay login`")?;
+    let fixture = env::var("CONCURRO_TLSNOTARY_FIXTURE").as_deref() == Ok("1");
     let config = RelayConfig {
         served: registration
             .routes
             .iter()
             .copied()
-            .map(Served::builtin)
+            .map(|route| {
+                let mut served = Served::builtin(route);
+                if fixture {
+                    served.policy.host = FIXTURE_PROVIDER_HOST.into();
+                    if let Some(websocket) = &mut served.websocket {
+                        websocket.host = FIXTURE_PROVIDER_HOST.into();
+                    }
+                }
+                served
+            })
             .collect(),
         credentials: Source::Kept(store.clone()),
-        roots: Roots::Mozilla,
+        roots: if fixture {
+            Roots::Fixture
+        } else {
+            Roots::Mozilla
+        },
         parents: Default::default(),
     };
     Ok(Relay {

@@ -13,6 +13,9 @@ pub mod ws;
 use tlsn::webpki::{CertificateDer, RootCertStore};
 use tlsn_server_fixture_certs::CA_CERT_DER;
 
+/// Authenticated DNS name of the local TLSNotary provider fixture.
+pub use tlsn_server_fixture_certs::SERVER_DOMAIN as FIXTURE_PROVIDER_HOST;
+
 /// Trust anchors used to authenticate the provider.
 #[derive(Clone, Copy, Debug)]
 pub enum Roots {

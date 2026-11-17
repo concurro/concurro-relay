@@ -21,6 +21,7 @@ use concurro_relay_verifier::{
     accept::{self, Acceptor},
     exchange::Expect,
 };
+use tlsn_server_fixture_certs::SERVER_DOMAIN;
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::{self, TcpListener, TcpStream},
@@ -197,6 +198,9 @@ struct Args {
     /// Transport backend for accepted relay links.
     #[arg(long, value_enum, default_value_t = Backend::Tls13)]
     backend: Backend,
+    /// Local TLSNotary fixture socket, using the bundled fixture CA and host.
+    #[arg(long)]
+    fixture_provider: Option<SocketAddr>,
     /// Provider socket host for the native backend.
     #[arg(long)]
     provider_host: Option<String>,
@@ -232,15 +236,20 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let operation = async {
         let route = args.routes[0];
-        let host = route.host();
+        let fixture = args.fixture_provider.is_some() && matches!(args.backend, Backend::Tlsnotary);
+        let host = if fixture { SERVER_DOMAIN } else { route.host() };
         let provider = if matches!(args.backend, Backend::Tlsnotary) {
-            let mut resolved: Vec<_> = net::lookup_host((host, 443)).await?.collect();
-            resolved.sort_by_key(|addr| !addr.is_ipv4());
-            Some(
-                *resolved
-                    .first()
-                    .with_context(|| format!("{host} did not resolve"))?,
-            )
+            if let Some(address) = args.fixture_provider {
+                Some(address)
+            } else {
+                let mut resolved: Vec<_> = net::lookup_host((host, 443)).await?.collect();
+                resolved.sort_by_key(|addr| !addr.is_ipv4());
+                Some(
+                    *resolved
+                        .first()
+                        .with_context(|| format!("{host} did not resolve"))?,
+                )
+            }
         } else {
             None
         };
@@ -365,13 +374,23 @@ async fn main() -> Result<()> {
         } else {
             let expect = Expect {
                 provider: provider.expect("TLSNotary provider resolved"),
-                roots: Roots::Mozilla,
+                roots: if fixture {
+                    Roots::Fixture
+                } else {
+                    Roots::Mozilla
+                },
                 relay_headers: match route {
                     Route::ChatgptSubscription => vec![CHATGPT_ACCOUNT_HEADER.to_owned()],
                     Route::ClaudeSubscription => Vec::new(),
                 },
             };
-            let gateway = Gateway::new(route, expect, args.zstd, accepted);
+            let gateway = Gateway::new(
+                route,
+                expect,
+                args.zstd,
+                accepted,
+                fixture.then(|| host.to_owned()),
+            );
             let listener = TcpListener::bind(args.listen).await?;
             eprintln!(
                 "serving the harness on http://{}, relays on {} (certificate in {}), provider {host} at {}",

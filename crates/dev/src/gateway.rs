@@ -87,6 +87,8 @@ pub struct Performed {
 
 pub struct Gateway {
     route: Route,
+    /// Alternate authenticated provider host for an explicit local fixture.
+    provider_host: Option<String>,
     expect: Expect,
     /// Relay links waiting to serve a request, and where to return them.
     idle: Mutex<mpsc::UnboundedReceiver<RelayLink>>,
@@ -100,12 +102,13 @@ pub struct Gateway {
 impl Gateway {
     /// A gateway for `route` which uses the relay links arriving on
     /// `accepted`, and with `zstd` compresses request bodies before they
-    /// are sent and proven.
+    /// are sent and proven. `provider_host` selects an explicit fixture host.
     pub fn new(
         route: Route,
         expect: Expect,
         zstd: bool,
         mut accepted: mpsc::UnboundedReceiver<Accepted<Connection>>,
+        provider_host: Option<String>,
     ) -> Arc<Self> {
         let (returned, idle) = mpsc::unbounded_channel();
         let ready = returned.clone();
@@ -128,6 +131,7 @@ impl Gateway {
         });
         Arc::new(Self {
             route,
+            provider_host,
             expect,
             idle: Mutex::new(idle),
             returned,
@@ -206,6 +210,10 @@ impl Gateway {
             Ok(job) => job,
             Err(error) => return failure(StatusCode::BAD_REQUEST, &format!("{error:#}")),
         };
+        let mut job = job;
+        if let Some(host) = &self.provider_host {
+            job.host.clone_from(host);
+        }
         let label = format!("ws#{}", self.served.fetch_add(1, Ordering::Relaxed) + 1);
         let gateway = self.clone();
         tokio::spawn(async move {
@@ -334,6 +342,9 @@ impl Gateway {
             (None, _) => "none",
         };
         let mut job = jobs::job(self.route, path, headers, body)?;
+        if let Some(host) = &self.provider_host {
+            job.host.clone_from(host);
+        }
         let plain = job.body.len();
         if self.zstd {
             job.compress()?;

@@ -217,7 +217,6 @@ where
     let mut command = Command::new(worker);
     command.as_std_mut().process_group(0);
     command
-        .env("DYLD_LIBRARY_PATH", bundle.join("lib"))
         .env(
             "PATH",
             format!("{}:/usr/bin:/bin", bundle.join("bin").display()),

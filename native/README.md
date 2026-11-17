@@ -9,11 +9,12 @@ history at `aa8c3d0`.
 
 `package.py` assembles separate macOS arm64 Sponsor and Concurro bundles from
 the accepted TLS 1.3 native helper runtime and three Rust binaries. OpenSSL,
-dynamic libraries, and public circuits are included. Python is used by local
-build and test fixtures, outside the runtime package.
-The compiler and source checkout are build inputs. Some helper binaries retain
-absolute `/opt/homebrew` library paths despite the bundled library copies;
-running the package on a Mac without matching Homebrew paths is unqualified.
+its configuration, dynamic libraries, and public circuits are included.
+The packager copies the full non-system Mach-O dependency closure, rewrites
+loads and library identities to package-local paths, removes rpaths, signs the
+images, and audits the result. Homebrew, the compiler, Python, and the source
+checkout are build or test inputs; the packaged runtime does not need their
+paths. This runtime claim is for macOS arm64.
 Each package has a SHA-256 manifest. Private MASCOT transport keys and OT
 preprocessing are generated for each session outside the bundle.
 
@@ -21,6 +22,7 @@ preprocessing are generated for each session outside the bundle.
 RUSTC_WRAPPER= cargo build --release -p concurro-relay -p concurro-relay-dev -p concurro-relay-native --bins --locked
 python3 native/package.py --role sponsor --runtime "$MVP_RUNTIME" --relay target/release/concurro-relay --verifier target/release/dev-verifier --worker target/release/concurro-native-worker --output "$SPONSOR_PACKAGE"
 python3 native/package.py --role concurro --runtime "$MVP_RUNTIME" --relay target/release/concurro-relay --verifier target/release/dev-verifier --worker target/release/concurro-native-worker --output "$CONCURRO_PACKAGE"
+python3 -B -m unittest native.test_package -v
 ```
 
 `MVP_RUNTIME` is an external accepted runnable MVP artifact containing
@@ -75,3 +77,11 @@ For a single Codex CLI invocation with one tool iteration, use
 `generate:false` is counted separately from the two generated turns.
 `CONCURRO_NATIVE_TEST_TURNS` bounds fixture runs only; omit it for a persistent
 Claude ingress.
+
+For an offline TLSNotary fixture, `fixture_provider` (built with
+`cargo build --release -p concurro-relay-dev --example fixture_provider`) serves
+the existing TLS 1.2 mock provider using `CONCURRO_FIXTURE_TOKEN`. Pass its
+printed socket to `dev-verifier --backend tlsnotary --fixture-provider`, and
+set `CONCURRO_TLSNOTARY_FIXTURE=1` for the Sponsor relay. These explicit
+fixture settings select the mock certificate host and CA; without them,
+TLSNotary uses the route host and Mozilla roots.
