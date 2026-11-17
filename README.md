@@ -22,6 +22,10 @@ and it depends on a pre-release proof stack carrying local patches.
 
 ## Building
 
+Owned crates inherit dependencies from the root workspace manifest. Pin crates.io
+versions as `=x.y.z`, use `default-features = false`, and enable required features
+explicitly. Keep the manifest pins and `Cargo.lock` consistent.
+
 ```bash
 ./scripts/upstream.sh
 ```

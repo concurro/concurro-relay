@@ -1,0 +1,3018 @@
+{
+  "schema": 1,
+  "signed_baseline": "800a1d3ca94cb797ad4980ae54d2154968994c9d",
+  "baseline_tree": "a435808ea717f2b41a4c4d2bc11648e5a69d7036",
+  "host": {
+    "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)\nbinary: rustc\ncommit-hash: 0ef1bc386059596dada8fb65b50425aab2ea637a\ncommit-date: 2026-11-09\nhost: aarch64-apple-darwin\nrelease: 1.100.0\nLLVM version: 23.1.5\n",
+    "platform": "Darwin arm64"
+  },
+  "provenance": {
+    "accepted_v3_manifest_sha256": {
+      "sponsor": "ebdcda098ab591eb88e84eeca1faa92e00f31f43e6233b87d3e03211834109af",
+      "concurro": "3f89a503c62e992ce9037f34dbf8a33644369ed13e3fc6a34de6003bbcdde347"
+    },
+    "runner_sha256": "436c5db6fd3fc219f3d0fef8240ea97e529a53f523518a3a6567e790827547fb",
+    "build_script_sha256": "d964f4dd986885d662d0b598d5318d9421004c9b48495dcdabb8790337ab8658",
+    "bench_script_sha256": "0930e343b32f2a63a718842edd57cc836c63ebacada2f258a07572e4070eabaa",
+    "analyzer_sha256": "895d614840a55f2af57e1e784c8276c81bb9bf42f06ad46b92c5dc8f7687bbee",
+    "claude_client_sha256": "cbf6463a03bde560ae32a1f216f74c835192cb78f51f40cb1b0ce8a724d1f700",
+    "public_circuits": "/private/tmp/concurro-phase6-public-circuits",
+    "native_runtime": "/Users/cylwit/Code/github.com/concurro/.artifacts/concurro-relay-native-v16/sponsor/native-runtime/runtime"
+  },
+  "compiler_matrix": [
+    {
+      "variant": "default-16",
+      "lto": "false",
+      "codegen_units": 16,
+      "build_seconds": 49.557,
+      "target": "/private/tmp/concurro-opt-builds-1/default-16/target",
+      "binaries": {
+        "concurro-relay": {
+          "bytes": 20160384,
+          "sha256": "55bb14c27a1ee05fa42aa0080f127911599204173ff2e5cfda5122a1a6ea73c6"
+        },
+        "dev-verifier": {
+          "bytes": 19630096,
+          "sha256": "49886140fefc5f4d7644f767f3c2bb4405945b72df39750984add630a808d119"
+        },
+        "concurro-native-worker": {
+          "bytes": 5610144,
+          "sha256": "a045f6025e6d014e594661c828b7ebb9a200ad6828ae6153bfd878a2b7cfb28c"
+        }
+      },
+      "packages": {
+        "sponsor": {
+          "path": "/private/tmp/concurro-opt-builds-1/default-16/sponsor",
+          "manifest_sha256": "7f54b1293dcb98e0cdddbc2d40f1370d16e3fbbef9c9cda4f4a4b7d7dbbb5a51"
+        },
+        "concurro": {
+          "path": "/private/tmp/concurro-opt-builds-1/default-16/concurro",
+          "manifest_sha256": "e55e684d9c4e87c90ae430d3892534cbee643cffa5c56b2f31877b75edb1a6bf"
+        }
+      }
+    },
+    {
+      "variant": "thin-16",
+      "lto": "thin",
+      "codegen_units": 16,
+      "build_seconds": 46.347,
+      "target": "/private/tmp/concurro-opt-builds-1/thin-16/target",
+      "binaries": {
+        "concurro-relay": {
+          "bytes": 20193792,
+          "sha256": "07927c2d1bb9c362dbc7269d88b24fb05fa6d7201439597251f5000d10f7dc87"
+        },
+        "dev-verifier": {
+          "bytes": 19681232,
+          "sha256": "2f6d05f3d1e01b0e796e48921c67740eafa9046d8e38f5a9fdd4c4bfbc0aecb0"
+        },
+        "concurro-native-worker": {
+          "bytes": 5612992,
+          "sha256": "69131e1621fd5c224af67423239df31fde71c16589066f309a62de5f22a36103"
+        }
+      },
+      "packages": {
+        "sponsor": {
+          "path": "/private/tmp/concurro-opt-builds-1/thin-16/sponsor",
+          "manifest_sha256": "70930cbb477cd8b1a592b2e880e583d7bdbcafe9e21ddce4101a44915a956410"
+        },
+        "concurro": {
+          "path": "/private/tmp/concurro-opt-builds-1/thin-16/concurro",
+          "manifest_sha256": "2e6598931b1d5c7c87f58e7e8945075e3f197d762a9a7e43e5970ce3fcf7cdb8"
+        }
+      }
+    },
+    {
+      "variant": "default-1",
+      "lto": "false",
+      "codegen_units": 1,
+      "build_seconds": 67.39,
+      "target": "/private/tmp/concurro-opt-builds-1/default-1/target",
+      "binaries": {
+        "concurro-relay": {
+          "bytes": 16161680,
+          "sha256": "73b79f07502e4383ca29e5166efee7d35fa1a91f3ac6bf170552fdee4bb9b37a"
+        },
+        "dev-verifier": {
+          "bytes": 15809808,
+          "sha256": "690a7ebace44da70bac51c62eb2fcd196161f70d172b766ea68dea0ccd02d7b7"
+        },
+        "concurro-native-worker": {
+          "bytes": 3961104,
+          "sha256": "37460945b6e5450c412bb60368bc6fc12081eeffb4219c29469d9feda733a271"
+        }
+      },
+      "packages": {
+        "sponsor": {
+          "path": "/private/tmp/concurro-opt-builds-1/default-1/sponsor",
+          "manifest_sha256": "b249bdcd9dea36f40ac7b8a2e332eb685613389123e0f53fdfb484c27af2aa13"
+        },
+        "concurro": {
+          "path": "/private/tmp/concurro-opt-builds-1/default-1/concurro",
+          "manifest_sha256": "4a8276af7bb5ed0e8e34348531648696991f2a3c8a34581a794d84750ab3c5f3"
+        }
+      }
+    },
+    {
+      "variant": "thin-1",
+      "lto": "thin",
+      "codegen_units": 1,
+      "build_seconds": 61.906,
+      "target": "/private/tmp/concurro-opt-builds-1/thin-1/target",
+      "binaries": {
+        "concurro-relay": {
+          "bytes": 16228976,
+          "sha256": "1d41371578ac8090c20c570f955b3a83723556cb8670a2e5023121cbdd88412d"
+        },
+        "dev-verifier": {
+          "bytes": 15827136,
+          "sha256": "0cee1b3723dbe1f14743fd89e85a84974e0b2c4d0d6df3bdc90ac9d1f52dba63"
+        },
+        "concurro-native-worker": {
+          "bytes": 3988720,
+          "sha256": "0edadea8c4402102da370f52c1cb2ef0e85bb194a1100f83b2b3efb2c287aad2"
+        }
+      },
+      "packages": {
+        "sponsor": {
+          "path": "/private/tmp/concurro-opt-builds-1/thin-1/sponsor",
+          "manifest_sha256": "93d6650a46d87798c4dcb891f2dc891e923de50aea62f5492ba6aa1fe9862228"
+        },
+        "concurro": {
+          "path": "/private/tmp/concurro-opt-builds-1/thin-1/concurro",
+          "manifest_sha256": "8aeafd1bf2dffc45a96eb661fc1b3876fc6d87c090fd50ff08d06c6deab108b0"
+        }
+      }
+    }
+  ],
+  "runs": {
+    "local": {
+      "raw_root": "/private/tmp/coptl2",
+      "spread_ms": {
+        "accepted-v3-claude": {
+          "cold_complete_ms": {
+            "min": 5650.1,
+            "median": 5656.05,
+            "max": 5662.0
+          },
+          "warm_complete_ms": {
+            "min": 949.0,
+            "median": 1000.1,
+            "max": 1051.2
+          }
+        },
+        "accepted-v3-codex": {
+          "total_total_ms": {
+            "min": 4972.8,
+            "median": 5007.15,
+            "max": 5041.5
+          }
+        },
+        "default-16-claude": {
+          "cold_complete_ms": {
+            "min": 5606.7,
+            "median": 6337.75,
+            "max": 7068.8
+          },
+          "warm_complete_ms": {
+            "min": 951.3,
+            "median": 997.1,
+            "max": 1042.9
+          }
+        },
+        "default-16-codex": {
+          "total_total_ms": {
+            "min": 4969.2,
+            "median": 5012.35,
+            "max": 5055.5
+          }
+        },
+        "thin-16-claude": {
+          "cold_complete_ms": {
+            "min": 5592.2,
+            "median": 6068.049999999999,
+            "max": 6543.9
+          },
+          "warm_complete_ms": {
+            "min": 946.8,
+            "median": 947.3,
+            "max": 947.8
+          }
+        },
+        "thin-16-codex": {
+          "total_total_ms": {
+            "min": 4947.3,
+            "median": 4971.950000000001,
+            "max": 4996.6
+          }
+        },
+        "default-1-claude": {
+          "cold_complete_ms": {
+            "min": 5637.4,
+            "median": 5877.25,
+            "max": 6117.1
+          },
+          "warm_complete_ms": {
+            "min": 951.4,
+            "median": 956.8499999999999,
+            "max": 962.3
+          }
+        },
+        "default-1-codex": {
+          "total_total_ms": {
+            "min": 4970.1,
+            "median": 4979.4,
+            "max": 4988.7
+          }
+        },
+        "thin-1-claude": {
+          "cold_complete_ms": {
+            "min": 5607.5,
+            "median": 5851.35,
+            "max": 6095.2
+          },
+          "warm_complete_ms": {
+            "min": 950.0,
+            "median": 950.55,
+            "max": 951.1
+          }
+        },
+        "thin-1-codex": {
+          "total_total_ms": {
+            "min": 4926.8,
+            "median": 4968.950000000001,
+            "max": 5011.1
+          }
+        }
+      },
+      "cases": [
+        {
+          "variant": "accepted-v3",
+          "route": "claude",
+          "profile": "local",
+          "repeat": 1,
+          "timing": {
+            "cold": {
+              "first_body_ms": 4813.2,
+              "complete_ms": 5662.0,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 156.5,
+              "complete_ms": 1051.2,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1695.67,
+            "prefix": 2598.27,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1918
+          },
+          "concurro_helpers": {
+            "handshake": 1297.71,
+            "prefix": 1927.72,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1808
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 28.6,
+                "rss_mib": 8.59375
+              },
+              "worker": {
+                "cpu_pct": 20.4,
+                "rss_mib": 216.546875
+              },
+              "helper": {
+                "cpu_pct": 86.4,
+                "rss_mib": 1397.53125
+              },
+              "total": {
+                "cpu_pct": 115.3,
+                "rss_mib": 1622.046875
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 28.0,
+                "rss_mib": 8.078125
+              },
+              "worker": {
+                "cpu_pct": 19.9,
+                "rss_mib": 216.25
+              },
+              "helper": {
+                "cpu_pct": 86.5,
+                "rss_mib": 1328.671875
+              },
+              "total": {
+                "cpu_pct": 113.80000000000001,
+                "rss_mib": 1552.375
+              }
+            }
+          },
+          "runner_seconds": 8.65
+        },
+        {
+          "variant": "default-16",
+          "route": "claude",
+          "profile": "local",
+          "repeat": 1,
+          "timing": {
+            "cold": {
+              "first_body_ms": 6225.8,
+              "complete_ms": 7068.8,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 147.7,
+              "complete_ms": 1042.9,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1795.39,
+            "prefix": 2778.97,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1972
+          },
+          "concurro_helpers": {
+            "handshake": 1317.5,
+            "prefix": 2090.1,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1797
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 31.2,
+                "rss_mib": 7.96875
+              },
+              "worker": {
+                "cpu_pct": 22.3,
+                "rss_mib": 216.875
+              },
+              "helper": {
+                "cpu_pct": 85.7,
+                "rss_mib": 1397.703125
+              },
+              "total": {
+                "cpu_pct": 116.1,
+                "rss_mib": 1622.546875
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 31.1,
+                "rss_mib": 8.109375
+              },
+              "worker": {
+                "cpu_pct": 21.8,
+                "rss_mib": 217.890625
+              },
+              "helper": {
+                "cpu_pct": 91.6,
+                "rss_mib": 1328.84375
+              },
+              "total": {
+                "cpu_pct": 114.80000000000001,
+                "rss_mib": 1554.84375
+              }
+            }
+          },
+          "runner_seconds": 10.931
+        },
+        {
+          "variant": "thin-16",
+          "route": "claude",
+          "profile": "local",
+          "repeat": 1,
+          "timing": {
+            "cold": {
+              "first_body_ms": 5731.1,
+              "complete_ms": 6543.9,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 138.7,
+              "complete_ms": 947.8,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1814.63,
+            "prefix": 2895.84,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1863
+          },
+          "concurro_helpers": {
+            "handshake": 1339.14,
+            "prefix": 2212.02,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1698
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 34.9,
+                "rss_mib": 8.53125
+              },
+              "worker": {
+                "cpu_pct": 29.4,
+                "rss_mib": 217.84375
+              },
+              "helper": {
+                "cpu_pct": 86.0,
+                "rss_mib": 1370.1875
+              },
+              "total": {
+                "cpu_pct": 123.3,
+                "rss_mib": 1595.828125
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 35.4,
+                "rss_mib": 8.578125
+              },
+              "worker": {
+                "cpu_pct": 29.2,
+                "rss_mib": 217.171875
+              },
+              "helper": {
+                "cpu_pct": 87.4,
+                "rss_mib": 1301.515625
+              },
+              "total": {
+                "cpu_pct": 120.1,
+                "rss_mib": 1526.609375
+              }
+            }
+          },
+          "runner_seconds": 10.19
+        },
+        {
+          "variant": "default-1",
+          "route": "claude",
+          "profile": "local",
+          "repeat": 1,
+          "timing": {
+            "cold": {
+              "first_body_ms": 5299.6,
+              "complete_ms": 6117.1,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 140.9,
+              "complete_ms": 962.3,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1804.34,
+            "prefix": 2565.87,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1888
+          },
+          "concurro_helpers": {
+            "handshake": 1317.73,
+            "prefix": 1893.42,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1720
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 34.9,
+                "rss_mib": 7.71875
+              },
+              "worker": {
+                "cpu_pct": 30.9,
+                "rss_mib": 215.6875
+              },
+              "helper": {
+                "cpu_pct": 86.1,
+                "rss_mib": 1325.59375
+              },
+              "total": {
+                "cpu_pct": 125.4,
+                "rss_mib": 1548.359375
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 34.2,
+                "rss_mib": 8.171875
+              },
+              "worker": {
+                "cpu_pct": 30.3,
+                "rss_mib": 215.78125
+              },
+              "helper": {
+                "cpu_pct": 87.8,
+                "rss_mib": 1254.90625
+              },
+              "total": {
+                "cpu_pct": 119.3,
+                "rss_mib": 1477.84375
+              }
+            }
+          },
+          "runner_seconds": 9.714
+        },
+        {
+          "variant": "thin-1",
+          "route": "claude",
+          "profile": "local",
+          "repeat": 1,
+          "timing": {
+            "cold": {
+              "first_body_ms": 5277.6,
+              "complete_ms": 6095.2,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 138.6,
+              "complete_ms": 950.0,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1796.97,
+            "prefix": 2568.94,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1863
+          },
+          "concurro_helpers": {
+            "handshake": 1319.41,
+            "prefix": 1895.65,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1704
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 38.4,
+                "rss_mib": 8.078125
+              },
+              "worker": {
+                "cpu_pct": 26.9,
+                "rss_mib": 215.78125
+              },
+              "helper": {
+                "cpu_pct": 90.3,
+                "rss_mib": 1399.5625
+              },
+              "total": {
+                "cpu_pct": 125.69999999999999,
+                "rss_mib": 1622.796875
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 37.4,
+                "rss_mib": 7.859375
+              },
+              "worker": {
+                "cpu_pct": 26.4,
+                "rss_mib": 215.625
+              },
+              "helper": {
+                "cpu_pct": 90.3,
+                "rss_mib": 1331.375
+              },
+              "total": {
+                "cpu_pct": 125.0,
+                "rss_mib": 1554.390625
+              }
+            }
+          },
+          "runner_seconds": 9.633
+        },
+        {
+          "variant": "accepted-v3",
+          "route": "codex",
+          "profile": "local",
+          "repeat": 1,
+          "timing": {
+            "total_ms": 5041.5
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "0c23a1c974c17d42d632cd0c3e308e326c7cc21972ef3828da6d634a8a2fd88a",
+            "b6a63a520acdf38b3d039fb447cc5b6e160d4839317f428606ac9569a0042349"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1736.88,
+            "prefix": 2545.38,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 273
+          },
+          "concurro_helpers": {
+            "handshake": 1332.83,
+            "prefix": 1875.2,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 258
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 31.8,
+                "rss_mib": 8.5
+              },
+              "worker": {
+                "cpu_pct": 28.0,
+                "rss_mib": 213.96875
+              },
+              "helper": {
+                "cpu_pct": 85.8,
+                "rss_mib": 1377.59375
+              },
+              "total": {
+                "cpu_pct": 120.4,
+                "rss_mib": 1599.859375
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 31.2,
+                "rss_mib": 8.140625
+              },
+              "worker": {
+                "cpu_pct": 27.6,
+                "rss_mib": 216.15625
+              },
+              "helper": {
+                "cpu_pct": 89.0,
+                "rss_mib": 1310.546875
+              },
+              "total": {
+                "cpu_pct": 118.8,
+                "rss_mib": 1534.625
+              }
+            }
+          },
+          "runner_seconds": 6.969
+        },
+        {
+          "variant": "default-16",
+          "route": "codex",
+          "profile": "local",
+          "repeat": 1,
+          "timing": {
+            "total_ms": 5055.5
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "9d6d113e2766d801347a2353fd98724ac256645e41b08815a97db78ce616e86c",
+            "7ac23ff1b1ef6ab1ef1c687b01d59f39c2fca6d3dca6444520998aca3a2b1807"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1739.25,
+            "prefix": 2598.05,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 259
+          },
+          "concurro_helpers": {
+            "handshake": 1329.04,
+            "prefix": 1913.29,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 247
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 30.4,
+                "rss_mib": 8.625
+              },
+              "worker": {
+                "cpu_pct": 26.7,
+                "rss_mib": 214.375
+              },
+              "helper": {
+                "cpu_pct": 88.8,
+                "rss_mib": 1377.390625
+              },
+              "total": {
+                "cpu_pct": 117.4,
+                "rss_mib": 1600.15625
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 30.0,
+                "rss_mib": 8.140625
+              },
+              "worker": {
+                "cpu_pct": 25.6,
+                "rss_mib": 214.203125
+              },
+              "helper": {
+                "cpu_pct": 92.0,
+                "rss_mib": 1310.46875
+              },
+              "total": {
+                "cpu_pct": 117.0,
+                "rss_mib": 1532.546875
+              }
+            }
+          },
+          "runner_seconds": 6.966
+        },
+        {
+          "variant": "thin-16",
+          "route": "codex",
+          "profile": "local",
+          "repeat": 1,
+          "timing": {
+            "total_ms": 4996.6
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "3c17807152b03967c8c3fab47d5018b107843db9e8fc3ac94c680f2e742e42a2",
+            "f020b92c67a915b1f2e11538feb96fe3bd4fd70f46ad56e2f01257b91a5592cb"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1721.64,
+            "prefix": 2582,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 262
+          },
+          "concurro_helpers": {
+            "handshake": 1321.95,
+            "prefix": 1895.41,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 250
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 26.2,
+                "rss_mib": 8.484375
+              },
+              "worker": {
+                "cpu_pct": 22.6,
+                "rss_mib": 214.46875
+              },
+              "helper": {
+                "cpu_pct": 90.8,
+                "rss_mib": 1377.90625
+              },
+              "total": {
+                "cpu_pct": 114.7,
+                "rss_mib": 1600.71875
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 25.6,
+                "rss_mib": 8.25
+              },
+              "worker": {
+                "cpu_pct": 22.4,
+                "rss_mib": 214.09375
+              },
+              "helper": {
+                "cpu_pct": 90.9,
+                "rss_mib": 1310.46875
+              },
+              "total": {
+                "cpu_pct": 104.1,
+                "rss_mib": 1532.5625
+              }
+            }
+          },
+          "runner_seconds": 6.979
+        },
+        {
+          "variant": "default-1",
+          "route": "codex",
+          "profile": "local",
+          "repeat": 1,
+          "timing": {
+            "total_ms": 4988.7
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "93a90409aa2a08fac079f217af9848c05fdf0fdbe5c6a9364497d1c22f11d707",
+            "c11b3f4faac2d40998575eb6e99fe34fc8d5e6d3f4674bf3a2a98cd59453b8ae"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1729.93,
+            "prefix": 2557.25,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 264
+          },
+          "concurro_helpers": {
+            "handshake": 1329.61,
+            "prefix": 1888.88,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 252
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 26.9,
+                "rss_mib": 8.28125
+              },
+              "worker": {
+                "cpu_pct": 19.1,
+                "rss_mib": 213.53125
+              },
+              "helper": {
+                "cpu_pct": 86.8,
+                "rss_mib": 1381.0
+              },
+              "total": {
+                "cpu_pct": 118.4,
+                "rss_mib": 1602.453125
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 26.1,
+                "rss_mib": 7.78125
+              },
+              "worker": {
+                "cpu_pct": 18.4,
+                "rss_mib": 213.703125
+              },
+              "helper": {
+                "cpu_pct": 87.0,
+                "rss_mib": 1313.109375
+              },
+              "total": {
+                "cpu_pct": 107.6,
+                "rss_mib": 1534.171875
+              }
+            }
+          },
+          "runner_seconds": 6.944
+        },
+        {
+          "variant": "thin-1",
+          "route": "codex",
+          "profile": "local",
+          "repeat": 1,
+          "timing": {
+            "total_ms": 4926.8
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "33479e18bce2fa28ad1204fbceeb7e764a2197afe9ba1c894841069c7fe2130a",
+            "eb357efbefc5e87b45227d12cc4ae4f412fe5aa1dc2788ae8dec0e0682f89ba5"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1706.02,
+            "prefix": 2535.92,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 262
+          },
+          "concurro_helpers": {
+            "handshake": 1308.59,
+            "prefix": 1872.15,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 251
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 26.2,
+                "rss_mib": 8.359375
+              },
+              "worker": {
+                "cpu_pct": 18.7,
+                "rss_mib": 214.0625
+              },
+              "helper": {
+                "cpu_pct": 83.8,
+                "rss_mib": 1385.25
+              },
+              "total": {
+                "cpu_pct": 116.6,
+                "rss_mib": 1607.234375
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 25.5,
+                "rss_mib": 7.859375
+              },
+              "worker": {
+                "cpu_pct": 18.1,
+                "rss_mib": 214.21875
+              },
+              "helper": {
+                "cpu_pct": 86.6,
+                "rss_mib": 1119.625
+              },
+              "total": {
+                "cpu_pct": 103.5,
+                "rss_mib": 1341.03125
+              }
+            }
+          },
+          "runner_seconds": 6.866
+        },
+        {
+          "variant": "thin-1",
+          "route": "codex",
+          "profile": "local",
+          "repeat": 2,
+          "timing": {
+            "total_ms": 5011.1
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "c93753f7ae32e5e9e610139c7d7b1a61103b7898455d7168503b0519d39ef7e2",
+            "a98509d1b5ef831ba34f301e18a3d338801f587ce8d598e2201e12c29c4879bb"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1735.08,
+            "prefix": 2571.34,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 264
+          },
+          "concurro_helpers": {
+            "handshake": 1327.33,
+            "prefix": 1908.61,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 252
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 35.7,
+                "rss_mib": 7.8125
+              },
+              "worker": {
+                "cpu_pct": 25.2,
+                "rss_mib": 213.40625
+              },
+              "helper": {
+                "cpu_pct": 91.3,
+                "rss_mib": 1380.90625
+              },
+              "total": {
+                "cpu_pct": 120.60000000000001,
+                "rss_mib": 1601.859375
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 34.9,
+                "rss_mib": 7.921875
+              },
+              "worker": {
+                "cpu_pct": 24.6,
+                "rss_mib": 213.671875
+              },
+              "helper": {
+                "cpu_pct": 86.6,
+                "rss_mib": 1313.09375
+              },
+              "total": {
+                "cpu_pct": 123.2,
+                "rss_mib": 1534.1875
+              }
+            }
+          },
+          "runner_seconds": 6.936
+        },
+        {
+          "variant": "default-1",
+          "route": "codex",
+          "profile": "local",
+          "repeat": 2,
+          "timing": {
+            "total_ms": 4970.1
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "05c64e538474d0b989c131976b15833e327dd47192dbf786552087c2335d78e7",
+            "ba4399229c1fdf516ab450046eee10217821c8689a45ab5014d6c6f3aded8917"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1721.81,
+            "prefix": 2550.55,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 263
+          },
+          "concurro_helpers": {
+            "handshake": 1318.13,
+            "prefix": 1878.71,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 250
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 35.1,
+                "rss_mib": 7.75
+              },
+              "worker": {
+                "cpu_pct": 24.6,
+                "rss_mib": 214.03125
+              },
+              "helper": {
+                "cpu_pct": 89.9,
+                "rss_mib": 1381.28125
+              },
+              "total": {
+                "cpu_pct": 121.0,
+                "rss_mib": 1602.625
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 34.4,
+                "rss_mib": 7.78125
+              },
+              "worker": {
+                "cpu_pct": 24.3,
+                "rss_mib": 213.59375
+              },
+              "helper": {
+                "cpu_pct": 88.6,
+                "rss_mib": 1312.484375
+              },
+              "total": {
+                "cpu_pct": 121.6,
+                "rss_mib": 1533.4375
+              }
+            }
+          },
+          "runner_seconds": 6.906
+        },
+        {
+          "variant": "thin-16",
+          "route": "codex",
+          "profile": "local",
+          "repeat": 2,
+          "timing": {
+            "total_ms": 4947.3
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "80cf0b02d193fdbfef95bcfe0cf938e53fc17e10ddabe567f5c311820cb019c2",
+            "85469352fbf9d1a8c360eca9561a5d028763f63691dab85850dccc38eb62756e"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1716.76,
+            "prefix": 2528.71,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 261
+          },
+          "concurro_helpers": {
+            "handshake": 1312.25,
+            "prefix": 1862.29,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 249
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 27.4,
+                "rss_mib": 8.78125
+              },
+              "worker": {
+                "cpu_pct": 19.4,
+                "rss_mib": 214.34375
+              },
+              "helper": {
+                "cpu_pct": 86.2,
+                "rss_mib": 1385.28125
+              },
+              "total": {
+                "cpu_pct": 116.5,
+                "rss_mib": 1608.09375
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 26.6,
+                "rss_mib": 8.34375
+              },
+              "worker": {
+                "cpu_pct": 18.8,
+                "rss_mib": 214.40625
+              },
+              "helper": {
+                "cpu_pct": 84.3,
+                "rss_mib": 1343.6875
+              },
+              "total": {
+                "cpu_pct": 103.7,
+                "rss_mib": 1565.921875
+              }
+            }
+          },
+          "runner_seconds": 6.903
+        },
+        {
+          "variant": "default-16",
+          "route": "codex",
+          "profile": "local",
+          "repeat": 2,
+          "timing": {
+            "total_ms": 4969.2
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "e0df0216cd37b8a4acdc3cc3ca1be37953928455b268452f802044102e6d5e84",
+            "87992ddc24f40e7d0462a94f6dca73772513619a13874dd9ccc5e0e36e943143"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1727.36,
+            "prefix": 2546.92,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 258
+          },
+          "concurro_helpers": {
+            "handshake": 1325.81,
+            "prefix": 1882,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 246
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 26.8,
+                "rss_mib": 8.734375
+              },
+              "worker": {
+                "cpu_pct": 18.7,
+                "rss_mib": 213.875
+              },
+              "helper": {
+                "cpu_pct": 86.5,
+                "rss_mib": 1381.015625
+              },
+              "total": {
+                "cpu_pct": 116.3,
+                "rss_mib": 1603.359375
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 26.0,
+                "rss_mib": 8.1875
+              },
+              "worker": {
+                "cpu_pct": 18.3,
+                "rss_mib": 214.15625
+              },
+              "helper": {
+                "cpu_pct": 87.0,
+                "rss_mib": 1313.125
+              },
+              "total": {
+                "cpu_pct": 104.9,
+                "rss_mib": 1535.109375
+              }
+            }
+          },
+          "runner_seconds": 6.913
+        },
+        {
+          "variant": "accepted-v3",
+          "route": "codex",
+          "profile": "local",
+          "repeat": 2,
+          "timing": {
+            "total_ms": 4972.8
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "8a536fb223872dbf378777f3007402749bc672ff7832efdfa9dba7673c9c43be",
+            "633ff0d733a69066da4a571cc5b025781565113e30441d979514f976d878fc43"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1726.93,
+            "prefix": 2558.22,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 261
+          },
+          "concurro_helpers": {
+            "handshake": 1326.57,
+            "prefix": 1888.34,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 250
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 36.4,
+                "rss_mib": 8.546875
+              },
+              "worker": {
+                "cpu_pct": 25.6,
+                "rss_mib": 214.078125
+              },
+              "helper": {
+                "cpu_pct": 89.3,
+                "rss_mib": 1377.890625
+              },
+              "total": {
+                "cpu_pct": 121.5,
+                "rss_mib": 1600.3125
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 35.7,
+                "rss_mib": 8.203125
+              },
+              "worker": {
+                "cpu_pct": 25.2,
+                "rss_mib": 214.1875
+              },
+              "helper": {
+                "cpu_pct": 88.0,
+                "rss_mib": 1310.453125
+              },
+              "total": {
+                "cpu_pct": 121.9,
+                "rss_mib": 1532.578125
+              }
+            }
+          },
+          "runner_seconds": 6.973
+        },
+        {
+          "variant": "thin-1",
+          "route": "claude",
+          "profile": "local",
+          "repeat": 2,
+          "timing": {
+            "cold": {
+              "first_body_ms": 4799.1,
+              "complete_ms": 5607.5,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 138.7,
+              "complete_ms": 951.1,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1711.71,
+            "prefix": 2572.02,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1773
+          },
+          "concurro_helpers": {
+            "handshake": 1308.5,
+            "prefix": 1897.33,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1692
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 40.3,
+                "rss_mib": 8.078125
+              },
+              "worker": {
+                "cpu_pct": 28.2,
+                "rss_mib": 216.171875
+              },
+              "helper": {
+                "cpu_pct": 88.3,
+                "rss_mib": 1400.1875
+              },
+              "total": {
+                "cpu_pct": 124.9,
+                "rss_mib": 1623.828125
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 39.1,
+                "rss_mib": 7.859375
+              },
+              "worker": {
+                "cpu_pct": 27.1,
+                "rss_mib": 216.296875
+              },
+              "helper": {
+                "cpu_pct": 91.5,
+                "rss_mib": 1331.375
+              },
+              "total": {
+                "cpu_pct": 123.5,
+                "rss_mib": 1554.96875
+              }
+            }
+          },
+          "runner_seconds": 8.286
+        },
+        {
+          "variant": "default-1",
+          "route": "claude",
+          "profile": "local",
+          "repeat": 2,
+          "timing": {
+            "cold": {
+              "first_body_ms": 4823.6,
+              "complete_ms": 5637.4,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 139.3,
+              "complete_ms": 951.4,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1722.96,
+            "prefix": 2576.12,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1781
+          },
+          "concurro_helpers": {
+            "handshake": 1319.32,
+            "prefix": 1901.55,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1696
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 26.5,
+                "rss_mib": 7.875
+              },
+              "worker": {
+                "cpu_pct": 23.5,
+                "rss_mib": 216.1875
+              },
+              "helper": {
+                "cpu_pct": 87.9,
+                "rss_mib": 1397.46875
+              },
+              "total": {
+                "cpu_pct": 114.10000000000001,
+                "rss_mib": 1620.859375
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 25.9,
+                "rss_mib": 8.171875
+              },
+              "worker": {
+                "cpu_pct": 22.5,
+                "rss_mib": 215.734375
+              },
+              "helper": {
+                "cpu_pct": 90.9,
+                "rss_mib": 1329.0
+              },
+              "total": {
+                "cpu_pct": 103.5,
+                "rss_mib": 1551.875
+              }
+            }
+          },
+          "runner_seconds": 8.286
+        },
+        {
+          "variant": "thin-16",
+          "route": "claude",
+          "profile": "local",
+          "repeat": 2,
+          "timing": {
+            "cold": {
+              "first_body_ms": 4785.5,
+              "complete_ms": 5592.2,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 137.7,
+              "complete_ms": 946.8,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1713.16,
+            "prefix": 2563.62,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1770
+          },
+          "concurro_helpers": {
+            "handshake": 1310.93,
+            "prefix": 1893.21,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1687
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 26.2,
+                "rss_mib": 8.734375
+              },
+              "worker": {
+                "cpu_pct": 24.8,
+                "rss_mib": 217.15625
+              },
+              "helper": {
+                "cpu_pct": 89.6,
+                "rss_mib": 1397.59375
+              },
+              "total": {
+                "cpu_pct": 114.1,
+                "rss_mib": 1622.75
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 25.5,
+                "rss_mib": 8.328125
+              },
+              "worker": {
+                "cpu_pct": 24.0,
+                "rss_mib": 216.484375
+              },
+              "helper": {
+                "cpu_pct": 91.7,
+                "rss_mib": 1328.65625
+              },
+              "total": {
+                "cpu_pct": 102.9,
+                "rss_mib": 1552.84375
+              }
+            }
+          },
+          "runner_seconds": 8.389
+        },
+        {
+          "variant": "default-16",
+          "route": "claude",
+          "profile": "local",
+          "repeat": 2,
+          "timing": {
+            "cold": {
+              "first_body_ms": 4790.8,
+              "complete_ms": 5606.7,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 138.2,
+              "complete_ms": 951.3,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1722.34,
+            "prefix": 2575.13,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1785
+          },
+          "concurro_helpers": {
+            "handshake": 1315.73,
+            "prefix": 1894.31,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1701
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 37.4,
+                "rss_mib": 8.640625
+              },
+              "worker": {
+                "cpu_pct": 25.9,
+                "rss_mib": 216.328125
+              },
+              "helper": {
+                "cpu_pct": 89.6,
+                "rss_mib": 1397.53125
+              },
+              "total": {
+                "cpu_pct": 122.1,
+                "rss_mib": 1621.84375
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 36.4,
+                "rss_mib": 8.21875
+              },
+              "worker": {
+                "cpu_pct": 25.7,
+                "rss_mib": 216.1875
+              },
+              "helper": {
+                "cpu_pct": 88.8,
+                "rss_mib": 1328.65625
+              },
+              "total": {
+                "cpu_pct": 123.3,
+                "rss_mib": 1552.359375
+              }
+            }
+          },
+          "runner_seconds": 8.52
+        },
+        {
+          "variant": "accepted-v3",
+          "route": "claude",
+          "profile": "local",
+          "repeat": 2,
+          "timing": {
+            "cold": {
+              "first_body_ms": 4837.1,
+              "complete_ms": 5650.1,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 138.5,
+              "complete_ms": 949.0,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": null,
+          "sponsor_helpers": {
+            "handshake": 1734.11,
+            "prefix": 2592.91,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1780
+          },
+          "concurro_helpers": {
+            "handshake": 1327.84,
+            "prefix": 1914.07,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 1697
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 39.7,
+                "rss_mib": 8.46875
+              },
+              "worker": {
+                "cpu_pct": 27.9,
+                "rss_mib": 216.421875
+              },
+              "helper": {
+                "cpu_pct": 89.8,
+                "rss_mib": 1397.34375
+              },
+              "total": {
+                "cpu_pct": 123.5,
+                "rss_mib": 1621.484375
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 38.7,
+                "rss_mib": 8.25
+              },
+              "worker": {
+                "cpu_pct": 27.4,
+                "rss_mib": 216.328125
+              },
+              "helper": {
+                "cpu_pct": 91.4,
+                "rss_mib": 1329.078125
+              },
+              "total": {
+                "cpu_pct": 126.19999999999999,
+                "rss_mib": 1552.890625
+              }
+            }
+          },
+          "runner_seconds": 8.347
+        }
+      ]
+    },
+    "fast": {
+      "raw_root": "/private/tmp/coptf1",
+      "spread_ms": {
+        "accepted-v3-claude": {
+          "cold_complete_ms": {
+            "min": 36941.4,
+            "median": 37000.2,
+            "max": 37059.0
+          },
+          "warm_complete_ms": {
+            "min": 5087.3,
+            "median": 5087.55,
+            "max": 5087.8
+          }
+        },
+        "accepted-v3-codex": {
+          "total_total_ms": {
+            "min": 33087.9,
+            "median": 33089.4,
+            "max": 33090.9
+          }
+        },
+        "thin-16-claude": {
+          "cold_complete_ms": {
+            "min": 37051.7,
+            "median": 37066.05,
+            "max": 37080.4
+          },
+          "warm_complete_ms": {
+            "min": 5086.1,
+            "median": 5091.3,
+            "max": 5096.5
+          }
+        },
+        "thin-16-codex": {
+          "total_total_ms": {
+            "min": 33084.5,
+            "median": 33104.1,
+            "max": 33123.7
+          }
+        }
+      },
+      "cases": [
+        {
+          "variant": "accepted-v3",
+          "route": "claude",
+          "profile": "fast",
+          "repeat": 1,
+          "timing": {
+            "cold": {
+              "first_body_ms": 32686.6,
+              "complete_ms": 37059.0,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 735.4,
+              "complete_ms": 5087.8,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": {
+            "upload_bytes": 188136355,
+            "download_bytes": 173680665
+          },
+          "sponsor_helpers": {
+            "handshake": 10776.8,
+            "prefix": 20330.2,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 8396
+          },
+          "concurro_helpers": {
+            "handshake": 10332.5,
+            "prefix": 19609.4,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 7052
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 7.9,
+                "rss_mib": 8.765625
+              },
+              "worker": {
+                "cpu_pct": 11.6,
+                "rss_mib": 215.296875
+              },
+              "helper": {
+                "cpu_pct": 89.5,
+                "rss_mib": 1434.609375
+              },
+              "total": {
+                "cpu_pct": 91.0,
+                "rss_mib": 1581.53125
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 7.9,
+                "rss_mib": 8.5
+              },
+              "worker": {
+                "cpu_pct": 12.3,
+                "rss_mib": 215.3125
+              },
+              "helper": {
+                "cpu_pct": 87.4,
+                "rss_mib": 1434.671875
+              },
+              "total": {
+                "cpu_pct": 87.4,
+                "rss_mib": 1526.609375
+              }
+            }
+          },
+          "runner_seconds": 44.278
+        },
+        {
+          "variant": "thin-16",
+          "route": "claude",
+          "profile": "fast",
+          "repeat": 1,
+          "timing": {
+            "cold": {
+              "first_body_ms": 32715.9,
+              "complete_ms": 37080.4,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 734.0,
+              "complete_ms": 5096.5,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": {
+            "upload_bytes": 188141949,
+            "download_bytes": 173681916
+          },
+          "sponsor_helpers": {
+            "handshake": 10793.7,
+            "prefix": 20328.1,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 8387
+          },
+          "concurro_helpers": {
+            "handshake": 10340.7,
+            "prefix": 19606.1,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 7051
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 7.4,
+                "rss_mib": 8.890625
+              },
+              "worker": {
+                "cpu_pct": 13.7,
+                "rss_mib": 215.859375
+              },
+              "helper": {
+                "cpu_pct": 91.5,
+                "rss_mib": 1413.15625
+              },
+              "total": {
+                "cpu_pct": 93.3,
+                "rss_mib": 1637.34375
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 11.1,
+                "rss_mib": 8.65625
+              },
+              "worker": {
+                "cpu_pct": 12.7,
+                "rss_mib": 216.171875
+              },
+              "helper": {
+                "cpu_pct": 91.2,
+                "rss_mib": 1432.09375
+              },
+              "total": {
+                "cpu_pct": 91.2,
+                "rss_mib": 1656.3125
+              }
+            }
+          },
+          "runner_seconds": 44.308
+        },
+        {
+          "variant": "accepted-v3",
+          "route": "codex",
+          "profile": "fast",
+          "repeat": 1,
+          "timing": {
+            "total_ms": 33090.9
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "9df23946d05d1d60bed9a12a9c2534a842fff13a74e51cb1cd8297107d57fcef",
+            "d38f9f984d00bd94e784870799f4bc5152cadc63070a213a3c0c973cdaba5621"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": {
+            "upload_bytes": 182066041,
+            "download_bytes": 142752844
+          },
+          "sponsor_helpers": {
+            "handshake": 10728.2,
+            "prefix": 19954,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 1205
+          },
+          "concurro_helpers": {
+            "handshake": 10269.2,
+            "prefix": 19243.3,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 1015
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 7.6,
+                "rss_mib": 9.0
+              },
+              "worker": {
+                "cpu_pct": 11.4,
+                "rss_mib": 213.28125
+              },
+              "helper": {
+                "cpu_pct": 90.6,
+                "rss_mib": 1410.25
+              },
+              "total": {
+                "cpu_pct": 92.1,
+                "rss_mib": 1555.46875
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 7.7,
+                "rss_mib": 8.21875
+              },
+              "worker": {
+                "cpu_pct": 12.3,
+                "rss_mib": 213.40625
+              },
+              "helper": {
+                "cpu_pct": 84.3,
+                "rss_mib": 1410.34375
+              },
+              "total": {
+                "cpu_pct": 84.3,
+                "rss_mib": 1554.9375
+              }
+            }
+          },
+          "runner_seconds": 35.548
+        },
+        {
+          "variant": "thin-16",
+          "route": "codex",
+          "profile": "fast",
+          "repeat": 1,
+          "timing": {
+            "total_ms": 33084.5
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "40a3429ea02e70ed828387ba42fb175a8148dfc1402e67897df494a4a149802e",
+            "8a6adc0fa6d122c326b7d3495a99e87ff51c539e355bb9973d35758149c683d6"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": {
+            "upload_bytes": 182068885,
+            "download_bytes": 142752393
+          },
+          "sponsor_helpers": {
+            "handshake": 10789.5,
+            "prefix": 19937.8,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 1204
+          },
+          "concurro_helpers": {
+            "handshake": 10340.2,
+            "prefix": 19229.3,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 1016
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 7.4,
+                "rss_mib": 9.1875
+              },
+              "worker": {
+                "cpu_pct": 10.8,
+                "rss_mib": 213.40625
+              },
+              "helper": {
+                "cpu_pct": 90.1,
+                "rss_mib": 1410.34375
+              },
+              "total": {
+                "cpu_pct": 91.39999999999999,
+                "rss_mib": 1523.84375
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 7.6,
+                "rss_mib": 8.578125
+              },
+              "worker": {
+                "cpu_pct": 10.3,
+                "rss_mib": 213.609375
+              },
+              "helper": {
+                "cpu_pct": 82.5,
+                "rss_mib": 1410.40625
+              },
+              "total": {
+                "cpu_pct": 82.6,
+                "rss_mib": 1455.578125
+              }
+            }
+          },
+          "runner_seconds": 35.541
+        },
+        {
+          "variant": "thin-16",
+          "route": "codex",
+          "profile": "fast",
+          "repeat": 2,
+          "timing": {
+            "total_ms": 33123.7
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "aae894f9ff5db9987985630fe1c399ab556358b1ae5a0003d53b29cf8cb1b693",
+            "0e6a3009a50c64f5ceb8b82d04581280121b8db28a903cb0ef9edfcebd27e91d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": {
+            "upload_bytes": 182068301,
+            "download_bytes": 142752459
+          },
+          "sponsor_helpers": {
+            "handshake": 10794.7,
+            "prefix": 19956.2,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 1208
+          },
+          "concurro_helpers": {
+            "handshake": 10350.4,
+            "prefix": 19241.6,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 1017
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 7.5,
+                "rss_mib": 9.34375
+              },
+              "worker": {
+                "cpu_pct": 11.6,
+                "rss_mib": 213.515625
+              },
+              "helper": {
+                "cpu_pct": 91.5,
+                "rss_mib": 1410.34375
+              },
+              "total": {
+                "cpu_pct": 93.0,
+                "rss_mib": 1556.03125
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 7.5,
+                "rss_mib": 8.796875
+              },
+              "worker": {
+                "cpu_pct": 11.7,
+                "rss_mib": 213.5625
+              },
+              "helper": {
+                "cpu_pct": 81.6,
+                "rss_mib": 1410.359375
+              },
+              "total": {
+                "cpu_pct": 81.69999999999999,
+                "rss_mib": 1555.671875
+              }
+            }
+          },
+          "runner_seconds": 35.478
+        },
+        {
+          "variant": "accepted-v3",
+          "route": "codex",
+          "profile": "fast",
+          "repeat": 2,
+          "timing": {
+            "total_ms": 33087.9
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "0bd74bb0a741829a44d323cd85710bd644ba353e398dbbef082b9988173fd5aa",
+            "f5ef67663f09536e600b84fe36cb5f49a5b6d91451440e03edf4ef24a2cade1f"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3,
+          "directional_bytes": {
+            "upload_bytes": 182068696,
+            "download_bytes": 142752753
+          },
+          "sponsor_helpers": {
+            "handshake": 10785.5,
+            "prefix": 19939.9,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 1206
+          },
+          "concurro_helpers": {
+            "handshake": 10340.7,
+            "prefix": 19229.3,
+            "proof_count": 4,
+            "proof_elapsed_ms_sum": 1017
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 7.6,
+                "rss_mib": 8.4375
+              },
+              "worker": {
+                "cpu_pct": 11.9,
+                "rss_mib": 213.390625
+              },
+              "helper": {
+                "cpu_pct": 88.9,
+                "rss_mib": 1410.625
+              },
+              "total": {
+                "cpu_pct": 90.5,
+                "rss_mib": 1470.46875
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 8.4,
+                "rss_mib": 8.546875
+              },
+              "worker": {
+                "cpu_pct": 12.4,
+                "rss_mib": 213.375
+              },
+              "helper": {
+                "cpu_pct": 81.6,
+                "rss_mib": 1410.46875
+              },
+              "total": {
+                "cpu_pct": 81.69999999999999,
+                "rss_mib": 1455.25
+              }
+            }
+          },
+          "runner_seconds": 35.562
+        },
+        {
+          "variant": "thin-16",
+          "route": "claude",
+          "profile": "fast",
+          "repeat": 2,
+          "timing": {
+            "cold": {
+              "first_body_ms": 32695.5,
+              "complete_ms": 37051.7,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 735.9,
+              "complete_ms": 5086.1,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": {
+            "upload_bytes": 188138466,
+            "download_bytes": 173681143
+          },
+          "sponsor_helpers": {
+            "handshake": 10802.9,
+            "prefix": 20312.2,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 8368
+          },
+          "concurro_helpers": {
+            "handshake": 10344,
+            "prefix": 19597,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 7034
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 7.6,
+                "rss_mib": 8.90625
+              },
+              "worker": {
+                "cpu_pct": 10.5,
+                "rss_mib": 215.265625
+              },
+              "helper": {
+                "cpu_pct": 91.6,
+                "rss_mib": 1401.890625
+              },
+              "total": {
+                "cpu_pct": 92.89999999999999,
+                "rss_mib": 1549.03125
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 7.6,
+                "rss_mib": 8.8125
+              },
+              "worker": {
+                "cpu_pct": 10.3,
+                "rss_mib": 215.375
+              },
+              "helper": {
+                "cpu_pct": 83.4,
+                "rss_mib": 1430.421875
+              },
+              "total": {
+                "cpu_pct": 83.4,
+                "rss_mib": 1577.640625
+              }
+            }
+          },
+          "runner_seconds": 44.236
+        },
+        {
+          "variant": "accepted-v3",
+          "route": "claude",
+          "profile": "fast",
+          "repeat": 2,
+          "timing": {
+            "cold": {
+              "first_body_ms": 32581.3,
+              "complete_ms": 36941.4,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 734.0,
+              "complete_ms": 5087.3,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2,
+          "directional_bytes": {
+            "upload_bytes": 188139256,
+            "download_bytes": 173688289
+          },
+          "sponsor_helpers": {
+            "handshake": 10780.5,
+            "prefix": 20218.4,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 8384
+          },
+          "concurro_helpers": {
+            "handshake": 10339.2,
+            "prefix": 19498.9,
+            "proof_count": 28,
+            "proof_elapsed_ms_sum": 7047
+          },
+          "resources": {
+            "sponsor": {
+              "parent": {
+                "cpu_pct": 7.9,
+                "rss_mib": 8.9375
+              },
+              "worker": {
+                "cpu_pct": 14.5,
+                "rss_mib": 215.15625
+              },
+              "helper": {
+                "cpu_pct": 88.6,
+                "rss_mib": 1430.171875
+              },
+              "total": {
+                "cpu_pct": 90.5,
+                "rss_mib": 1489.828125
+              }
+            },
+            "concurro": {
+              "parent": {
+                "cpu_pct": 8.6,
+                "rss_mib": 8.375
+              },
+              "worker": {
+                "cpu_pct": 13.3,
+                "rss_mib": 215.34375
+              },
+              "helper": {
+                "cpu_pct": 89.6,
+                "rss_mib": 1430.671875
+              },
+              "total": {
+                "cpu_pct": 89.6,
+                "rss_mib": 1475.75
+              }
+            }
+          },
+          "runner_seconds": 44.167
+        }
+      ]
+    }
+  },
+  "dependency_pass": {
+    "resolved_packages_before_after": [
+      325,
+      325
+    ],
+    "package_ids_equal": true,
+    "effective_features_equal_excluding_default_alias": true,
+    "lockfile_unchanged": true,
+    "tests": "109 passed, 2 skipped",
+    "representative_fixture": {
+      "results_root": "/private/tmp/copt-deps-verify2",
+      "failed_sandbox_attempt": "/private/tmp/copt-deps-verify",
+      "packages": {
+        "sponsor": {
+          "path": "/private/tmp/copt-deps-packages/sponsor",
+          "manifest_sha256": "87a8263c39fcb4b25240e61e8fddd1b77f0a6ead2aae366021119309be13a9f2"
+        },
+        "concurro": {
+          "path": "/private/tmp/copt-deps-packages/concurro",
+          "manifest_sha256": "f31dab499aaf75927743759830e149068cf1938b4f45f5cf6a9767166942be53"
+        }
+      },
+      "cases": [
+        {
+          "route": "claude",
+          "timing": {
+            "cold": {
+              "first_body_ms": 6095.7,
+              "complete_ms": 6917.1,
+              "response_bytes": 834
+            },
+            "warm": {
+              "first_body_ms": 139.9,
+              "complete_ms": 959.3,
+              "response_bytes": 834
+            }
+          },
+          "request_sha256": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+          "prompt_sha256": [
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+            "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3
+            }
+          ],
+          "codex_request_bytes": null,
+          "proof_records": 28,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 2
+        },
+        {
+          "route": "codex",
+          "timing": {
+            "total_ms": 5044.1
+          },
+          "request_sha256": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+          "prompt_sha256": [
+            "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234",
+            "56662648dbe12463a6b2a21985fd69f7366de3db55bed9033439528fd92df0ed",
+            "3516df15a1d701eb6f08377cb8d19031ac071749893b69b4025685b33ae077ea"
+          ],
+          "usage_values": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            },
+            {
+              "input_tokens": 2,
+              "output_tokens": 3,
+              "total_tokens": 5
+            }
+          ],
+          "codex_request_bytes": [
+            78,
+            172,
+            253
+          ],
+          "proof_records": 4,
+          "bootstrap_count": 1,
+          "provider_connections": 1,
+          "response_count": 3
+        }
+      ]
+    }
+  },
+  "compiler_input_audit": {
+    "original_build_manifest_sha256": "cac0fd5c1f79775f9d07bf260de0a93de57d4fb63ef1cb6d6fd13cfb0d141669",
+    "original_recorded_source": "800a1d3ca94cb797ad4980ae54d2154968994c9d",
+    "original_recorded_worktree_diff": "not captured by original runner; session baseline was clean before this pass",
+    "baseline_cargo_toml_sha256": "f1348a08e0f3e23df11fe23cdb4aa342b8f00d3090ae21d1b03df7541e7a583d",
+    "baseline_cargo_lock_sha256": "f742d573005ff056576d1b4b3c1b0975e8df1d2b60af177cb6b9dbf63c484f40",
+    "post_dependency_manifest_sha256": {
+      "Cargo.toml": "b1477589770e39574703a240e752cc581413fbe01acdd2b999dd1b2d75aecb50",
+      "Cargo.lock": "f742d573005ff056576d1b4b3c1b0975e8df1d2b60af177cb6b9dbf63c484f40",
+      "crates/dev/Cargo.toml": "96976c1b709c7f3501857f82deaf3cfd1a6830a61b1d4c6f88b409651079e78a",
+      "crates/native/Cargo.toml": "b63637963062b1034eb49a06517f96f3543c7350b3592e9887e7e982fb8e5259",
+      "crates/native-transport/Cargo.toml": "96fad71afcf23c844fbafbdcf62752942f0eb79df82b60d1aa572c8c995eb808",
+      "crates/protocol/Cargo.toml": "5528b2e6138bb68b5a1dbcb51583b37185cbe328174e819cae5bfeefe5974e1e",
+      "crates/provider-protocol/Cargo.toml": "34a60b3d348f105087ff31fb0194572cd1d88da80403ea704d40565e53ef347c",
+      "crates/relay/Cargo.toml": "746a55fcce69af71017c372b78117dd93f9c47beb747a96dbbb64ea3b4eeba4b",
+      "crates/tls13/Cargo.toml": "48e43deb0b3d5766c48fcc77ec41d4799573e81b4e49bf3cb897a88ddc126010",
+      "crates/verifier/Cargo.toml": "40f1ee16ef81cf2bf3258f6c6dfa8c91f4664366354a2e117a943fa912645e60"
+    }
+  },
+  "qualification": {
+    "reprojected_existing_cases": 28,
+    "paired_h2_h3_prefix_and_usage_checked": true,
+    "codex_parent_response_chain_checked": true,
+    "expected_proofs": {
+      "claude": 28,
+      "codex": 4
+    },
+    "first_request_sha256": {
+      "claude": "4c033c531e9d68fb6be3ea35789b62f5483ae056ae059c054215fe90af67242d",
+      "codex": "6dfe90ac057753a1e9dcdb4c52bf8ef5164aaa890c006d10fc22542283686234"
+    },
+    "first_request_equal_across_variants": true,
+    "codex_request_bytes_equal_across_variants": true,
+    "later_codex_prompt_digests_are_session_specific": true,
+    "usage_equal_across_variants": true
+  }
+}
