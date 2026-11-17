@@ -22,6 +22,7 @@ git -C "$build_dir/DiStefano" checkout --detach 2ffc80643c9c92f3fd9238d681643a2a
 git -C "$build_dir/DiStefano" submodule update --init --recursive
 git -C "$build_dir/DiStefano" apply "$build_dir/input/DiStefano/tracked.patch"
 cp -a "$build_dir/input/DiStefano/added/." "$build_dir/DiStefano/"
+patch -s -p1 -d "$build_dir/DiStefano" < "$relay_root/native/patches/DiStefano-Krrw-prepared.patch"
 git -C "$build_dir/DiStefano" apply "$relay_root/native/linux-amd64-patches/DiStefano-CMakeLists.patch"
 git -C "$build_dir/DiStefano" apply "$relay_root/native/linux-amd64-patches/emp-base.patch"
 git -C "$build_dir/DiStefano" apply "$relay_root/native/linux-amd64-patches/emp-block-stdint.patch"
@@ -59,7 +60,7 @@ cmake -S /work/DiStefano/src -B /work/DiStefano/build-linux \
     -DHANDOFF_LIBOTE2_DEPS_BUILD=/work/MP-SPDZ/deps/libOTe2/out/build/linux-clang19 \
     -DHANDOFF_LIBOTE2_INSTALL_INCLUDE=/work/MP-SPDZ/deps/libOTe2/out/install/linux/include
 cmake --build /work/DiStefano/build-linux --parallel 4 \
-    --target HandoffKeyShare HandoffPartyKrrw HandoffPrefix
+    --target HandoffKeyShare HandoffPartyKrrw HandoffPartyKrrwPrepared HandoffPrefix
 cmake -S /work/MP-SPDZ/deps/SimplestOT_C/ref10 \
     -B /work/MP-SPDZ/deps/SimplestOT_C/ref10-linux -DCMAKE_C_COMPILER=clang-19
 cmake --build /work/MP-SPDZ/deps/SimplestOT_C/ref10-linux --parallel 4

@@ -234,11 +234,12 @@ async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
         serde_json::from_value(json!({"length": credential.len(), "account": options.account}))?,
     )
     .await?;
+    let (mut keyshare, offer) = KeyShare::start(&options.runtime).await?;
+    let (joint, session) = keyshare.joint(peer, options.role, offer).await?;
+    let prepared = prefix::prepare(peer, tunnel, options, credential.len(), session).await?;
     let mut provider = TcpStream::connect((options.provider_host.as_str(), options.provider_port))
         .await
         .context("connect fixture provider")?;
-    let (mut keyshare, offer) = KeyShare::start(&options.runtime).await?;
-    let (joint, session) = keyshare.joint(peer, options.role, offer).await?;
     let hello = handshake::client_hello(options.profile, options.hostname(), &joint)?;
     handshake::validate_client_hello(options.profile, &hello.wire, options.hostname(), &joint)?;
     let wire = handshake::plaintext_record(22, &hello.wire)?;
@@ -347,7 +348,8 @@ async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
         handshake_public: &public,
         master_mask,
     };
-    let prefix = prefix::sponsor(peer, tunnel, &mut provider, credential, &context).await?;
+    let prefix =
+        prefix::sponsor(peer, tunnel, &mut provider, credential, &context, prepared).await?;
     Ok((
         result(options, h2, h3, session, &public, &prefix.public, false),
         Application::Sponsor {
@@ -379,6 +381,14 @@ async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
     );
     let (mut keyshare, offer) = KeyShare::start(&options.runtime).await?;
     let (joint, session) = keyshare.joint(peer, options.role, offer).await?;
+    let prepared = prefix::prepare(
+        peer,
+        tunnel,
+        options,
+        shape.metadata["length"].as_u64().unwrap() as usize,
+        session,
+    )
+    .await?;
     let client = peer.receive("client_hello").await?.data;
     let hello_session =
         handshake::validate_client_hello(options.profile, &client, options.hostname(), &joint)?;
@@ -468,6 +478,7 @@ async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
         tunnel,
         shape.metadata["length"].as_u64().unwrap() as usize,
         &context,
+        prepared,
     )
     .await?;
     Ok((

@@ -1,15 +1,18 @@
 //! Claude HTTP/2 turns over the shared proved TLS record connection.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use concurro_relay_native_transport::tunnel::Tunnel;
 use concurro_relay_provider_protocol::claude::{
-    self, IndexedConnection, ResponseEvent, ResponseReader,
+    self, IndexedConnection, ResponseEvent, ResponseReader, Template,
 };
 use serde_json::{Map, Value, json};
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     sync::{mpsc, oneshot},
 };
 
@@ -18,6 +21,10 @@ use crate::{
     bootstrap::{Application, Session},
     helpers::{self, Runtime},
 };
+
+mod threads;
+use threads::ThreadState;
+pub use threads::beta_template;
 
 /// One Claude response as it is being authenticated and forwarded.
 struct ResponseState {
@@ -29,6 +36,8 @@ struct ResponseState {
     body: Vec<u8>,
     /// Terminal H2 stream marker was received.
     done: bool,
+    /// Time from request start to the first authenticated response DATA.
+    first_data_seconds: Option<f64>,
 }
 
 impl ResponseState {
@@ -39,6 +48,7 @@ impl ResponseState {
             headers: Vec::new(),
             body: Vec::new(),
             done: false,
+            first_data_seconds: None,
         }
     }
 }
@@ -49,6 +59,7 @@ async fn deliver<C: AsyncRead + AsyncWrite + Unpin>(
     link: &mut Forwarded<'_, C>,
     reply: &mpsc::Sender<Result<ClaudeEvent>>,
     response: &mut ResponseState,
+    started: Instant,
 ) -> Result<()> {
     for event in events {
         match event {
@@ -64,23 +75,103 @@ async fn deliver<C: AsyncRead + AsyncWrite + Unpin>(
                     .unwrap_or_else(|| "application/octet-stream".to_owned());
                 response.status = Some(status);
                 response.headers = headers;
-                reply
-                    .send(Ok(ClaudeEvent::Start(status, content_type)))
-                    .await
-                    .context("local Claude listener closed")?;
+                if status == 200 {
+                    reply
+                        .send(Ok(ClaudeEvent::Start(status, content_type)))
+                        .await
+                        .context("local Claude listener closed")?;
+                }
             }
             ResponseEvent::Data(bytes) => {
+                response
+                    .first_data_seconds
+                    .get_or_insert_with(|| started.elapsed().as_secs_f64());
                 response.body.extend_from_slice(&bytes);
-                reply
-                    .send(Ok(ClaudeEvent::Data(bytes)))
-                    .await
-                    .context("local Claude listener closed")?;
+                if response.status == Some(200) {
+                    reply
+                        .send(Ok(ClaudeEvent::Data(bytes)))
+                        .await
+                        .context("local Claude listener closed")?;
+                }
             }
             ResponseEvent::Send(wire) => link.send(&wire).await?,
             ResponseEvent::Done => response.done = true,
         }
     }
     Ok(())
+}
+
+/// Append a sanitized turn event before another provider action can fail.
+async fn journal(runtime: &Runtime, event: &Value) -> Result<()> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(runtime.output.join("claude-turns.jsonl"))
+        .await?;
+    file.write_all(&serde_json::to_vec(event)?).await?;
+    file.write_all(b"\n").await?;
+    Ok(())
+}
+
+/// Prove one provider-bound body and collect its authenticated H2 response.
+async fn exchange<C: AsyncRead + AsyncWrite + Unpin>(
+    link: &mut Forwarded<'_, C>,
+    state: &mut IndexedConnection,
+    reader: &mut ResponseReader,
+    turn: &ClaudeTurn,
+    template: &Template,
+    body: &[u8],
+    first: bool,
+    started: Instant,
+) -> Result<(u32, ResponseState)> {
+    let stream = if first {
+        1
+    } else {
+        link.peer
+            .send("h2_template", &[], template.metadata()?)
+            .await?;
+        let (stream, headers) = state.later_headers(0, template)?;
+        link.send(&headers).await?;
+        stream
+    };
+    reader.stream(stream);
+    let mut response = ResponseState::new();
+    let mut offset = 0;
+    while offset < body.len() {
+        while state.connection_window <= 0 || state.stream_window <= 0 {
+            let bytes = link.read_application().await?;
+            let events = reader.push(&bytes, state)?;
+            deliver(events, link, &turn.reply, &mut response, started).await?;
+            ensure!(
+                !response.done,
+                "provider ended during Claude request upload"
+            );
+        }
+        let size = (body.len() - offset)
+            .min(16_375)
+            .min(state.connection_window as usize)
+            .min(state.stream_window as usize);
+        state.consume_window(size)?;
+        offset += size;
+        let wire = state.data_chunk(
+            stream,
+            &body[offset - size..offset],
+            offset == body.len(),
+            0,
+        )?;
+        link.send(&wire).await?;
+    }
+    if !link.buffer.is_empty() {
+        let bytes = std::mem::take(&mut link.buffer);
+        let events = reader.push(&bytes, state)?;
+        deliver(events, link, &turn.reply, &mut response, started).await?;
+    }
+    while !response.done {
+        let bytes = link.read_application().await?;
+        let events = reader.push(&bytes, state)?;
+        deliver(events, link, &turn.reply, &mut response, started).await?;
+    }
+    Ok((stream, response))
 }
 
 /// Complete successive Claude HTTP/2 streams without another TLS bootstrap.
@@ -90,6 +181,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
     runtime: Runtime,
     mut turns: mpsc::Receiver<ClaudeTurn>,
     completion_ack: bool,
+    compact: bool,
 ) -> Result<()> {
     let Session {
         peer,
@@ -117,111 +209,167 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
         h3,
         key_commitment,
         turn: 0,
+        proof_time: Duration::ZERO,
         buffer: Vec::new(),
     };
     let mut state = IndexedConnection::new(credential_length)?;
     let mut reader = ResponseReader::new();
     let mut responses = Vec::new();
     let mut turn_index = 0usize;
+    let mut request_index = 0usize;
+    let mut threads = compact.then(ThreadState::default);
     while let Some(turn) = turns.recv().await {
         let outcome = async {
-            let proofs_before = link.turn;
-            let stream = if turn_index == 0 {
-                1
-            } else {
-                link.peer
-                    .send("h2_template", &[], turn.template.metadata()?)
-                    .await?;
-                let (stream, headers) = state.later_headers(0, &turn.template)?;
-                link.send(&headers).await?;
-                stream
+            let mut template = turn.template.clone();
+            if compact {
+                beta_template(&mut template);
+            }
+            let source_bytes = turn.body.len();
+            let mut prepared = match &threads {
+                Some(threads) => threads.prepare(&turn.body, &template)?,
+                None => threads::Prepared {
+                    original: serde_json::from_slice(&turn.body)
+                        .context("Claude request body is not JSON")?,
+                    body: turn.body.clone(),
+                    mode: "full",
+                    parent: None,
+                    decision: "disabled",
+                    mismatch: None,
+                },
             };
-            reader.stream(stream);
-            serde_json::from_slice::<Value>(&turn.body)
-                .context("Claude request body is not JSON")?;
-            let mut response = ResponseState::new();
-            let mut offset = 0;
-            while offset < turn.body.len() {
-                while state.connection_window <= 0 || state.stream_window <= 0 {
-                    let bytes = link.read_application().await?;
-                    let events = reader.push(&bytes, &mut state)?;
-                    deliver(events, &mut link, &turn.reply, &mut response).await?;
-                    ensure!(
-                        !response.done,
-                        "provider ended during Claude request upload"
+            loop {
+                let started = Instant::now();
+                let proofs_before = link.turn;
+                let proof_time_before = link.proof_time;
+                journal(
+                    &runtime,
+                    &json!({"event":"request_start", "turn":turn_index,
+                    "attempt":request_index, "mode":prepared.mode, "parent":prepared.parent,
+                    "decision":prepared.decision, "mismatch":prepared.mismatch,
+                    "cli_body_bytes":source_bytes, "provider_body_bytes":prepared.body.len(),
+                    "provider_body_sha256":hex::encode(helpers::sha256(&prepared.body))}),
+                )
+                .await?;
+                let result = exchange(
+                    &mut link,
+                    &mut state,
+                    &mut reader,
+                    &turn,
+                    &template,
+                    &prepared.body,
+                    request_index == 0,
+                    started,
+                )
+                .await;
+                let (stream, response) = match result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        journal(
+                            &runtime,
+                            &json!({"event":"request_failed", "turn":turn_index,
+                            "attempt":request_index, "error":format!("{error:#}"),
+                            "proof_records":link.turn - proofs_before,
+                            "proof_seconds":(link.proof_time - proof_time_before).as_secs_f64(),
+                            "elapsed_seconds":started.elapsed().as_secs_f64()}),
+                        )
+                        .await?;
+                        return Err(error);
+                    }
+                };
+                let status = response.status.context("Claude response status missing")?;
+                let error: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+                journal(
+                    &runtime,
+                    &json!({"event":"request_end", "turn":turn_index,
+                    "attempt":request_index, "stream":stream, "mode":prepared.mode,
+                    "status":status, "first_data_seconds":response.first_data_seconds,
+                    "elapsed_seconds":started.elapsed().as_secs_f64(),
+                    "proof_records":link.turn - proofs_before,
+                    "proof_seconds":(link.proof_time - proof_time_before).as_secs_f64(),
+                    "response_bytes":response.body.len(),
+                    "error_code":error["error"]["details"]["error_code"]}),
+                )
+                .await?;
+                request_index += 1;
+                if status == 404
+                    && prepared.mode == "continue"
+                    && error["error"]["details"]["error_code"] == "thread_not_found"
+                {
+                    threads.as_ref().unwrap().replay(&mut prepared)?;
+                    continue;
+                }
+                let content_type = response
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name == b"content-type")
+                    .map(|(_, value)| String::from_utf8_lossy(value).into_owned())
+                    .unwrap_or_default();
+                if status != 200 || !content_type.contains("text/event-stream") {
+                    let evidence = json!({"status":status, "content_type":content_type,
+                        "error_type":error["error"]["type"],
+                        "error_code":error["error"]["details"]["error_code"],
+                        "response_sha256":hex::encode(helpers::sha256(&response.body))});
+                    tokio::fs::write(
+                        runtime
+                            .output
+                            .join(format!("provider-error-{turn_index}.json")),
+                        serde_json::to_vec_pretty(&evidence)?,
+                    )
+                    .await?;
+                    turn.reply
+                        .send(Ok(ClaudeEvent::Start(status, content_type.clone())))
+                        .await
+                        .context("local Claude listener closed")?;
+                    turn.reply
+                        .send(Ok(ClaudeEvent::Data(response.body)))
+                        .await
+                        .context("local Claude listener closed")?;
+                    let (finished, acknowledged) = oneshot::channel();
+                    turn.reply
+                        .send(Ok(ClaudeEvent::ProviderError(finished)))
+                        .await
+                        .context("local Claude listener closed")?;
+                    acknowledged
+                        .await
+                        .context("local Claude error response unfinished")?;
+                    bail!("provider returned HTTP {status} {content_type}");
+                }
+                let summary = claude::summarize_sse(status, &response.headers, &response.body)?;
+                if let Some(threads) = &mut threads {
+                    threads.complete(
+                        &prepared,
+                        &template,
+                        summary.message_id.clone(),
+                        &response.body,
                     );
                 }
-                let size = (turn.body.len() - offset)
-                    .min(16_375)
-                    .min(state.connection_window as usize)
-                    .min(state.stream_window as usize);
-                state.consume_window(size)?;
-                offset += size;
-                let wire = state.data_chunk(
-                    stream,
-                    &turn.body[offset - size..offset],
-                    offset == turn.body.len(),
-                    0,
-                )?;
-                link.send(&wire).await?;
-            }
-            if !link.buffer.is_empty() {
-                let bytes = std::mem::take(&mut link.buffer);
-                let events = reader.push(&bytes, &mut state)?;
-                deliver(events, &mut link, &turn.reply, &mut response).await?;
-            }
-            while !response.done {
-                let bytes = link.read_application().await?;
-                let events = reader.push(&bytes, &mut state)?;
-                deliver(events, &mut link, &turn.reply, &mut response).await?;
-            }
-            let status = response.status.context("Claude response status missing")?;
-            let content_type = response
-                .headers
-                .iter()
-                .find(|(name, _)| name == b"content-type")
-                .map(|(_, value)| value.as_slice())
-                .unwrap_or_default();
-            if !content_type
-                .windows(b"text/event-stream".len())
-                .any(|part| part == b"text/event-stream")
-            {
-                let content_type = String::from_utf8_lossy(content_type).into_owned();
-                let error: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
-                let error_type = error["error"]["type"].as_str();
-                let evidence = json!({"status":status, "content_type":content_type,
-                    "error_type":error_type,
-                    "response_sha256":hex::encode(helpers::sha256(&response.body))});
-                tokio::fs::write(
-                    runtime.output.join("provider-error.json"),
-                    serde_json::to_vec_pretty(&evidence)?,
+                journal(
+                    &runtime,
+                    &json!({"event":"message_complete", "turn":turn_index,
+                    "attempt":request_index - 1, "message_id":summary.message_id,
+                    "thread_parent_ready":threads.as_ref().is_some_and(ThreadState::ready),
+                    "usage":summary.usage, "provider_tool_uses":summary.tool_uses}),
                 )
                 .await?;
-                let (finished, acknowledged) = oneshot::channel();
+                link.peer
+                    .send(
+                        "audit_usage",
+                        &[],
+                        serde_json::from_value(json!({"usage":summary.usage.clone()}))?,
+                    )
+                    .await?;
+                responses.push(json!({"stream":stream, "message_id":summary.message_id,
+                    "usage":summary.usage, "status":status, "cli_body_bytes":source_bytes,
+                    "provider_body_bytes":prepared.body.len(), "mode":prepared.mode,
+                    "parent":prepared.parent, "proof_records":link.turn - proofs_before,
+                    "proof_seconds":(link.proof_time - proof_time_before).as_secs_f64(),
+                    "provider_tool_uses":summary.tool_uses}));
                 turn.reply
-                    .send(Ok(ClaudeEvent::ProviderError(finished)))
+                    .send(Ok(ClaudeEvent::Done))
                     .await
                     .context("local Claude listener closed")?;
-                acknowledged
-                    .await
-                    .context("local Claude error response unfinished")?;
-                bail!("provider returned HTTP {status} {content_type} error_type={error_type:?}");
+                break;
             }
-            let summary = claude::summarize_sse(status, &response.headers, &response.body)?;
-            link.peer
-                .send(
-                    "audit_usage",
-                    &[],
-                    serde_json::from_value(json!({"usage":summary.usage.clone()}))?,
-                )
-                .await?;
-            responses.push(json!({"stream":stream, "message_id":summary.message_id,
-                "usage":summary.usage, "status":status, "body_bytes":turn.body.len(),
-                "proof_records":link.turn - proofs_before}));
-            turn.reply
-                .send(Ok(ClaudeEvent::Done))
-                .await
-                .context("local Claude listener closed")?;
             Ok::<(), anyhow::Error>(())
         }
         .await;

@@ -7,6 +7,10 @@ requests over one protected session. Frozen TLS and control-wire test inputs are
 in `native/fixtures`; the Python worker used during the port is retained in Git
 history at `aa8c3d0`.
 
+Claude Message Threads use compact continuations by default. Set
+`CONCURRO_CLAUDE_MESSAGE_THREADS=0` on Concurro for full-context diagnostics.
+The hosted fixture also accepts `--claude-full-context`.
+
 `package.py` assembles separate macOS arm64 Sponsor and Concurro bundles from
 the accepted TLS 1.3 native helper runtime and three Rust binaries. OpenSSL,
 its configuration, dynamic libraries, and public circuits are included.
@@ -29,7 +33,10 @@ python3 -B -m unittest native.test_package -v
 
 `MVP_RUNTIME` is an external accepted runnable MVP artifact containing
 the DiStefano helpers and public circuits, MP-SPDZ program, and request-proof
-binary. Set
+binary. For Codex, apply `native/patches/DiStefano-Krrw-prepared.patch` to the
+DiStefano source and build `HandoffPartyKrrwPrepared` into the runtime before
+packaging. The Linux source-to-image script applies that patch and builds the
+target. Set
 `CONCURRO_NATIVE_OUTPUT` to keep session logs and fresh private state in a
 chosen directory.
 

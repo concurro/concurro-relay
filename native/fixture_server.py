@@ -18,6 +18,9 @@ def main():
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--certs', type=Path, required=True)
     parser.add_argument('--tool-loop', action='store_true')
+    parser.add_argument('--sustained', action='store_true')
+    parser.add_argument('--steps', type=int, default=1)
+    parser.add_argument('--codex-token-length', type=int, default=85)
     parser.add_argument('--calls', type=int, default=2)
     parser.add_argument('--delay-inference', type=float, default=0)
     parser.add_argument('--connections', type=int, default=1)
@@ -25,6 +28,10 @@ def main():
     args = parser.parse_args()
     if args.connections < 1 or args.connections > 1 and args.route != 'claude':
         parser.error('--connections requires Claude when greater than one')
+    if args.steps < 1:
+        parser.error('--steps must be positive')
+    if args.codex_token_length < len('SYNTHETIC_CODEX_'):
+        parser.error('--codex-token-length is too short')
     sys.path.insert(0, str(args.source))
     fixture = runpy.run_path(str(args.source / ('run_codex_cli.py' if args.route == 'codex'
                                                else 'run_cli.py')))
@@ -33,6 +40,8 @@ def main():
             parser.error('--tool-loop requires --route codex')
         sys.path.insert(0, str(args.source.parents[1] / 'tls13-runnable-mvp'))
         from codex_tool_loop_provider import ToolLoopProvider
+        if args.sustained:
+            from sustained_codex_provider import SustainedToolProvider as ToolLoopProvider
         connections = {'active': 0, 'peak': 0}
         connections_lock = threading.Lock()
 
@@ -49,6 +58,19 @@ def main():
                 finally:
                     with connections_lock:
                         connections['active'] -= 1
+
+            def send_frame(self, payload, *extra):
+                """Timestamp streamed events and retain the exact synthetic provider usage."""
+                event = json.loads(payload)
+                if event.get('type') in ('response.created', 'response.completed'):
+                    row = next((call for call in reversed(self.server.state.calls)
+                                if call.get('kind') == 'request'), None)
+                    if row is not None:
+                        if event['type'] == 'response.created':
+                            row.setdefault('first_event_monotonic', time.monotonic())
+                        else:
+                            row['provider_usage'] = event['response'].get('usage')
+                super().send_frame(payload, *extra)
 
         ToolLoopProvider = CountingToolLoopProvider
         if args.delay_inference:
@@ -68,8 +90,8 @@ def main():
 
             ToolLoopProvider = DelayedToolLoopProvider
         fixture['serve_fixture'].__globals__['ProviderWebSocket'] = ToolLoopProvider
-        os.environ['TOOL_LOOP_STEPS'] = '1'
-        os.environ['TOOL_LOOP_OUTPUT_BYTES'] = '[200]'
+        os.environ['TOOL_LOOP_STEPS'] = str(args.steps)
+        os.environ['TOOL_LOOP_OUTPUT_BYTES'] = json.dumps([200] * args.steps)
     if args.route == 'claude' and args.delay_inference:
         original_events = fixture['serve_fixture'].__globals__['claude_events']
 
@@ -85,7 +107,8 @@ def main():
     listener.listen(8)
     print(json.dumps({'port': listener.getsockname()[1]}), flush=True)
     result = {'requests': []} if args.route == 'claude' else {}
-    token = (b'SYNTHETIC_CODEX_' + b'X' * 69 if args.route == 'codex' else b'X' * 44)
+    token = (b'SYNTHETIC_CODEX_' + b'X' * (args.codex_token_length - len(b'SYNTHETIC_CODEX_'))
+             if args.route == 'codex' else b'X' * 44)
     parameters = (listener, args.certs / 'chain-provider.pem',
                   args.certs / 'chain-provider.key', token)
     if args.route == 'codex':
@@ -146,11 +169,17 @@ def main():
                                'request_index': call['request_index'],
                                'parent': call.get('previous_response_id'),
                                'response_id': call.get('response_id'),
+                               'warmup': bool(call.get('warmup')),
+                               'final': bool(call.get('final')),
                                'body_bytes': len(json.dumps(call['body'], separators=(',', ':')).encode()),
                                'input_types': [item.get('type') for item in call['body'].get('input', [])
                                                if isinstance(item, dict)],
                                'issued_call_id': call.get('issued_call_id'),
-                               'validated_output_sha256': call.get('validated_tool_output_sha256')}
+                               'validated_output_sha256': call.get('validated_tool_output_sha256'),
+                               'arrived_monotonic': call.get('arrived_monotonic'),
+                               'first_event_monotonic': call.get('first_event_monotonic'),
+                               'completed_monotonic': call.get('completed_monotonic'),
+                               'provider_usage': call.get('provider_usage')}
                               for call in calls if call.get('kind') == 'request']
     if args.route == 'codex':
         calls = [call for call in result['server'].state.calls if 'body' in call]

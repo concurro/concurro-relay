@@ -653,6 +653,8 @@ pub struct SseSummary {
     pub message_id: String,
     /// Usage merged from `message_start` and `message_delta`.
     pub usage: Value,
+    /// Tool names issued by authenticated provider content blocks.
+    pub tool_uses: Vec<String>,
 }
 
 /// Validate a completed SSE response after its bytes were streamed locally.
@@ -674,6 +676,7 @@ pub fn summarize_sse(
     );
     let mut start = None;
     let mut delta = None;
+    let mut tool_uses = Vec::new();
     for line in body.split(|byte| *byte == b'\n') {
         if let Some(value) = line.strip_prefix(b"data: ") {
             let event: Value = serde_json::from_slice(value)?;
@@ -688,6 +691,14 @@ pub fn summarize_sse(
                     ensure!(
                         delta.replace(event).is_none(),
                         "duplicate Claude message_delta"
+                    );
+                }
+                Some("content_block_start") if event["content_block"]["type"] == "tool_use" => {
+                    tool_uses.push(
+                        event["content_block"]["name"]
+                            .as_str()
+                            .context("Claude tool name missing")?
+                            .to_owned(),
                     );
                 }
                 _ => {}
@@ -710,6 +721,7 @@ pub fn summarize_sse(
     Ok(SseSummary {
         message_id,
         usage: Value::Object(usage),
+        tool_uses,
     })
 }
 

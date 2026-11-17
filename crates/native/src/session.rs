@@ -1,6 +1,10 @@
 //! Resumable Codex role coordinators after one protected TLS bootstrap.
 
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::VecDeque,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -25,6 +29,7 @@ use crate::{
 };
 
 mod claude;
+pub use claude::beta_template as claude_beta_template;
 pub use claude::concurro as claude_concurro;
 
 /// One request from the local Codex WebSocket and its authenticated event reply.
@@ -286,11 +291,39 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
         h3,
         key_commitment,
         turn: 0,
+        proof_time: Duration::ZERO,
         buffer: Vec::new(),
     };
+    let upgrade_started = Instant::now();
+    let mut provider_head_status = None;
+    let mut provider_head_sha256 = None;
     let upgraded = async {
+        tokio::fs::write(
+            runtime.output.join("codex-upgrade-phase.json"),
+            serde_json::to_vec_pretty(&json!({
+                "phase": "sending_tail",
+                "tail_bytes": tail.len(),
+                "tail_sha256": hex::encode(helpers::sha256(&tail)),
+                "header_names": tail.split(|byte| *byte == b'\n').filter_map(|line| {
+                    line.split(|byte| *byte == b':').next().filter(|name| !name.is_empty())
+                        .map(|name| String::from_utf8_lossy(name).trim().to_owned())
+                }).collect::<Vec<_>>(),
+            }))?,
+        )
+        .await?;
         link.send(&tail).await?;
+        tokio::fs::write(
+            runtime.output.join("codex-upgrade-phase.json"),
+            serde_json::to_vec_pretty(&json!({"phase":"awaiting_http_head",
+                "proof_records":link.turn,"proof_seconds":link.proof_time.as_secs_f64()}))?,
+        )
+        .await?;
         let head = link.read_http_head().await?;
+        provider_head_status = std::str::from_utf8(&head)?
+            .split_whitespace()
+            .nth(1)
+            .and_then(|status| status.parse::<u16>().ok());
+        provider_head_sha256 = Some(hex::encode(helpers::sha256(&head)));
         let key = tail
             .windows(19)
             .position(|part| part == b"Sec-WebSocket-Key: ")
@@ -312,6 +345,20 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
         Ok(())
     }
     .await;
+    tokio::fs::write(
+        runtime.output.join("codex-upgrade.json"),
+        serde_json::to_vec_pretty(&json!({
+            "status": provider_head_status,
+            "head_sha256": provider_head_sha256,
+            "request_tail_bytes": tail.len(),
+            "request_tail_sha256": hex::encode(helpers::sha256(&tail)),
+            "proof_records": link.turn,
+            "proof_seconds": link.proof_time.as_secs_f64(),
+            "elapsed_seconds": upgrade_started.elapsed().as_secs_f64(),
+            "error": upgraded.as_ref().err().map(ToString::to_string),
+        }))?,
+    )
+    .await?;
     let upgrade_ok = upgraded.is_ok();
     let _ = upgrade.send(upgraded);
     ensure!(upgrade_ok, "provider WebSocket upgrade failed");
@@ -413,6 +460,8 @@ struct Forwarded<'a, C> {
     key_commitment: [u8; 32],
     /// Next proved request record number.
     turn: u64,
+    /// Time spent inside request proofs on this connection.
+    proof_time: Duration,
     /// Application bytes retained after the HTTP upgrade head.
     buffer: Vec<u8>,
 }
@@ -435,6 +484,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin> Forwarded<'_, C> {
                 json!({"plaintext": STANDARD.encode(plaintext), "sequence": self.turn, "turn": self.turn}),
             )?;
             self.peer.send("request_offer", &wire, metadata).await?;
+            let proof_started = Instant::now();
             proof::request(
                 &mut self.peer,
                 NativeRole::Concurro,
@@ -444,6 +494,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin> Forwarded<'_, C> {
                 self.turn,
             )
             .await?;
+            self.proof_time += proof_started.elapsed();
             let accepted = self.peer.receive("request_accepted").await?;
             ensure!(
                 accepted.metadata.get("turn") == Some(&json!(self.turn))
@@ -477,6 +528,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin> Forwarded<'_, C> {
             }
             let bytes = self.read_application().await?;
             self.buffer.extend(bytes);
+            tokio::fs::write(
+                self.runtime.output.join("codex-upgrade-phase.json"),
+                serde_json::to_vec_pretty(&json!({"phase":"reading_http_head",
+                    "buffer_bytes":self.buffer.len(),"buffer_sha256":hex::encode(helpers::sha256(&self.buffer))}))?,
+            )
+            .await?;
         }
     }
 }

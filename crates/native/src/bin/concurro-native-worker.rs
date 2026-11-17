@@ -123,7 +123,11 @@ async fn main() -> Result<()> {
         let listener = ingress::bind(&config.listen).await?;
         println!("NATIVE_READY {}", listener.local_addr()?);
         if config.route == WorkerRoute::ClaudeH2 {
-            let first = ingress::claude::accept(&listener).await?;
+            let compact = env::var("CONCURRO_CLAUDE_MESSAGE_THREADS").as_deref() != Ok("0");
+            let mut first = ingress::claude::accept(&listener).await?;
+            if compact {
+                session::claude_beta_template(&mut first.template);
+            }
             control::send(
                 &mut control,
                 &Message {
@@ -163,6 +167,7 @@ async fn main() -> Result<()> {
                 runtime,
                 turns_rx,
                 completion_ack,
+                compact,
             ));
             let test_turns = env::var("CONCURRO_NATIVE_TEST_TURNS_CLAUDE")
                 .ok()

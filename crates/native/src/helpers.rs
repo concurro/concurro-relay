@@ -491,6 +491,260 @@ pub struct CircuitSpec<'a> {
     pub session: [u8; 32],
 }
 
+/// One fresh authenticated MPC helper held between setup and private input.
+struct MpcRun {
+    /// Child process killed if the session is dropped.
+    child: Child,
+    /// Private input pipe, retained only for a prepared run.
+    stdin: Option<ChildStdin>,
+    /// Output and diagnostic-log drain tasks.
+    drains: JoinSet<Result<Option<Vec<u8>>>>,
+    /// One bound deadline for setup and completion.
+    deadline: time::Instant,
+    /// Party label for failure evidence.
+    party: &'static str,
+    /// Bound circuit phase.
+    phase: String,
+}
+
+impl MpcRun {
+    /// Launch and authenticate one helper; optionally await input-independent preparation.
+    async fn launch<C: AsyncRead + AsyncWrite + Unpin>(
+        peer: &mut Peer<C>,
+        role: NativeRole,
+        runtime: &Runtime,
+        tunnel: Option<&Arc<Tunnel>>,
+        circuit: &Path,
+        phase: &str,
+        session: [u8; 32],
+        prepared: bool,
+        private: Option<&[u8]>,
+    ) -> Result<Self> {
+        let work = circuit_workspace(
+            runtime,
+            &runtime
+                .output
+                .join(format!("{}-circuit-work", role_name(role))),
+        )
+        .await?;
+        let digest = sha256(&tokio::fs::read(circuit).await?);
+        let binding = hex::encode(sha256(
+            &[
+                b"Concurro/Handoff/MPC/v1".as_slice(),
+                &session,
+                phase.as_bytes(),
+                &digest,
+            ]
+            .concat(),
+        ));
+        let party = if role == NativeRole::Sponsor {
+            "1"
+        } else {
+            "2"
+        };
+        let binary = if prepared {
+            "build/HandoffPartyKrrwPrepared"
+        } else {
+            "build/HandoffPartyKrrw"
+        };
+        let mut command = Command::new(runtime.distefano(binary));
+        command
+            .arg(party)
+            .arg(circuit)
+            .current_dir(work)
+            .env("HANDOFF_MPC_SESSION_BINDING", binding)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if role == NativeRole::Concurro {
+            let assignment = peer.receive("mpc_port").await?;
+            ensure!(
+                assignment.metadata.get("phase") == Some(&json!(phase)),
+                "MPC phase mismatch"
+            );
+            command.arg(
+                assignment
+                    .metadata
+                    .get("port")
+                    .and_then(Value::as_str)
+                    .context("MPC port missing")?,
+            );
+        }
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("start {phase} MPC"))?;
+        let mut stdin = child.stdin.take().context("MPC stdin missing")?;
+        let mut stdout = child.stdout.take().context("MPC stdout missing")?;
+        let stderr = child.stderr.take().context("MPC stderr missing")?;
+        let log = runtime
+            .output
+            .join(format!("{}-{phase}-mpc.log", role_name(role)));
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (prepared_tx, prepared_rx) = oneshot::channel();
+        let mut drains = JoinSet::new();
+        drains.spawn(async move {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).await?;
+            Ok::<Option<Vec<u8>>, anyhow::Error>(Some(bytes))
+        });
+        drains.spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            let mut file = tokio::fs::File::create(log).await?;
+            let mut ready_tx = Some(ready_tx);
+            let mut prepared_tx = Some(prepared_tx);
+            while let Some(line) = lines.next_line().await? {
+                file.write_all(line.as_bytes()).await?;
+                file.write_all(b"\n").await?;
+                if let Some(text) = line.split("HANDOFF_READY ").nth(1) {
+                    let port = text
+                        .split_whitespace()
+                        .next()
+                        .and_then(|value| value.parse::<u16>().ok());
+                    if let (Some(sender), Some(port)) = (ready_tx.take(), port) {
+                        let _ = sender.send(port);
+                    }
+                }
+                if line == "HANDOFF_PREPARED" {
+                    if let Some(sender) = prepared_tx.take() {
+                        let _ = sender.send(());
+                    }
+                }
+            }
+            Ok::<Option<Vec<u8>>, anyhow::Error>(None)
+        });
+        let stdin = if let Some(private) = private {
+            stdin.write_all(private).await?;
+            drop(stdin);
+            None
+        } else {
+            Some(stdin)
+        };
+        let deadline = time::Instant::now()
+            + runtime
+                .benchmark_timeout
+                .max(if role == NativeRole::Sponsor {
+                    Duration::from_secs(180)
+                } else {
+                    Duration::from_secs(120)
+                });
+        if role == NativeRole::Sponsor {
+            let port = time::timeout_at(deadline, ready_rx)
+                .await
+                .context("MPC sponsor did not bind")?
+                .context("MPC sponsor exited before readiness")?;
+            let mapped = tunnel
+                .context("Sponsor tunnel missing")?
+                .register(port)
+                .await?;
+            peer.send(
+                "mpc_port",
+                &[],
+                serde_json::from_value(json!({"port": mapped.to_string(), "phase": phase}))?,
+            )
+            .await?;
+        }
+        if prepared {
+            time::timeout_at(deadline, prepared_rx)
+                .await
+                .context("MPC preparation timeout")?
+                .context("MPC helper exited before preparation")?;
+        }
+        Ok(Self {
+            child,
+            stdin,
+            drains,
+            deadline,
+            party,
+            phase: phase.to_owned(),
+        })
+    }
+
+    /// Supply any deferred input, collect output, and compare both parties' hashes.
+    async fn finish<C: AsyncRead + AsyncWrite + Unpin>(
+        mut self,
+        peer: &mut Peer<C>,
+        private: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
+        match (self.stdin.take(), private) {
+            (Some(mut stdin), Some(bytes)) => {
+                stdin.write_all(bytes).await?;
+                drop(stdin);
+            }
+            (None, None) => {}
+            _ => bail!("MPC private input state mismatch"),
+        }
+        let status = match time::timeout_at(self.deadline, self.child.wait()).await {
+            Ok(status) => status?,
+            Err(_) => {
+                self.child.start_kill()?;
+                self.child.wait().await?;
+                bail!("MPC completion timeout");
+            }
+        };
+        let output = time::timeout_at(self.deadline, async {
+            let mut output = None;
+            while let Some(result) = self.drains.join_next().await {
+                if let Some(bytes) = result?? {
+                    output = Some(bytes);
+                }
+            }
+            output.context("MPC stdout missing")
+        })
+        .await
+        .context("MPC output drain timeout")??;
+        ensure!(
+            status.success() && output.first() == Some(&1),
+            "{} MPC failed: party {}, exit {}, bytes {}",
+            self.phase,
+            self.party,
+            status,
+            output.len()
+        );
+        let hash = sha256(&output);
+        peer.send("mpc_hash", &hash, metadata("phase", json!(self.phase)))
+            .await?;
+        let other = peer.receive("mpc_hash").await?;
+        ensure!(
+            other.metadata.get("phase") == Some(&json!(self.phase)) && other.data == hash,
+            "{} MPC public outputs differ",
+            self.phase
+        );
+        Ok(output)
+    }
+}
+
+/// A bound prefix MPC whose fresh preprocessing completed before provider connect.
+pub struct PreparedCircuit(MpcRun);
+
+impl PreparedCircuit {
+    /// Prepare one bound prefix circuit without private TLS or credential inputs.
+    pub async fn start<C: AsyncRead + AsyncWrite + Unpin>(
+        peer: &mut Peer<C>,
+        role: NativeRole,
+        runtime: &Runtime,
+        tunnel: Option<&Arc<Tunnel>>,
+        circuit: &Path,
+        session: [u8; 32],
+    ) -> Result<Self> {
+        Ok(Self(
+            MpcRun::launch(
+                peer, role, runtime, tunnel, circuit, "prefix", session, true, None,
+            )
+            .await?,
+        ))
+    }
+
+    /// Supply private input after handshake verification and check identical public output.
+    pub async fn finish<C: AsyncRead + AsyncWrite + Unpin>(
+        self,
+        peer: &mut Peer<C>,
+        private: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.0.finish(peer, Some(private)).await
+    }
+}
+
 /// Run the accepted two-party circuit and compare exact public output hashes.
 pub async fn circuit_pair<C: AsyncRead + AsyncWrite + Unpin>(
     peer: &mut Peer<C>,
@@ -499,153 +753,19 @@ pub async fn circuit_pair<C: AsyncRead + AsyncWrite + Unpin>(
     tunnel: Option<&Arc<Tunnel>>,
     spec: CircuitSpec<'_>,
 ) -> Result<Vec<u8>> {
-    let CircuitSpec {
-        circuit,
-        private,
-        phase,
-        session,
-    } = spec;
-    let work = circuit_workspace(
+    let run = MpcRun::launch(
+        peer,
+        role,
         runtime,
-        &runtime
-            .output
-            .join(format!("{}-circuit-work", role_name(role))),
+        tunnel,
+        spec.circuit,
+        spec.phase,
+        spec.session,
+        false,
+        Some(spec.private),
     )
     .await?;
-    let digest = sha256(&tokio::fs::read(circuit).await?);
-    let binding = hex::encode(sha256(
-        &[
-            b"Concurro/Handoff/MPC/v1".as_slice(),
-            &session,
-            phase.as_bytes(),
-            &digest,
-        ]
-        .concat(),
-    ));
-    let party = if role == NativeRole::Sponsor {
-        "1"
-    } else {
-        "2"
-    };
-    let mut command = Command::new(runtime.distefano("build/HandoffPartyKrrw"));
-    command
-        .arg(party)
-        .arg(circuit)
-        .current_dir(work)
-        .env("HANDOFF_MPC_SESSION_BINDING", binding)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    if role == NativeRole::Concurro {
-        let assignment = peer.receive("mpc_port").await?;
-        ensure!(
-            assignment.metadata.get("phase") == Some(&json!(phase)),
-            "MPC phase mismatch"
-        );
-        command.arg(
-            assignment
-                .metadata
-                .get("port")
-                .and_then(Value::as_str)
-                .context("MPC port missing")?,
-        );
-    }
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("start {phase} MPC"))?;
-    let mut stdin = child.stdin.take().context("MPC stdin missing")?;
-    let mut stdout = child.stdout.take().context("MPC stdout missing")?;
-    let stderr = child.stderr.take().context("MPC stderr missing")?;
-    let log = runtime
-        .output
-        .join(format!("{}-{phase}-mpc.log", role_name(role)));
-    let (ready_tx, ready_rx) = oneshot::channel();
-    let mut drains = JoinSet::new();
-    drains.spawn(async move {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).await?;
-        Ok::<Option<Vec<u8>>, anyhow::Error>(Some(bytes))
-    });
-    drains.spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        let mut file = tokio::fs::File::create(log).await?;
-        let mut ready_tx = Some(ready_tx);
-        while let Some(line) = lines.next_line().await? {
-            file.write_all(line.as_bytes()).await?;
-            file.write_all(b"\n").await?;
-            if let Some(text) = line.split("HANDOFF_READY ").nth(1) {
-                let port = text
-                    .split_whitespace()
-                    .next()
-                    .and_then(|value| value.parse::<u16>().ok());
-                if let (Some(sender), Some(port)) = (ready_tx.take(), port) {
-                    let _ = sender.send(port);
-                }
-            }
-        }
-        Ok::<Option<Vec<u8>>, anyhow::Error>(None)
-    });
-    stdin.write_all(private).await?;
-    drop(stdin);
-    if role == NativeRole::Sponsor {
-        let port = time::timeout(Duration::from_secs(90), ready_rx)
-            .await
-            .context("MPC sponsor did not bind")?
-            .context("MPC sponsor exited before readiness")?;
-        let mapped = tunnel
-            .context("Sponsor tunnel missing")?
-            .register(port)
-            .await?;
-        peer.send(
-            "mpc_port",
-            &[],
-            serde_json::from_value(json!({"port": mapped.to_string(), "phase": phase}))?,
-        )
-        .await?;
-    }
-    let deadline = time::Instant::now()
-        + runtime
-            .benchmark_timeout
-            .max(if role == NativeRole::Sponsor {
-                Duration::from_secs(180)
-            } else {
-                Duration::from_secs(120)
-            });
-    let status = match time::timeout_at(deadline, child.wait()).await {
-        Ok(status) => status?,
-        Err(_) => {
-            child.start_kill()?;
-            child.wait().await?;
-            bail!("MPC completion timeout");
-        }
-    };
-    let output = time::timeout_at(deadline, async {
-        let mut output = None;
-        while let Some(result) = drains.join_next().await {
-            if let Some(bytes) = result?? {
-                output = Some(bytes);
-            }
-        }
-        output.context("MPC stdout missing")
-    })
-    .await
-    .context("MPC output drain timeout")??;
-    ensure!(
-        status.success() && output.first() == Some(&1),
-        "{phase} MPC failed: party {party}, exit {}, bytes {}",
-        status,
-        output.len()
-    );
-    let hash = sha256(&output);
-    peer.send("mpc_hash", &hash, metadata("phase", json!(phase)))
-        .await?;
-    let other = peer.receive("mpc_hash").await?;
-    ensure!(
-        other.metadata.get("phase") == Some(&json!(phase)) && other.data == hash,
-        "{phase} MPC public outputs differ"
-    );
-    Ok(output)
+    run.finish(peer, None).await
 }
 
 /// Publish a generated public prefix circuit under the Python-compatible cache key.

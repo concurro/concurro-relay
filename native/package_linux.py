@@ -29,7 +29,8 @@ def assemble(args):
     ]
     sources += [
         (args.distefano_build / name, runtime / "DiStefano/build" / name)
-        for name in ("HandoffKeyShare", "HandoffPartyKrrw", "HandoffPrefix")
+        for name in ("HandoffKeyShare", "HandoffPartyKrrw",
+                     "HandoffPartyKrrwPrepared", "HandoffPrefix")
     ]
     sources += [
         (args.distefano / "src/emp-tool/emp-tool/circuits/files/bristol_format" / name,

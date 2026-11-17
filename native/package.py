@@ -159,7 +159,8 @@ def assemble(args):
     openssl = Path(args.openssl).resolve()
     roots = [(binary, executable), (args.worker, worker),
              (openssl, bundle / 'bin/openssl')]
-    for name in ('HandoffKeyShare', 'HandoffPartyKrrw', 'HandoffPrefix'):
+    for name in ('HandoffKeyShare', 'HandoffPartyKrrw',
+                 'HandoffPartyKrrwPrepared', 'HandoffPrefix'):
         roots.append((source / 'DiStefano/build' / name,
                       runtime / 'DiStefano/build' / name))
     roots.append((source / 'DiStefano/build/emp-tool/libemp-tool.dylib',

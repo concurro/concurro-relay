@@ -17,8 +17,46 @@ use tokio::{
 use super::BootstrapOptions;
 use crate::{
     NativeRole,
-    helpers::{self, CircuitSpec, Peer},
+    helpers::{self, CircuitSpec, Peer, PreparedCircuit},
 };
+
+/// Complete fresh Codex prefix preprocessing before opening the provider connection.
+pub async fn prepare<C: AsyncRead + AsyncWrite + Unpin>(
+    peer: &mut Peer<C>,
+    tunnel: Option<&Arc<Tunnel>>,
+    options: &BootstrapOptions,
+    credential_len: usize,
+    session: [u8; 32],
+) -> Result<Option<PreparedCircuit>> {
+    if options.profile != Profile::Codex {
+        return Ok(None);
+    }
+    let (head, slot) = codex::request_head(&vec![0; credential_len], b"");
+    let circuit = helpers::prefix_circuit(
+        &options.runtime,
+        options.route(),
+        slot + credential_len + 2,
+        slot,
+        credential_len,
+    )
+    .await?;
+    ensure!(
+        head.len() >= slot + credential_len + 2,
+        "invalid Codex prefix shape"
+    );
+    let prepared = PreparedCircuit::start(
+        peer,
+        options.role,
+        &options.runtime,
+        tunnel,
+        &circuit,
+        session,
+    )
+    .await?;
+    peer.send("prefix_prepared", &[], Map::new()).await?;
+    peer.receive("prefix_prepared").await?;
+    Ok(Some(prepared))
+}
 
 /// Public transcript binding and one role's mask for the prefix circuit.
 pub struct PrefixContext<'a> {
@@ -63,6 +101,7 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
     provider: &mut TcpStream,
     credential: &[u8],
     context: &PrefixContext<'_>,
+    prepared: Option<PreparedCircuit>,
 ) -> Result<SponsorPrefix> {
     let mut websocket_key = Vec::new();
     let mut claude_template = None;
@@ -89,29 +128,33 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
     if context.options.profile == Profile::Codex {
         codex::validate_request_tail(&tail, &websocket_key)?;
     }
-    let circuit = helpers::prefix_circuit(
-        &context.options.runtime,
-        context.options.route(),
-        partial.len(),
-        slot,
-        credential.len(),
-    )
-    .await?;
     let binding = binding(context);
     let input = [&context.master_mask[..], &[0; 64], &binding, partial].concat();
-    let public = helpers::circuit_pair(
-        peer,
-        NativeRole::Sponsor,
-        &context.options.runtime,
-        tunnel,
-        CircuitSpec {
-            circuit: &circuit,
-            private: &input,
-            phase: "prefix",
-            session: context.session,
-        },
-    )
-    .await?;
+    let public = if let Some(prepared) = prepared {
+        prepared.finish(peer, &input).await?
+    } else {
+        let circuit = helpers::prefix_circuit(
+            &context.options.runtime,
+            context.options.route(),
+            partial.len(),
+            slot,
+            credential.len(),
+        )
+        .await?;
+        helpers::circuit_pair(
+            peer,
+            NativeRole::Sponsor,
+            &context.options.runtime,
+            tunnel,
+            CircuitSpec {
+                circuit: &circuit,
+                private: &input,
+                phase: "prefix",
+                session: context.session,
+            },
+        )
+        .await?
+    };
     ensure!(public.len() > 97, "protected prefix shape mismatch");
     ensure!(
         context.options.profile == Profile::ClaudeH2 || [75, 84, 85].contains(&slot),
@@ -132,6 +175,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
     tunnel: Option<&Arc<Tunnel>>,
     credential_len: usize,
     context: &PrefixContext<'_>,
+    prepared: Option<PreparedCircuit>,
 ) -> Result<ConcurroPrefix> {
     let zero_credential = vec![0; credential_len];
     let (head, slot) = if context.options.profile == Profile::Codex {
@@ -201,14 +245,6 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
             peer.send("request_tail", &tail, Map::new()).await?;
         }
     }
-    let circuit = helpers::prefix_circuit(
-        &context.options.runtime,
-        context.options.route(),
-        partial.len(),
-        slot,
-        credential_len,
-    )
-    .await?;
     let mut master_share = [0; 32];
     for (index, byte) in master_share.iter_mut().enumerate() {
         *byte = context.handshake_public[65 + index] ^ context.master_mask[index];
@@ -219,19 +255,31 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
         .map_err(|_| anyhow::anyhow!("prefix masks random failed"))?;
     let binding = binding(context);
     let input = [&master_share[..], &masks, &binding, partial].concat();
-    let public = helpers::circuit_pair(
-        peer,
-        NativeRole::Concurro,
-        &context.options.runtime,
-        tunnel,
-        CircuitSpec {
-            circuit: &circuit,
-            private: &input,
-            phase: "prefix",
-            session: context.session,
-        },
-    )
-    .await?;
+    let public = if let Some(prepared) = prepared {
+        prepared.finish(peer, &input).await?
+    } else {
+        let circuit = helpers::prefix_circuit(
+            &context.options.runtime,
+            context.options.route(),
+            partial.len(),
+            slot,
+            credential_len,
+        )
+        .await?;
+        helpers::circuit_pair(
+            peer,
+            NativeRole::Concurro,
+            &context.options.runtime,
+            tunnel,
+            CircuitSpec {
+                circuit: &circuit,
+                private: &input,
+                phase: "prefix",
+                session: context.session,
+            },
+        )
+        .await?
+    };
     ensure!(public.len() > 97, "protected prefix shape mismatch");
     let mut client_secret = [0; 32];
     let mut server_secret = [0; 32];
