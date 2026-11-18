@@ -6,12 +6,13 @@ User-facing changes to the Sponsor relay per release.
 
 ## [0.1.0](https://github.com/concurro/concurro-relay/releases/tag/v0.1.0) - 2026-11-18
 
-### Changed
+Initial release of the Concurro Sponsor CLI for macOS on Apple Silicon.
 
-- Use release-plz and dist with a dedicated release bot
-- Expose owner-scoped Sponsor connection and session telemetry
-- Make macOS relay packages self-contained
-- Port TLS 1.3 relay orchestration to Rust
-- Add concurrent TLS 1.3 sponsor relay backend
-- Test what a verifier rejects
-- Add the relay, its verifier and a development stand-in for Concurro
+- Sponsor Claude Code and Codex tasks using provider credentials kept on your machine.
+- Connect to providers from your own machine, with joint TLS setup and request proofs.
+- Reuse connections across turns with Claude HTTP/2 Message Threads and Codex WebSocket continuations.
+- Run multiple Claude and Codex sessions at once.
+- Register through your Concurro account and view request activity and reported usage in the terminal.
+- Install a self-contained package with the native proof runtime and required libraries.
+
+The package is ad hoc signed, not notarized. ChatGPT sign-in must be renewed manually when its access token expires.
