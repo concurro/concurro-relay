@@ -22,11 +22,16 @@ The relay keeps provider connections open between turns. Each new connection nee
 
 ## Installation
 
-Sponsor packages run on **macOS with Apple Silicon**. They include the proof runtime and its libraries, so you don't need Rust, Python, or Homebrew to run the relay. You'll need the `claude` or `codex` CLI to sign in to that provider.
+Sponsor packages include the proof runtime and its libraries, so you don't need Rust, Python, or Homebrew to run the relay. You'll need the `claude` or `codex` CLI to sign in to that provider.
+
+| Platform | Archive | Requirements |
+| ---- | ---- | ---- |
+| macOS, Apple Silicon | `concurro-relay-aarch64-apple-darwin.tar.gz` | — |
+| Linux x86-64 | `concurro-relay-x86_64-unknown-linux-gnu.tar.gz` | glibc 2.38 or newer (tested on Ubuntu 24.04); an x86-64-v3 CPU with AES and PCLMUL |
 
 Download packages from the [Releases page](https://github.com/concurro/concurro-relay/releases). See the [installation instructions](docs/releasing.md#the-sponsor-bundle-and-installing-it) for checking and installing the download, or [build from source](#development).
 
-Keep `bin/` and `native-runtime/` together when installing a bundle. macOS bundles are ad hoc signed, not notarized. There are no Linux or Windows Sponsor packages yet. The hosted verifier has a separate Linux amd64 container build.
+Keep `bin/` and `native-runtime/` together when installing a bundle. macOS bundles are ad hoc signed, not notarized. Linux bundles use the system's glibc and carry every other library. Each bundle lists its third-party components and their notices in `licenses/`. There are no Windows Sponsor packages yet. The hosted verifier has a separate Linux amd64 container build.
 
 ## Quick start
 
@@ -55,7 +60,7 @@ The relay opens outbound connections to Concurro and the provider; you don't nee
 | Claude | Run `claude setup-token` and paste the token into the relay's sign-in prompt |
 | ChatGPT | The relay starts `codex login --device-auth` with its own temporary Codex home |
 
-The relay keeps its own credentials without changing your existing CLI logins. On macOS, it stores provider credentials in Keychain. If you set `CLAUDE_CODE_OAUTH_TOKEN`, the relay uses that token instead of the saved Claude credential.
+The relay keeps its own credentials without changing your existing CLI logins. On macOS, it stores provider credentials in Keychain; on Linux, in files only your user can read. If you set `CLAUDE_CODE_OAUTH_TOKEN`, the relay uses that token instead of the saved Claude credential.
 
 Your Concurro registration and provider sign-ins are separate. If a provider login expires, use its `connect` command below to sign in again. Your Concurro registration stays in place. The relay doesn't refresh ChatGPT access tokens automatically.
 
@@ -99,7 +104,7 @@ Claude uses HTTP/2 with compact Message Threads continuations by default. Codex 
 
 Concurro can see prompts, responses, and some account metadata, but not the provider token. The provider sees the Sponsor's IP address. Bootstrap costs CPU time and bandwidth; keeping connections open and sending only new conversation content helps keep later turns fast.
 
-The relay saves its identity key in a file only your user can read, under `concurro-relay` in your system's configuration directory. Set `--state-dir` or `CONCURRO_RELAY_HOME` to use another directory. Provider credentials are stored separately in Keychain on macOS.
+The relay saves its identity key in a file only your user can read, under `concurro-relay` in your system's configuration directory. Set `--state-dir` or `CONCURRO_RELAY_HOME` to use another directory. Provider credentials are stored separately: in Keychain on macOS, beside the key on Linux.
 
 ## Development
 

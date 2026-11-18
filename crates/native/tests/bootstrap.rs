@@ -4,10 +4,16 @@ use anyhow::{Context, Result, ensure};
 use concurro_relay_native::{
     NativeRole,
     bootstrap::{self, BootstrapOptions},
-    helpers::{self, Runtime},
+    helpers::{self, Peer, Runtime},
+    proof,
 };
 use concurro_relay_native_transport::tunnel::{Role, Tunnel};
-use concurro_relay_tls13::handshake::Profile;
+use concurro_relay_provider_protocol::codex::{RequestBinding, RequestClaim};
+use concurro_relay_tls13::{
+    handshake::Profile,
+    record::{self, Epoch},
+};
+use ring::digest;
 use serde_json::{Value, json};
 use std::{
     env, fs,
@@ -345,6 +351,93 @@ async fn untrusted_provider_aborts_bootstrap() -> Result<()> {
     );
     let _ = provider.kill().await;
     let _ = provider.wait().await;
+    Ok(())
+}
+
+/// Each role's packaged request-proof helper proves, then verifies, two successive records.
+#[tokio::test]
+#[ignore = "requires CONCURRO_PHASE3_FIXTURE_BUNDLE with accepted native helpers"]
+async fn packaged_request_proof() -> Result<()> {
+    let bundle = PathBuf::from(
+        env::var_os("CONCURRO_PHASE3_FIXTURE_BUNDLE").context("accepted bundle path missing")?,
+    );
+    let fixture = Fixture::new(bundle, Profile::Codex)?;
+    let run = fixture.root.join("request-proof");
+    let sponsor_runtime = fixture.runtime(&run, "sponsor", NativeRole::Sponsor);
+    let concurro_runtime = fixture.runtime(&run, "concurro", NativeRole::Concurro);
+    fs::create_dir_all(&sponsor_runtime.output)?;
+    fs::create_dir_all(&concurro_runtime.output)?;
+    let (sponsor_control, concurro_control) = tokio::io::duplex(1_000_000);
+    let (sponsor_aux, concurro_aux) = tokio::io::duplex(1_000_000);
+    let sponsor_tunnel = Arc::new(Tunnel::start(sponsor_aux, Role::Sponsor));
+    let concurro_tunnel = Arc::new(Tunnel::start(concurro_aux, Role::Concurro));
+    let mut sponsor = Peer {
+        stream: sponsor_control,
+        events: Vec::new(),
+    };
+    let mut concurro = Peer {
+        stream: concurro_control,
+        events: Vec::new(),
+    };
+    // A synthetic session: the commitment the protected prefix would publish for this key.
+    let secret = [7; 32];
+    let key = record::expand::<16>(&secret, b"key")?;
+    let iv = record::expand::<12>(&secret, b"iv")?;
+    let (h2, h3) = ([2; 32], [3; 32]);
+    let commitment = digest::digest(
+        &digest::SHA256,
+        &[
+            b"Concurro/Handoff/v1/request-key".as_slice(),
+            &h2,
+            &h3,
+            &key,
+            &iv,
+        ]
+        .concat(),
+    );
+    let binding = RequestBinding {
+        h2,
+        h3,
+        key_commitment: commitment.as_ref().try_into()?,
+    };
+    let mut records = Epoch::new(secret)?;
+    for (turn, plaintext) in [b"first request".as_slice(), b"continuation"]
+        .into_iter()
+        .enumerate()
+    {
+        let turn = u64::try_from(turn)?;
+        let wire = records.encrypt(plaintext, 23)?;
+        let proved = RequestClaim::new(&binding, &key, &iv, turn, plaintext, &wire);
+        let audited = RequestClaim::new(&binding, &[0; 16], &[0; 12], turn, plaintext, &wire);
+        let (traffic, _) = time::timeout(Duration::from_secs(300), async {
+            tokio::try_join!(
+                proof::request(
+                    &mut sponsor,
+                    NativeRole::Sponsor,
+                    &sponsor_tunnel,
+                    &sponsor_runtime,
+                    &audited,
+                    turn
+                ),
+                proof::request(
+                    &mut concurro,
+                    NativeRole::Concurro,
+                    &concurro_tunnel,
+                    &concurro_runtime,
+                    &proved,
+                    turn
+                ),
+            )
+        })
+        .await
+        .context("request proof timeout")?
+        .with_context(|| format!("request proof {turn}; evidence: {}", run.display()))?;
+        let traffic = traffic.context("Sponsor proof proxy carried nothing")?;
+        ensure!(
+            traffic.concurro_to_sponsor > 0 && traffic.sponsor_to_concurro > 0,
+            "request proof {turn} exchanged no bytes"
+        );
+    }
     Ok(())
 }
 

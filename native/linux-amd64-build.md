@@ -16,8 +16,18 @@
 
 The Linux patches remove host-specific `-march=native` and unconditional RDSEED flags.
 MP-SPDZ's `CONFIG.mine` builds for **x86-64-v3**; the deployment CPU must also support AES
-and PCLMUL. The package contains the hosted verifier, Responses bridge, native worker,
-DiStefano, MP-SPDZ and request-proof binaries and the public circuits.
+and PCLMUL. The hosted package contains the hosted verifier, Responses bridge, native worker,
+DiStefano, MP-SPDZ and request-proof binaries and the public circuits; the runtime image
+provides their shared libraries.
+
+The same build also produces the self-contained Sponsor and Concurro packages in
+`$BUILD/packages/` (`package.py`). They carry every shared library except glibc's, with
+third-party notices in `licenses/`, and need glibc 2.38 or newer (derived from symbol
+versions; see [docs/releasing.md](../docs/releasing.md)). `$BUILD/third-party-sources`
+holds the Debian source packages of the copyleft libraries.
+
+The Sponsor package is released as
+`concurro-relay-x86_64-unknown-linux-gnu.tar.gz` ([docs/releasing.md](../docs/releasing.md)).
 
 ## Build
 
@@ -28,8 +38,12 @@ docker build --platform linux/amd64 -f native/Dockerfile.amd64-runtime -t concur
 ```
 
 The script prepares the sources, builds everything inside the builder container, checks the
-generated circuit and assembles `$BUILD/package-concurro-v3`, the image build context.
-Docker must provide Linux amd64, natively or by emulation.
+generated circuit, and assembles `$BUILD/package-concurro-v3` (the image build context) and
+`$BUILD/packages/`. Docker must provide Linux amd64, natively or by emulation.
+
+`native/test_linux_amd64.sh "$BUILD" ARCHIVE` installs a Sponsor archive made by `release.py`
+in a clean Ubuntu 24.04 container. It checks library loading and runs the offline bootstrap
+and request-proof tests against the installed Sponsor and the Concurro package.
 
 ## Published image
 

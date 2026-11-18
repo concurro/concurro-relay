@@ -1,8 +1,11 @@
 CXX = clang++-19
 ARCH = -march=x86-64-v3 -maes -mpclmul
 MY_CFLAGS += -DLONG_BIT_MAC_KEY -DHANDOFF_MRR_BASE_OT -I/work/DiStefano/src/2pc
-MASCOT_MRR_BASE_OT_OBJECT = /work/DiStefano/build-linux/CMakeFiles/HandoffPartyKrrw.dir/2pc/HandoffBaseOT.cpp.o
+MY_CFLAGS += -ffile-prefix-map=/work=/build -ffile-prefix-map=/repo=/build
+MASCOT_MRR_BASE_OT_OBJECT = /work/DiStefano/build/CMakeFiles/HandoffPartyKrrw.dir/2pc/HandoffBaseOT.cpp.o
 MY_LDLIBS += /work/MP-SPDZ/deps/libOTe2/out/build/linux-clang19/libOTe/liblibOTe.a
 MY_LDLIBS += /work/MP-SPDZ/deps/libOTe2/out/build/linux-clang19/cryptoTools/cryptoTools/libcryptoTools.a
 MY_LDLIBS += /work/MP-SPDZ/deps/libOTe2/out/build/linux-clang19/coproto/coproto/libcoproto.a
 MY_LDLIBS += /work/MP-SPDZ/deps/libOTe2/out/build/linux-clang19/macoro/macoro/libmacoro.a
+# MP-SPDZ's own libOTe build: keep the build path out of its source-location strings.
+OTE_OPTS += -DCMAKE_C_FLAGS=-ffile-prefix-map=/work=/build -DCMAKE_CXX_FLAGS=-ffile-prefix-map=/work=/build

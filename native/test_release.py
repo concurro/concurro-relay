@@ -10,6 +10,8 @@ import tarfile
 import tempfile
 import unittest
 
+from native.plan import planned
+
 NAME = 'concurro-relay-aarch64-apple-darwin'
 ARCHIVE = f'{NAME}.tar.gz'
 PLATFORM = 'aarch64-apple-darwin'
@@ -31,6 +33,7 @@ PLAN = {
     },
 }
 SCRIPT = Path(__file__).with_name('release.py')
+LINUX = 'concurro-relay-x86_64-unknown-linux-gnu'
 
 
 class ReleaseTests(unittest.TestCase):
@@ -59,7 +62,25 @@ class ReleaseTests(unittest.TestCase):
              '--output', str(output), '--version', '0.1.0', '--commit', 'c0ffee',
              '--platform', PLATFORM, '--epoch', str(EPOCH), '--plan', str(self.plan), *extra],
             check=True, capture_output=True, text=True)
-        return Path(result.stdout.strip())
+        return Path(result.stdout.splitlines()[0])
+
+    def test_third_party_sources(self):
+        """--sources writes a separate checksummed archive that dist's fragment leaves out."""
+        sources = self.root / 'sources'
+        sources.mkdir()
+        (sources / 'gmp_6.3.0+dfsg-3.dsc').write_text('dsc')
+        (sources / 'gmp_6.3.0+dfsg.orig.tar.xz').write_bytes(b'orig')
+        archive = self.release(self.root / 'distrib', '--sources', str(sources))
+        extra = archive.with_name(f'{NAME}-third-party-sources.tar.gz')
+        digest = hashlib.sha256(extra.read_bytes()).hexdigest()
+        self.assertEqual(extra.with_name(f'{extra.name}.sha256').read_text(),
+                         f'{digest}  {extra.name}\n')
+        with tarfile.open(extra) as tar:
+            self.assertEqual(tar.getnames(), [
+                f'{NAME}-third-party-sources', f'{NAME}-third-party-sources/gmp_6.3.0+dfsg-3.dsc',
+                f'{NAME}-third-party-sources/gmp_6.3.0+dfsg.orig.tar.xz'])
+        fragment = archive.with_name(f'{PLATFORM}-dist-manifest.json').read_text()
+        self.assertNotIn('third-party-sources', fragment)
 
     def test_checksums_agree(self):
         """The `.sha256` file and the manifest fragment both carry the archive's digest."""
@@ -106,6 +127,22 @@ class ReleaseTests(unittest.TestCase):
             self.release(self.root / 'distrib', '--forbid', '/Users/builder')
         self.assertIn('native-runtime/lib/libhelper.dylib contains build path', raised.exception.stderr)
         self.assertFalse((self.root / 'distrib' / ARCHIVE).exists())
+
+
+class PlanTests(unittest.TestCase):
+    """Find each target's planned archive, as both build-sponsor.yml jobs do."""
+
+    def test_each_target_finds_its_archive(self):
+        """The release version and the archive whose target triples include the target."""
+        plan = json.loads(json.dumps(PLAN))
+        plan['releases'] = [{'app_name': 'concurro-relay', 'app_version': '0.1.1'}]
+        plan['artifacts'][f'{LINUX}.tar.gz'] = {
+            'name': f'{LINUX}.tar.gz', 'kind': 'executable-zip',
+            'target_triples': ['x86_64-unknown-linux-gnu']}
+        self.assertEqual(planned(plan, PLATFORM), ('0.1.1', NAME))
+        self.assertEqual(planned(plan, 'x86_64-unknown-linux-gnu'), ('0.1.1', LINUX))
+        with self.assertRaises(ValueError):
+            planned(plan, 'x86_64-pc-windows-msvc')
 
 
 if __name__ == '__main__':

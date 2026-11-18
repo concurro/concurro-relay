@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "concurro-relay"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "concurro-relay-dev"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "concurro-relay-hosted"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "concurro-relay-native"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "concurro-relay-native-transport"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -548,7 +548,7 @@ dependencies = [
 
 [[package]]
 name = "concurro-relay-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -566,7 +566,7 @@ dependencies = [
 
 [[package]]
 name = "concurro-relay-provider-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "concurro-relay-protocol",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "concurro-relay-tls13"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "concurro-relay-verifier"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "concurro-relay-protocol",

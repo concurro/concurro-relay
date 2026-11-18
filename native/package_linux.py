@@ -1,10 +1,13 @@
-"""Assemble the Linux amd64 hosted verifier runtime from qualified ELF inputs."""
+"""Assemble the Linux amd64 hosted verifier runtime from qualified ELF inputs.
+
+The hosted image provides the helpers' shared libraries (Dockerfile.amd64-runtime); the
+downloadable Sponsor and Concurro packages carry theirs (package.py).
+"""
 
 import argparse
-import shutil
 from pathlib import Path
 
-from package import copy
+from package import copy, find_openssl, runtime_data, runtime_images
 
 
 def assemble(args):
@@ -12,39 +15,16 @@ def assemble(args):
     output = args.output.resolve()
     if output.exists():
         raise FileExistsError(output)
-    runtime = output / "native-runtime/runtime"
+    bundle = output / "native-runtime"
+    runtime = bundle / "runtime"
     sources = [
         (args.hosted, output / "bin/concurro-relay-hosted"),
         (args.bridge, output / "bin/responses-bridge"),
-        (args.worker, output / "native-runtime/concurro-native-worker"),
-        (args.openssl, output / "native-runtime/bin/openssl"),
-        (Path(__file__).with_name("openssl.cnf"), output / "native-runtime/bin/openssl.cnf"),
-        (args.handshake_circuit,
-         runtime / "DiStefano/handoff-handshake-shares-cached-hkdf.txt"),
-        (args.distefano_build / "emp-tool/libemp-tool.so",
-         runtime / "DiStefano/build/emp-tool/libemp-tool.so"),
-        (args.mp_spdz / "mascot-party.x", runtime / "MP-SPDZ/mascot-party.x"),
-        (args.mp_spdz / "libSPDZ.so", runtime / "MP-SPDZ/libSPDZ.so"),
-        (args.request_proof, runtime / "request-proof/target/release/handoff-request-proof"),
+        (args.worker, bundle / "concurro-native-worker"),
+        (find_openssl(args.openssl), bundle / "bin/openssl"),
     ]
-    sources += [
-        (args.distefano_build / name, runtime / "DiStefano/build" / name)
-        for name in ("HandoffKeyShare", "HandoffPartyKrrw",
-                     "HandoffPartyKrrwPrepared", "HandoffPrefix")
-    ]
-    sources += [
-        (args.distefano / "src/emp-tool/emp-tool/circuits/files/bristol_format" / name,
-         runtime / "DiStefano/src/emp-tool/emp-tool/circuits/files/bristol_format" / name)
-        for name in ("aes128_full.txt", "sha-256-multiblock-aligned.txt")
-    ]
-    sources += [
-        (args.distefano / "src/2pc/vhdl" / name, runtime / "DiStefano/src/2pc/vhdl" / name)
-        for name in ("ModAdd256.txt", "ModAdd384.txt", "ModAdd521.txt")
-    ]
-    sources += [
-        (args.mp_spdz / "Programs" / name, runtime / "MP-SPDZ/Programs" / name)
-        for name in ("Bytecode/concurro_ectf_field-0.bc", "Schedules/concurro_ectf_field.sch")
-    ]
+    sources += runtime_images(args.runtime.resolve(), runtime, ".so")
+    sources += runtime_data(args.runtime.resolve(), runtime)
     for origin, destination in sources:
         copy(origin, destination)
     print(output)
@@ -53,13 +33,9 @@ def assemble(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--runtime", type=Path, required=True, help="the native build directory")
     parser.add_argument("--hosted", type=Path, required=True)
     parser.add_argument("--bridge", type=Path, required=True)
     parser.add_argument("--worker", type=Path, required=True)
-    parser.add_argument("--openssl", type=Path, default=Path(shutil.which("openssl") or "openssl"))
-    parser.add_argument("--distefano", type=Path, required=True)
-    parser.add_argument("--distefano-build", type=Path, required=True)
-    parser.add_argument("--handshake-circuit", type=Path, required=True)
-    parser.add_argument("--mp-spdz", type=Path, required=True)
-    parser.add_argument("--request-proof", type=Path, required=True)
+    parser.add_argument("--openssl", help="default: openssl on PATH")
     assemble(parser.parse_args())

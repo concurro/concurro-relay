@@ -14,15 +14,18 @@ dist = false
 # dist's installers install only executables, which would drop native-runtime/, so none
 # are generated; docs/releasing.md has the install command.
 installers = []
-targets = ["aarch64-apple-darwin"]
+# macOS arm64, and Linux x86-64 with an x86-64-v3 CPU with AES and PCLMUL and glibc 2.38+
+# (the floor its binaries' symbol versions set; tested on Ubuntu 24.04, glibc 2.39).
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Where to host releases
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
 # release-plz dispatches release.yml for its tag; a manual run with tag `dry-run` builds only.
 dispatch-releases = true
-# The bundle is built from source by .github/workflows/build-sponsor.yml, which reuses
-# native/build_macos_arm64.sh, native/package.py and native/release.py.
+# Each bundle is built from source by .github/workflows/build-sponsor.yml, which reuses
+# native/build_macos_arm64.sh or native/build_linux_amd64.sh, native/package.py and
+# native/release.py.
 build-local-artifacts = false
 local-artifacts-jobs = ["./build-sponsor"]
 unix-archive = ".tar.gz"

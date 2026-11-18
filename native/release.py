@@ -64,6 +64,8 @@ def main():
     parser.add_argument('--epoch', type=int, required=True, help='commit time, for archive entries')
     parser.add_argument('--forbid', action='append', default=[], help='build path absent from the package')
     parser.add_argument('--plan', type=Path, help="dist's plan, to record the archive checksum for dist")
+    parser.add_argument('--sources', type=Path,
+                        help='third-party source packages, archived as NAME-third-party-sources')
     args = parser.parse_args()
     package = args.package.resolve()
     audit(package, args.forbid)
@@ -75,6 +77,9 @@ def main():
     if args.plan:
         record(args.plan, output, digest, args.platform)
     print(output)
+    if args.sources:
+        print(archive(args.sources.resolve(), f'{args.name}-third-party-sources', args.epoch,
+                      args.output.resolve())[0])
 
 
 if __name__ == '__main__':
