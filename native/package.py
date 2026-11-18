@@ -1,16 +1,33 @@
-"""Assemble relocatable macOS arm64 Sponsor or Concurro native runtimes."""
+"""Assemble relocatable Sponsor or Concurro native runtimes for macOS arm64 or Linux x86-64."""
 
 import argparse
 import hashlib
 import json
 import os
+import platform
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
+try:
+    from . import notices  # imported as native.package (tests)
+except ImportError:
+    import notices  # run as a script
+
+run = notices.run
+
 SYSTEM_LIBRARIES = ('/usr/lib/', '/System/Library/')
 LOAD_COMMANDS = {'LC_LOAD_DYLIB', 'LC_LOAD_WEAK_DYLIB', 'LC_REEXPORT_DYLIB',
                  'LC_LOAD_UPWARD_DYLIB', 'LC_LAZY_LOAD_DYLIB'}
+# glibc's own libraries stay with the system; every other dependency is packaged.
+GLIBC_LIBRARIES = frozenset({
+    'ld-linux-x86-64.so.2', 'libc.so.6', 'libm.so.6', 'libmvec.so.1', 'libpthread.so.0',
+    'libdl.so.2', 'librt.so.1', 'libutil.so.1', 'libresolv.so.2', 'libanl.so.1',
+})
+ELF_INTERPRETER = '/lib64/ld-linux-x86-64.so.2'
+HANDOFF_BINARIES = ('HandoffKeyShare', 'HandoffPartyKrrw', 'HandoffPartyKrrwPrepared',
+                    'HandoffPrefix')
 
 
 def copy(source, destination):
@@ -67,11 +84,15 @@ def source_dependency(name, image, executable, rpaths):
 
 
 def add_libraries(bundle, roots):
-    """Copy the full library closure, make its load paths local, and sign it."""
+    """Copy the full library closure, make its load paths local, and sign it.
+
+    Returns the copied libraries as (packaged path, system path) pairs.
+    """
     directory = bundle / 'lib'
     queue = [(source, target, source, ()) for source, target in roots]
     targets = {source.resolve(): target for source, target in roots}
     planned = {}
+    copied = []
     while queue:
         source, target, executable, inherited_rpaths = queue.pop()
         if target in planned:
@@ -93,6 +114,7 @@ def add_libraries(bundle, roots):
                         raise ValueError(f'library filename collision: {dependency} and {destination}')
                 else:
                     copy(dependency, destination)
+                    copied.append((destination, dependency))
                 targets[dependency] = destination
                 queue.append((dependency, destination, executable, rpaths))
             local = '@loader_path/' + os.path.relpath(destination, target.parent)
@@ -116,6 +138,7 @@ def add_libraries(bundle, roots):
         subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none',
                         str(path)], check=True, capture_output=True)
     audit_libraries(bundle, planned)
+    return sorted(copied)
 
 
 def audit_libraries(bundle, images):
@@ -145,48 +168,212 @@ def audit_libraries(bundle, images):
             raise ValueError(f'{image}: arm64 code is unavailable')
 
 
+def elf_dynamic(path):
+    """Read needed libraries and search paths from one ELF image's dynamic section."""
+    result = {'needed': [], 'runpath': [], 'rpath': []}
+    for kind, value in re.findall(r'\((NEEDED|RUNPATH|RPATH)\)[^\[]*\[([^\]]*)\]',
+                                  run('readelf', '-d', '--wide', path)):
+        if kind == 'NEEDED':
+            result['needed'].append(value)
+        else:
+            result[kind.lower()].extend(value.split(':'))
+    return result
+
+
+def elf_resolved(path):
+    """Map each library one ELF image loads to the file the build machine's loader picks."""
+    resolved = {}
+    for line in run('ldd', path).splitlines():
+        name, arrow, location = line.strip().partition(' => ')
+        if arrow and location.startswith('not found'):
+            raise FileNotFoundError(f'{path}: {name} not found')
+        if arrow:
+            resolved[name] = Path(location.split(' (0x', 1)[0])
+    return resolved
+
+
+def glibc_floor(versions):
+    """Return the newest glibc version that `readelf -V` output requires, ignoring weak needs."""
+    floor = (2, 2, 5)
+    for version, flags in re.findall(r'Name: GLIBC_([0-9.]+)\s+Flags: (\S+)', versions):
+        if 'WEAK' not in flags:
+            floor = max(floor, tuple(int(part) for part in version.split('.')))
+    return '.'.join(map(str, floor))
+
+
+def add_elf_libraries(package, roots):
+    """Copy the non-glibc library closure into `native-runtime/lib` and point every image at it.
+
+    Each packaged image gets a DT_RUNPATH of `$ORIGIN`-relative directories holding its own
+    direct dependencies; DT_RUNPATH applies only to an image's direct needs. Returns the
+    newest glibc version the package requires and the copied libraries, as
+    (packaged path, system path) pairs.
+    """
+    directory = package / 'native-runtime/lib'
+    targets = {source.resolve(): target for source, target in roots}
+    queue = list(roots)
+    planned = {}
+    copied = []
+    while queue:
+        source, target = queue.pop()
+        if target in planned:
+            continue
+        resolved = elf_resolved(source)
+        directories = set()
+        for name in elf_dynamic(source)['needed']:
+            if name in GLIBC_LIBRARIES:
+                continue
+            if name not in resolved:
+                raise FileNotFoundError(f'{source}: {name} was not resolved')
+            dependency = resolved[name].resolve()
+            destination = targets.get(dependency)
+            if destination is None:
+                destination = directory / name
+                if destination.exists():
+                    if destination.read_bytes() != dependency.read_bytes():
+                        raise ValueError(f'library name collision: {dependency} and {destination}')
+                else:
+                    copy(dependency, destination)
+                    copied.append((destination, dependency))
+                targets[dependency] = destination
+                queue.append((dependency, destination))
+            directories.add(os.path.relpath(destination.parent, target.parent))
+        planned[target] = sorted(directories)
+
+    for path, directories in planned.items():
+        path.chmod(path.stat().st_mode | 0o200)
+        runpath = ':'.join('$ORIGIN' if entry == '.' else f'$ORIGIN/{entry}'
+                           for entry in directories)
+        if runpath:
+            subprocess.run(['patchelf', '--set-rpath', runpath, str(path)], check=True)
+        else:
+            subprocess.run(['patchelf', '--remove-rpath', str(path)], check=True)
+    return audit_elf_libraries(package, planned), sorted(copied)
+
+
+def audit_elf_libraries(package, images):
+    """Check that the package's x86-64 images load only packaged libraries or glibc.
+
+    Returns the newest glibc version the package requires.
+    """
+    root = package.resolve()
+    audited = {path.resolve() for path in images}
+    floors = []
+    for path in sorted(root.rglob('*')):
+        if is_elf(path) and path.resolve() not in audited:
+            raise ValueError(f'{path}: ELF image was not audited')
+    for image in images:
+        header = run('readelf', '-h', '-l', '--wide', image)
+        if 'Class:                             ELF64' not in header or \
+                'Machine:                           Advanced Micro Devices X86-64' not in header:
+            raise ValueError(f'{image}: not an x86-64 ELF64 image')
+        interpreter = re.search(r'Requesting program interpreter: ([^\]]+)\]', header)
+        if interpreter and interpreter.group(1) != ELF_INTERPRETER:
+            raise ValueError(f'{image}: interpreter {interpreter.group(1)}')
+        dynamic = elf_dynamic(image)
+        if dynamic['rpath']:
+            raise ValueError(f'{image}: DT_RPATH remains: {dynamic["rpath"]}')
+        directories = []
+        for entry in dynamic['runpath']:
+            if entry != '$ORIGIN' and not entry.startswith('$ORIGIN/'):
+                raise ValueError(f'{image}: non-local runpath {entry}')
+            directory = (image.parent / entry.removeprefix('$ORIGIN').lstrip('/')).resolve()
+            if not directory.is_relative_to(root):
+                raise ValueError(f'{image}: runpath {entry} escapes the package')
+            directories.append(directory)
+        for name in dynamic['needed']:
+            if name in GLIBC_LIBRARIES:
+                continue
+            found = [directory / name for directory in directories if (directory / name).is_file()]
+            if not found:
+                raise FileNotFoundError(f'{image}: {name} is not in the package')
+            if found[0].resolve() not in audited:
+                raise ValueError(f'{image}: dependency {name} was not audited')
+        floors.append(glibc_floor(run('readelf', '-V', '--wide', image)))
+    return max(floors, key=lambda version: tuple(map(int, version.split('.'))))
+
+
+def find_openssl(path):
+    """The OpenSSL executable to package: `path`, or else `openssl` on PATH."""
+    found = path or shutil.which('openssl')
+    if not found:
+        raise FileNotFoundError('openssl is not on PATH; pass --openssl')
+    return Path(found).resolve()
+
+
+def is_elf(path):
+    """Whether `path` is a regular ELF file."""
+    if path.is_symlink() or not path.is_file():
+        return False
+    with path.open('rb') as handle:
+        return handle.read(4) == b'\x7fELF'
+
+
+def runtime_images(source, runtime, library):
+    """Native helper executables and libraries: (built path, packaged path) pairs.
+
+    `library` is the shared-library suffix of the platform's emp-tool build.
+    """
+    images = [(source / 'DiStefano/build' / name, runtime / 'DiStefano/build' / name)
+              for name in HANDOFF_BINARIES]
+    images.append((source / f'DiStefano/build/emp-tool/libemp-tool{library}',
+                   runtime / f'DiStefano/build/emp-tool/libemp-tool{library}'))
+    images += [(source / 'MP-SPDZ' / name, runtime / 'MP-SPDZ' / name)
+               for name in ('mascot-party.x', 'libSPDZ.so')]
+    images.append((source / 'request-proof/target/release/handoff-request-proof',
+                   runtime / 'request-proof/target/release/handoff-request-proof'))
+    return images
+
+
+def runtime_data(source, runtime):
+    """Public circuits and programs the helpers read: (built path, packaged path) pairs."""
+    data = [(source / 'DiStefano/handoff-handshake-shares-cached-hkdf.txt',
+             runtime / 'DiStefano/handoff-handshake-shares-cached-hkdf.txt')]
+    data += [(source / 'DiStefano/src/emp-tool/emp-tool/circuits/files/bristol_format' / name,
+              runtime / 'DiStefano/src/emp-tool/emp-tool/circuits/files/bristol_format' / name)
+             for name in ('aes128_full.txt', 'sha-256-multiblock-aligned.txt')]
+    data += [(source / 'DiStefano/src/2pc/vhdl' / name, runtime / 'DiStefano/src/2pc/vhdl' / name)
+             for name in ('ModAdd256.txt', 'ModAdd384.txt', 'ModAdd521.txt')]
+    data += [(source / 'MP-SPDZ/Programs' / name, runtime / 'MP-SPDZ/Programs' / name)
+             for name in ('Bytecode/concurro_ectf_field-0.bc', 'Schedules/concurro_ectf_field.sch')]
+    data.append((Path(__file__).with_name('openssl.cnf'), runtime.parent / 'bin/openssl.cnf'))
+    return data
+
+
 def assemble(args):
     """Copy role-required Rust binaries, native helpers, circuits, and libraries."""
     source = args.runtime.resolve()
     output = args.output.resolve()
     if output.exists():
         raise FileExistsError(output)
+    linux = platform.system() == 'Linux'
     bundle = output / 'native-runtime'
     runtime = bundle / 'runtime'
     binary = args.relay if args.role == 'sponsor' else args.verifier
-    executable = output / 'bin' / binary.name
-    worker = bundle / 'concurro-native-worker'
-    openssl = Path(args.openssl).resolve()
-    roots = [(binary, executable), (args.worker, worker),
+    openssl = find_openssl(args.openssl)
+    roots = [(binary, output / 'bin' / binary.name),
+             (args.worker, bundle / 'concurro-native-worker'),
              (openssl, bundle / 'bin/openssl')]
-    for name in ('HandoffKeyShare', 'HandoffPartyKrrw',
-                 'HandoffPartyKrrwPrepared', 'HandoffPrefix'):
-        roots.append((source / 'DiStefano/build' / name,
-                      runtime / 'DiStefano/build' / name))
-    roots.append((source / 'DiStefano/build/emp-tool/libemp-tool.dylib',
-                  runtime / 'DiStefano/build/emp-tool/libemp-tool.dylib'))
-    for name in ('mascot-party.x', 'libSPDZ.so'):
-        roots.append((source / 'MP-SPDZ' / name, runtime / 'MP-SPDZ' / name))
-    roots.append((source / 'request-proof/target/release/handoff-request-proof',
-                  runtime / 'request-proof/target/release/handoff-request-proof'))
-    for origin, destination in roots:
+    roots += runtime_images(source, runtime, '.so' if linux else '.dylib')
+    for origin, destination in roots + runtime_data(source, runtime):
         copy(origin, destination)
-    copy(source / 'DiStefano/handoff-handshake-shares-cached-hkdf.txt',
-         runtime / 'DiStefano/handoff-handshake-shares-cached-hkdf.txt')
-    for name in ('aes128_full.txt', 'sha-256-multiblock-aligned.txt'):
-        copy(source / 'DiStefano/src/emp-tool/emp-tool/circuits/files/bristol_format' / name,
-             runtime / 'DiStefano/src/emp-tool/emp-tool/circuits/files/bristol_format' / name)
-    for name in ('ModAdd256.txt', 'ModAdd384.txt', 'ModAdd521.txt'):
-        copy(source / 'DiStefano/src/2pc/vhdl' / name,
-             runtime / 'DiStefano/src/2pc/vhdl' / name)
-    for name in ('Bytecode/concurro_ectf_field-0.bc',
-                 'Schedules/concurro_ectf_field.sch'):
-        copy(source / 'MP-SPDZ/Programs' / name, runtime / 'MP-SPDZ/Programs' / name)
-    copy(Path(__file__).with_name('openssl.cnf'), bundle / 'bin/openssl.cnf')
-    add_libraries(bundle, roots)
-    files = {str(path.relative_to(output)): hashlib.sha256(path.read_bytes()).hexdigest()
-             for path in output.rglob('*') if path.is_file() and not path.is_symlink()}
-    (output / 'manifest.json').write_text(json.dumps({'role': args.role, 'files': files}, indent=2))
+    manifest = {'role': args.role}
+    if linux:
+        glibc, libraries = add_elf_libraries(output, roots)
+        manifest['requires'] = {'glibc': glibc}
+    else:
+        libraries = add_libraries(bundle, roots)
+    workspace = notices.RELAY / 'Cargo.toml'
+    index = notices.collect(
+        output, source, libraries + [(bundle / 'bin/openssl', openssl)],
+        [(workspace, binary.name), (workspace, 'concurro-native-worker'),
+         (source / 'request-proof/Cargo.toml', 'handoff-request-proof')])
+    if args.sources:
+        notices.fetch_sources(index, args.sources)
+    manifest['files'] = {
+        str(path.relative_to(output)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in output.rglob('*') if path.is_file() and not path.is_symlink()}
+    (output / 'manifest.json').write_text(json.dumps(manifest, indent=2))
     print(output)
 
 
@@ -198,5 +385,7 @@ if __name__ == '__main__':
     parser.add_argument('--relay', type=Path, required=True)
     parser.add_argument('--verifier', type=Path, required=True)
     parser.add_argument('--worker', type=Path, required=True)
-    parser.add_argument('--openssl', default='/opt/homebrew/bin/openssl')
+    parser.add_argument('--openssl', help='default: openssl on PATH')
+    parser.add_argument('--sources', type=Path,
+                        help='download the sources of shipped copyleft libraries here')
     assemble(parser.parse_args())

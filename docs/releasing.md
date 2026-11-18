@@ -22,12 +22,18 @@ latest version from `v*` tags.
    replaces each crate's `version.workspace = true` with a literal version.
 3. Merging it creates the tag and dispatches `release.yml` for it. No workflow runs on tag
    pushes; the dispatch starts the build.
-4. In `release.yml`, dist plans the release and calls `build-sponsor.yml`. That job builds the
-   native runtime from source (`native/build_macos_arm64.sh`), packages both roles
+4. In `release.yml`, dist plans the release and calls `build-sponsor.yml`, which has one job
+   per target. Each job builds the native runtime from source, packages both roles
    (`native/package.py`) and archives the Sponsor package (`native/release.py`). It then
-   installs the archive as below and runs the offline bootstrap test against the installed
-   bundle. dist adds the source tarball and `sha256.sum`, then creates the GitHub Release with
-   the version's `CHANGELOG.md` section as notes.
+   installs the archive as below and tests the installed bundle offline.
+   - **macOS arm64:** `native/build_macos_arm64.sh` on `macos-15`; the offline bootstrap test.
+   - **Linux x86-64:** `native/build_linux_amd64.sh` in the Debian 13 builder container on
+     `ubuntu-24.04`. `native/test_linux_amd64.sh` installs the archive in a clean Ubuntu 24.04
+     container. It checks that every packaged image loads only packaged libraries or glibc,
+     then runs the offline bootstrap tests (Codex and Claude HTTP/2) and two request proofs.
+
+   dist adds the source tarball and `sha256.sum`, then creates the GitHub Release with the
+   version's `CHANGELOG.md` section as notes.
 
 release-plz builds the release PR in a copy of the checkout that leaves out gitignored paths,
 where `cargo update` would miss `upstream/`. So the job first runs
@@ -67,15 +73,51 @@ gh workflow run release.yml --ref v0.1.0 -f tag=v0.1.0      # release an existin
 
 ## The Sponsor bundle and installing it
 
-The archive `concurro-relay-aarch64-apple-darwin.tar.gz` holds one directory:
+| Target | Archive | Runs on |
+| ---- | ---- | ---- |
+| `aarch64-apple-darwin` | `concurro-relay-aarch64-apple-darwin.tar.gz` | macOS on Apple Silicon |
+| `x86_64-unknown-linux-gnu` | `concurro-relay-x86_64-unknown-linux-gnu.tar.gz` | Linux x86-64 with glibc 2.38 or newer and an x86-64-v3 CPU with AES and PCLMUL; tested on Ubuntu 24.04 |
+
+Each archive holds one directory:
 
 - `bin/concurro-relay`;
 - `native-runtime/`: the native worker, DiStefano and MP-SPDZ helpers, request-proof,
-  OpenSSL, their dylibs and the public circuits;
-- `manifest.json` (file hashes) and `release.json` (version, commit, platform).
+  OpenSSL, their shared libraries and the public circuits;
+- `manifest.json` (file hashes; on Linux also the glibc version it requires) and
+  `release.json` (version, commit, platform);
+- `licenses/`: third-party notices, with `third-party.json` recording where each component
+  came from (`licenses/README.md` explains the layout):
+  - **System libraries:** Debian package or Homebrew formula and version, plus its copyright
+    or license files and Homebrew SBOM.
+  - **Native helpers:** the upstream git checkouts, by URL and commit, plus their license
+    files and the concurro-relay paths holding Concurro's changes (`modified_by`).
+  - **Rust crates:** those compiled into the binaries, by version and source, plus their
+    license files.
+
+  Components whose upstream has no license file are listed with no notices.
+
+On Linux, every library except glibc's own is in `native-runtime/lib`, found through
+`$ORIGIN`-relative runpaths. The helpers are built for x86-64-v3 (AVX2, BMI2, FMA, LZCNT,
+MOVBE) and also use AES-NI and PCLMULQDQ.
+
+- **glibc 2.38 floor.** This is derived from the binaries' ELF version needs, not from a run
+  on glibc 2.38. The helpers and bundled libraries, built on Debian 13, need GLIBC_2.38. The
+  relay and worker also reference GLIBC_2.39 (`pidfd_spawnp`, `pidfd_getpid`) as a weak
+  version need, which the loader tolerates. On glibc 2.38 it prints a harmless
+  `weak version 'GLIBC_2.39' not found` line when they start.
+- **Tested:** the release build installs and tests the archive on Ubuntu 24.04 (glibc 2.39).
+
+Each archive has a `<archive>-third-party-sources.tar.gz` asset beside it, with its
+`.sha256`. It holds the exact sources of the shipped copyleft libraries (`COPYLEFT` in
+`native/notices.py`):
+
+- **Linux:** the Debian source packages of GMP and of GCC's libstdc++ and libgcc_s, at the
+  installed versions, from the signed Debian archive.
+- **macOS:** GMP's source tarball as recorded in the Homebrew keg's SBOM, verified against
+  its SHA-256.
 
 The relay finds `native-runtime/` beside its `bin/`. dist's shell and Homebrew installers
-install only executables, so dist generates no installer. Install with:
+install only executables, so dist generates no installer. Install on macOS with:
 
 ```bash
 curl -fLO https://github.com/concurro/concurro-relay/releases/latest/download/concurro-relay-aarch64-apple-darwin.tar.gz
@@ -85,8 +127,18 @@ mkdir -p ~/.local/opt && tar -xzf concurro-relay-aarch64-apple-darwin.tar.gz -C 
 export PATH="$HOME/.local/opt/concurro-relay-aarch64-apple-darwin/bin:$PATH"
 ```
 
+On Linux:
+
+```bash
+curl -fLO https://github.com/concurro/concurro-relay/releases/latest/download/concurro-relay-x86_64-unknown-linux-gnu.tar.gz
+curl -fLO https://github.com/concurro/concurro-relay/releases/latest/download/concurro-relay-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c concurro-relay-x86_64-unknown-linux-gnu.tar.gz.sha256
+mkdir -p ~/.local/opt && tar -xzf concurro-relay-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/opt
+export PATH="$HOME/.local/opt/concurro-relay-x86_64-unknown-linux-gnu/bin:$PATH"
+```
+
 Put the directory on `PATH` rather than symlinking the executable elsewhere: the relay locates
-the bundle from its own path. The packages are ad hoc signed, not notarized; a browser
+the bundle from its own path. The macOS packages are ad hoc signed, not notarized; a browser
 download is quarantined by Gatekeeper, and `curl` is not.
 
 ## Requirements
@@ -94,6 +146,9 @@ download is quarantined by Gatekeeper, and `curl` is not.
 - **Concurro Release Bot**, below: the release workflow's GitHub identity.
 - **Build dependencies on the macOS runner:** Homebrew `cmake boost gmp libsodium openssl`,
   and Go (pinned with `actions/setup-go`) for BoringSSL.
+- **On the Linux runner:** Docker. The builder (`native/Dockerfile.amd64-builder`) and the
+  clean Ubuntu 24.04 test image are pinned by digest. The runner's CPU must be x86-64-v3 with
+  AES and PCLMUL to run the tests.
 
 ### Concurro Release Bot
 

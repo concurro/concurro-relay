@@ -1,8 +1,8 @@
 name: Build Sponsor
 
-# dist's local-artifacts job (dist-workspace.toml): builds the self-contained macOS arm64
-# Sponsor bundle from source, installs the archive the way docs/releasing.md documents,
-# tests the installed bundle offline, and uploads the archive and checksum dist planned.
+# dist's local-artifacts jobs (dist-workspace.toml): build the self-contained Sponsor bundle for
+# each target from source, install the archive the way docs/releasing.md documents, test the
+# installed bundle offline, and upload the archive and checksum dist planned.
 on:
   workflow_call:
     inputs:
@@ -28,15 +28,7 @@ jobs:
       - name: Read the planned version and archive
         run: |
           printf '%s' "$PLAN" > "$RUNNER_TEMP/plan.json"
-          python3 - >> "$GITHUB_ENV" <<'EOF'
-          import json, os
-          plan = json.loads(os.environ["PLAN"])
-          release, = plan["releases"]
-          archive, = [name for name, artifact in plan["artifacts"].items()
-                      if artifact["kind"] == "executable-zip" and os.environ["TARGET"] in artifact["target_triples"]]
-          print(f"VERSION={release['app_version']}")
-          print(f"ARCHIVE={archive.removesuffix('.tar.gz')}")
-          EOF
+          python3 native/plan.py "$RUNNER_TEMP/plan.json" "$TARGET" >> "$GITHUB_ENV"
       # BoringSSL in DiStefano generates sources with Go.
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
@@ -55,12 +47,14 @@ jobs:
         run: |
           RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/build --remap-path-prefix=$HOME=/home" \
             cargo build --release --locked -p concurro-relay -p concurro-relay-dev -p concurro-relay-native --bins
-          for role in sponsor concurro; do
-            python3 native/package.py --role "$role" --runtime "$RUNNER_TEMP/native" \
-              --openssl "$(brew --prefix openssl)/bin/openssl" \
-              --relay target/release/concurro-relay --verifier target/release/dev-verifier \
-              --worker target/release/concurro-native-worker --output "$RUNNER_TEMP/packages/$role"
-          done
+          common=(--runtime "$RUNNER_TEMP/native" --openssl "$(brew --prefix openssl)/bin/openssl"
+                  --relay target/release/concurro-relay --verifier target/release/dev-verifier
+                  --worker target/release/concurro-native-worker)
+          # The Sponsor package also fetches the checksummed sources of its copyleft libraries.
+          python3 native/package.py --role sponsor "${common[@]}" \
+            --output "$RUNNER_TEMP/packages/sponsor" --sources "$RUNNER_TEMP/third-party-sources"
+          python3 native/package.py --role concurro "${common[@]}" \
+            --output "$RUNNER_TEMP/packages/concurro"
           python3 -B -m unittest native.test_package -v
       - name: Archive the Sponsor package
         run: |
@@ -68,7 +62,8 @@ jobs:
             --name "$ARCHIVE" --output target/distrib --plan "$RUNNER_TEMP/plan.json" \
             --version "$VERSION" --commit "$GITHUB_SHA" --platform "$TARGET" \
             --epoch "$(git log -1 --format=%ct)" \
-            --forbid "$HOME" --forbid "$GITHUB_WORKSPACE" --forbid "$RUNNER_TEMP"
+            --forbid "$HOME" --forbid "$GITHUB_WORKSPACE" --forbid "$RUNNER_TEMP" \
+            --sources "$RUNNER_TEMP/third-party-sources"
       - name: Install the archive and test it offline
         run: |
           # The documented install: verify the checksum, extract, run bin/concurro-relay.
@@ -84,6 +79,45 @@ jobs:
           cp -R "$RUNNER_TEMP/packages/concurro" "$check/concurro"
           CONCURRO_PHASE3_FIXTURE_BUNDLE="$check/sponsor/native-runtime" \
             cargo test --release --locked -p concurro-relay-native --test bootstrap -- --ignored rust_bootstrap
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-build-local-${{ env.TARGET }}
+          path: target/distrib/
+          if-no-files-found: error
+
+  x86_64-unknown-linux-gnu:
+    name: Sponsor bundle (x86_64-unknown-linux-gnu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      PLAN: ${{ inputs.plan }}
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the planned version and archive
+        run: |
+          printf '%s' "$PLAN" > "$RUNNER_TEMP/plan.json"
+          python3 native/plan.py "$RUNNER_TEMP/plan.json" "$TARGET" >> "$GITHUB_ENV"
+      - name: Prepare pinned upstream sources
+        run: ./scripts/upstream.sh
+      # In the builder container: the native runtime, the Rust binaries, the hosted package,
+      # the Sponsor and Concurro packages with their library closures and notices, the Debian
+      # sources of their copyleft libraries, and the package tests.
+      - name: Build and package both roles
+        run: native/build_linux_amd64.sh "$RUNNER_TEMP/native"
+      # Also archives the third-party sources as a separate release asset with its checksum.
+      - name: Archive the Sponsor package
+        run: |
+          python3 native/release.py --package "$RUNNER_TEMP/native/packages/sponsor" \
+            --name "$ARCHIVE" --output target/distrib --plan "$RUNNER_TEMP/plan.json" \
+            --version "$VERSION" --commit "$GITHUB_SHA" --platform "$TARGET" \
+            --epoch "$(git log -1 --format=%ct)" \
+            --forbid "$HOME" --forbid "$GITHUB_WORKSPACE" --forbid "$RUNNER_TEMP" \
+            --forbid /work/ --forbid /repo/ --sources "$RUNNER_TEMP/native/third-party-sources"
+      - name: Install the archive in a clean Linux and test it offline
+        run: native/test_linux_amd64.sh "$RUNNER_TEMP/native" "target/distrib/$ARCHIVE.tar.gz"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: artifacts-build-local-${{ env.TARGET }}
