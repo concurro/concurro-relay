@@ -61,9 +61,15 @@ impl Fixture {
         } else {
             "api.anthropic.com"
         };
+        // An installed openssl.cnf can add its own CA extensions; LibreSSL then repeats the
+        // ones below, and webpki rejects a repeated extension. Only these flags apply.
+        let config = root.join("openssl.cnf");
+        fs::write(&config, "[req]\ndistinguished_name = dn\n[dn]\n")?;
         let output = std::process::Command::new("openssl")
+            .arg("req")
+            .arg("-config")
+            .arg(&config)
             .args([
-                "req",
                 "-x509",
                 "-newkey",
                 "rsa:2048",
@@ -90,8 +96,10 @@ impl Fixture {
             String::from_utf8_lossy(&output.stderr)
         );
         let output = std::process::Command::new("openssl")
+            .arg("req")
+            .arg("-config")
+            .arg(&config)
             .args([
-                "req",
                 "-newkey",
                 "rsa:2048",
                 "-nodes",

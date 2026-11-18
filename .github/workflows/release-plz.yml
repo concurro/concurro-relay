@@ -70,6 +70,9 @@ jobs:
           persist-credentials: false
       - name: Prepare pinned upstream sources
         run: ./scripts/upstream.sh
+      # release-pr runs cargo in a copy of the checkout that drops .gitignore'd paths.
+      - name: Keep the upstream sources in release-pr's copy
+        run: ./scripts/release-pr-checkout.sh "$RUNNER_TEMP/release-pr-excludes" "$GITHUB_ENV"
       - id: token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:

@@ -1,158 +1,136 @@
 # concurro-relay
 
-A relay a sponsor runs so that their provider subscription can fund Concurro tasks without
-Concurro holding the token. The relay keeps the provider login on the sponsor's machine,
-performs each request Concurro orders, and proves in zero knowledge that the provider
-received exactly that request. The design is in Concurro's `docs/proposals/sponsor-relay.md`.
+Securely sponsor [Concurro](https://github.com/concurro/concurro) tasks with your Claude or ChatGPT subscription using self-custodied provider credentials.
 
-**Status: first slice.** The relay registers with and serves a development stand-in for
-Concurro. Concurro itself has no relay support yet. This code has had no security review,
-and it depends on a pre-release proof stack carrying local patches.
+## Highlights
 
-## Layout
+- 🔐 **Self-custodied provider credentials:** provider tokens stay on your machine and go only to the provider.
+- ✅ **Verified requests and responses:** Concurro controls the request and authenticates the response through MPC-TLS. QuickSilver ZK proofs let the Sponsor verify the request before forwarding it.
+- 🌐 **Use your own connection:** provider traffic leaves from your machine.
+- 🔎 **See what you sponsor:** audit every prompt before it's sent, with the option to reject.
 
-| Path | Contents |
-| ---- | ---- |
-| `crates/protocol` | What relay and verifier share: messages, request encoding, relay identity |
-| `crates/relay` | The `concurro-relay` program: policy, provider logins, links, commands, full-screen view |
-| `crates/verifier` | Concurro's side: accepts relays' links, orders exchanges, checks proofs |
-| `crates/dev` | Stand-ins for Concurro: `dev-verifier`, a gateway for a real harness, a mock provider |
-| `patches/` | Local patches to TLSNotary, mpz and rangeset |
-| `scripts/upstream.sh` | Fetches the pinned upstream sources into `upstream/` and applies the patches |
-| `native/` | Native TLS 1.3 helper sources, build recipes and packagers |
+The project includes the Sponsor CLI, a hosted verifier, and local development tools.
 
-## Building
+## Supported providers
 
-Owned crates inherit dependencies from the root workspace manifest. Pin crates.io
-versions as `=x.y.z`, use `default-features = false`, and enable required features
-explicitly. Keep the manifest pins and `Cargo.lock` consistent.
+| Subscription | Works with | Connection mechanism |
+| ---- | ---- | ---- |
+| Claude | Claude Code | HTTP/2 |
+| ChatGPT | Codex | WebSockets |
+
+The relay keeps provider connections open between turns. Each new connection needs a cryptographic setup step, called a bootstrap. Use `--links` to choose how many sessions can run at once.
+
+## Installation
+
+Sponsor packages run on **macOS with Apple Silicon**. They include the proof runtime and its libraries, so you don't need Rust, Python, or Homebrew to run the relay. You'll need the `claude` or `codex` CLI to sign in to that provider.
+
+Download packages from the [Releases page](https://github.com/concurro/concurro-relay/releases). See the [installation instructions](docs/releasing.md#the-sponsor-bundle-and-installing-it) for checking and installing the download, or [build from source](#development).
+
+Keep `bin/` and `native-runtime/` together when installing a bundle. macOS bundles are ad hoc signed, not notarized. There are no Linux or Windows Sponsor packages yet. The hosted verifier has a separate Linux amd64 container build.
+
+## Quick start
+
+Run the relay in a terminal:
 
 ```bash
-./scripts/upstream.sh
+concurro-relay
 ```
+
+The setup screen asks for your Concurro relay address and which providers you want to sponsor, then walks you through sign-in. Use the relay address from your Concurro instance. Open the approval link and enter the code in your Concurro account to start serving tasks.
+
+Setup selects providers with a saved, usable login by default. You can change that selection before approving registration.
+
+After setup, you can run without the full-screen view and allow three sessions at once:
 
 ```bash
-cargo nextest run --workspace
+concurro-relay run --links 3
 ```
 
-`upstream/` is not committed. The script refuses to overwrite a source directory; remove
-it to prepare it again after a patch changes.
+The relay opens outbound connections to Concurro and the provider; you don't need to open an inbound port.
 
-## Releases
+### Provider sign-in
 
-- **Verifier image:** [CI](.github/workflows/ci.yml) checks, tests and builds every pull
-  request, `main` push and manual run. Only a `main` push whose checks passed publishes the
-  hosted verifier and Responses bridge as `ghcr.io/concurro/verifier:<full commit SHA>`,
-  built from source by [`native/build_linux_amd64.sh`](native/linux-amd64-build.md).
-- **Sponsor releases:** for changes to the Sponsor's crates, [release-plz](https://release-plz.dev)
-  keeps a release PR with the next version and changelog. Changes outside the crates, such as
-  `native/`, need a hand-made release PR. Merging either tags `vX.Y.Z`, and [dist](https://github.com/axodotdev/cargo-dist)
-  builds the self-contained macOS arm64 Sponsor bundle and publishes the GitHub Release. See
-  [docs/releasing.md](docs/releasing.md), including the install command. Packages are ad hoc
-  signed, not notarized; macOS arm64 is the only packaged platform.
-
-The tests are in `crates/dev/tests`, against a mock provider:
-
-| File | Covers |
+| Provider | How to sign in |
 | ---- | ---- |
-| `relay.rs` | The relay as shipped: registration, links, single requests, WebSocket connections, refusals |
-| `adversarial.rs` | What a verifier rejects: relays which insert, omit, replay or misplace what they prove, hide more than the credential or smuggle a request into it, and providers which send stale, mixed or unfinished responses |
+| Claude | Run `claude setup-token` and paste the token into the relay's sign-in prompt |
+| ChatGPT | The relay starts `codex login --device-auth` with its own temporary Codex home |
 
-The dishonest relays are written in the tests. The relay library's one concession to
-them is `Misproof`, a parameter by which a proof on an open connection can misstate
-where the last one ended.
+The relay keeps its own credentials without changing your existing CLI logins. On macOS, it stores provider credentials in Keychain. If you set `CLAUDE_CODE_OAUTH_TOKEN`, the relay uses that token instead of the saved Claude credential.
 
-## The relay
+Your Concurro registration and provider sign-ins are separate. If a provider login expires, use its `connect` command below to sign in again. Your Concurro registration stays in place. The relay doesn't refresh ChatGPT access tokens automatically.
+
+## Commands
+
+| Command | Purpose |
+| ---- | ---- |
+| `concurro-relay` | Open the interactive setup and activity view |
+| `concurro-relay login` | Register with a Concurro account |
+| `concurro-relay run --links N` | Run up to N sessions at once, printing activity to the terminal |
+| `concurro-relay connect claude_subscription` | Sign in to Claude again |
+| `concurro-relay connect chatgpt_subscription` | Sign in to ChatGPT again |
+| `concurro-relay status` | Show registration and whether each provider is signed in |
+| `concurro-relay logout` | Unregister the relay and delete its saved credentials and identity key |
+
+## Auditing and status
+
+Use the arrow keys to choose a request and Enter to open it. The activity view keeps recent request text in memory. When run outside an interactive terminal, the CLI uses text output, just like `run`.
+
+You can see verified requests and usage reported by Concurro. A continuation shows the new request and a reference to the conversation so far.
+
+The Sponsor doesn't independently verify the usage figures. The activity view doesn't show full provider responses.
+
+Text mode prints request hashes by default. To print full request bodies and save them in session audit files:
+
+```bash
+CONCURRO_NATIVE_AUDIT_TEXT=1 concurro-relay run
+```
+
+`status` reads your saved settings and credentials; it doesn't check a running relay. Use Concurro's Sponsor view to see connection and task status.
+
+## How it works
 
 ```text
-concurro-relay            full-screen view: signs in if needed, then serves
-concurro-relay login      register this relay to a Concurro account
-concurro-relay run        serve, printing one line per event
-concurro-relay connect    sign in to a route's provider again
-concurro-relay status     show the registration and whether each route is ready
-concurro-relay logout     withdraw the registration and remove the relay's key
+GitHub runner → Concurro gateway and verifier → Sponsor relay → Provider
 ```
 
-Without a command and outside a terminal it behaves as `run`.
+Concurro and the Sponsor set up TLS 1.3 with the provider together. The Sponsor sends its credential in a protected part of the connection, then hands off keys so Concurro can send requests and authenticate responses without learning the credential. A QuickSilver proof lets the Sponsor check that each encrypted request matches the text it shows for auditing. The provider uses ordinary TLS, with no protocol changes.
 
-- **Registration:** `login` generates a key pair, asks Concurro for a code and waits for
-  the person to approve it. Concurro stores only the public key.
-- **Links:** the relay dials out over TLS and proves it holds its key on each connection.
-  The verifier sets TCP keepalive, so the idle link of a relay that vanished ends within
-  about a minute.
-  `--links N` serves N requests or connections at once. A link which ends is opened again with backoff; a
-  relay Concurro refuses stops. In the view, `r` registers a refused relay again and
-  keeps its provider sign-ins; `concurro-relay login` does the same from the command
-  line.
-- **Provider credentials** are the relay's own, given to it at sign-in. It does not
-  borrow the logins of Codex or Claude Code, and signing in does not disturb them:
+Claude uses HTTP/2 with compact Message Threads continuations by default. Codex uses WebSockets with `previous_response_id` continuations.
 
-  | Route | Credential |
-  | ---- | ---- |
-  | ChatGPT subscription | The relay runs `codex login --device-auth` with a private directory of its own as Codex's home, takes the login Codex is given and removes the directory |
-  | Claude subscription | The token `claude setup-token` prints, pasted at sign-in; `CLAUDE_CODE_OAUTH_TOKEN` takes precedence if set |
+Concurro can see prompts, responses, and some account metadata, but not the provider token. The provider sees the Sponsor's IP address. Bootstrap costs CPU time and bandwidth; keeping connections open and sending only new conversation content helps keep later turns fast.
 
-  Credentials are kept in the macOS keychain, and elsewhere in files only the owner can
-  read. They are read for every request and never sent to Concurro. A token which says
-  it has expired is not used; `concurro-relay connect <route>` signs in to a provider
-  again without registering again. `logout` removes them.
-- **Routes:** Concurro orders either a single request, which gets a provider connection
-  of its own, or a WebSocket connection, whose turns are each proven while it stays
-  open. A WebSocket turn proves only its own request, which is far cheaper than proving
-  a whole conversation again. Only the ChatGPT route has WebSocket connections.
-- **Policy:** each route's allowlist of path, headers and body fields is built in
-  (`crates/relay/src/routes.rs`). A request outside it is refused and nothing is sent.
-- **State:** the registration and key are kept in the platform's configuration directory
-  under `concurro-relay`, or in `CONCURRO_RELAY_HOME`. Only the owner can read the key.
-- **The view** lists each request the relay proved. `↑`/`↓` move between them, `enter`
-  opens one to show what it said, `tab` switches between its request and its response,
-  and `pgup`/`pgdn` scroll a long one. What the newest fifty said is held in memory
-  only, never written down.
+The relay saves its identity key in a file only your user can read, under `concurro-relay` in your system's configuration directory. Set `--state-dir` or `CONCURRO_RELAY_HOME` to use another directory. Provider credentials are stored separately in Keychain on macOS.
 
-## Trying TLSNotary
+## Development
 
-The dev verifier approves every registration by itself and serves a harness on
-`--listen`. It keeps its registered relays in `dev-verifier.json`, so a relay stays
-registered when the dev verifier is started again.
+The workspace uses Rust. Install [cargo-nextest](https://nexte.st), then fetch and patch the upstream dependencies before building or testing:
 
 ```bash
-cargo run --bin dev-verifier -- --backend tlsnotary --route chatgpt_subscription
+git clone https://github.com/concurro/concurro-relay.git
+cd concurro-relay
+./scripts/upstream.sh
+cargo build --release --locked --workspace
+cargo nextest run --workspace --locked
 ```
 
-```bash
-cargo run --bin concurro-relay -- --server localhost:7443 --server-ca dev-verifier.pem
-```
+Cargo builds the Rust binaries. To run the Sponsor, you'll also need the native helpers: follow the [build and packaging guide](native/README.md).
 
-Then point a harness at the dev verifier. Codex, over a WebSocket
-(`supports_websockets=false` for single requests):
+The guide covers local test providers and both backends. Bootstrap integration tests need the built packages and must be enabled explicitly. The default tests use local fixtures.
 
-```bash
-SPIKE_DUMMY_KEY=dummy codex exec --ignore-user-config --ephemeral --skip-git-repo-check -c 'model_provider="spike"' -c 'model_providers.spike={name="Dev verifier",base_url="http://127.0.0.1:7050/v1",wire_api="responses",supports_websockets=true,env_key="SPIKE_DUMMY_KEY"}' -c 'analytics.enabled=false' "Read README.md and say in one sentence what it is."
-```
+An older TLSNotary backend is available for local development with `dev-verifier --backend tlsnotary`. Hosted Concurro supports only the TLS 1.3 backend.
 
-Claude Code, with `--route claude_subscription` on the dev verifier:
+The script creates `upstream/`, which is excluded from Git, and won't overwrite existing source directories. The root `Cargo.toml` defines shared dependencies and their features; `Cargo.lock` records the resolved versions.
 
-```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:7050 claude -p "List the files in this directory"
-```
-
-## Native TLS 1.3 backend
-
-`dev-verifier --backend tls13` serves packaged Sponsor and Concurro native
-workers over the existing authenticated relay links. TLS 1.3 is the default;
-use `--backend tlsnotary` to select TLSNotary. See
-[native/README.md](native/README.md) for packaging inputs,
-per-link ingress leases, and offline fixtures. Earlier port and benchmark
-evidence is preserved at the commits listed in [ARCHIVE.md](ARCHIVE.md).
-
-## Not done
-
-- Concurro's side: relay records, the real registration flow and the verifier in the
-  gateway's request path. `dev-verifier` stands in for all three.
-- A harness message other than a request while a response is in flight, such as a
-  cancellation: the verifier reads the harness only between turns.
-- Keeping the relay's key in the operating system's keychain.
-- Showing live links and tasks from `status` while another process is serving.
-- Renewing the ChatGPT sign-in without the person: the relay keeps the access token
-  Codex was given and asks for a new sign-in when it expires.
-- Cancellation of a request in flight, signed releases and updates.
+| Path | Purpose |
+| ---- | ---- |
+| `crates/relay` | Sponsor CLI, provider sign-in, activity view, and relay links |
+| `crates/hosted` | Hosted verifier, registration storage, session pool, and Responses bridge |
+| `crates/verifier` | Shared verifier and TLSNotary integration |
+| `crates/protocol` | Relay identity, messages, and provider routes |
+| `crates/tls13` | TLS handshake authentication and record processing |
+| `crates/provider-protocol` | Claude and Codex message formats and response handling |
+| `crates/native` | Native helper control, bootstrap, request proofs, and provider sessions |
+| `crates/native-transport` | Native worker transport |
+| `crates/dev` | Development verifier, gateway, and mock provider tools |
+| `native/` | Helper sources, build recipes, packaging, and integration fixtures |
+| `patches/` | Patches applied to pinned upstream dependencies |

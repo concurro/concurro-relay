@@ -29,6 +29,15 @@ latest version from `v*` tags.
    bundle. dist adds the source tarball and `sha256.sum`, then creates the GitHub Release with
    the version's `CHANGELOG.md` section as notes.
 
+release-plz builds the release PR in a copy of the checkout that leaves out gitignored paths,
+where `cargo update` would miss `upstream/`. So the job first runs
+`scripts/release-pr-checkout.sh`. It moves the `upstream/` ignore rule into a
+`core.excludesFile` that it passes to later steps through git's environment
+(`GIT_CONFIG_COUNT`). The copy then includes the sources, and git still keeps them out of the
+release commit. The workaround depends on release-plz internals, so after changing the pinned
+release-plz version, rerun its validation: release-pr must get past `cargo update`, and the
+commit must contain only the version and changelog files.
+
 The release PR changes only the version and the changelog. CI runs on it like on any PR,
 including `dist plan`. Nothing approves or merges it automatically; it is reviewed and merged
 by hand.
