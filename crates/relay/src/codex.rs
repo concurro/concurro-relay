@@ -207,8 +207,10 @@ mod tests {
         assert!(failing.finished().await.is_err());
         assert!(!home.exists());
 
+        // `exec`, so the process killed on drop is the one holding the test's output; a
+        // `sleep` forked by the shell would outlive it.
         let abandoned =
-            DeviceLogin::start_with(stand_in("waits", "sleep 30").as_os_str(), None).unwrap();
+            DeviceLogin::start_with(stand_in("waits", "exec sleep 30").as_os_str(), None).unwrap();
         let home = abandoned.home.clone();
         drop(abandoned);
         assert!(!home.exists());

@@ -1,6 +1,6 @@
 //! Request-only QuickSilver helper through the existing authenticated tunnel.
 
-use std::{process::Stdio, sync::Arc};
+use std::{io, process::Stdio, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use concurro_relay_native_transport::tunnel::Tunnel;
@@ -44,9 +44,8 @@ pub async fn request<C: AsyncRead + AsyncWrite + Unpin>(
     } else {
         "concurro"
     };
-    let log = runtime
-        .output
-        .join(format!("{name}-request-{turn}-proof.log"));
+    let log_name = format!("{name}-request-{turn}-proof.log");
+    let log = runtime.output.join(&log_name);
     let port = if role == NativeRole::Concurro {
         let assignment = peer.receive("proof_port").await?;
         ensure!(
@@ -112,7 +111,13 @@ pub async fn request<C: AsyncRead + AsyncWrite + Unpin>(
         Ok::<_, anyhow::Error>((Some(completed), None))
     });
     let mut input = child.stdin.take().context("request proof stdin missing")?;
-    input.write_all(&serde_json::to_vec(claim)?).await?;
+    // A helper which exits before reading its claim closes the pipe; its exit status and log,
+    // reported below, say why, rather than the broken pipe.
+    let undelivered = match input.write_all(&serde_json::to_vec(claim)?).await {
+        Ok(()) => None,
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Some(error),
+        Err(error) => return Err(error).context("send the request claim to the proof helper"),
+    };
     drop(input);
     let deadline = runtime.benchmark_timeout.max(Duration::from_secs(90));
     let proxy = if role == NativeRole::Sponsor {
@@ -160,9 +165,13 @@ pub async fn request<C: AsyncRead + AsyncWrite + Unpin>(
     })
     .await
     .context("request proof tasks did not close")??;
+    let delivery = undelivered
+        .as_ref()
+        .map(|error| format!("; its claim was not delivered: {error}"))
+        .unwrap_or_default();
     ensure!(
-        status.success() && completed,
-        "request-{turn} proof failed for {name}: exit {status}"
+        status.success() && completed && undelivered.is_none(),
+        "request-{turn} proof failed for {name}: {status}{delivery}; see {log_name} in the session output"
     );
     ensure!(!proxy || traffic.is_some(), "request proof proxy missing");
     Ok(traffic)
@@ -215,6 +224,11 @@ mod tests {
 
     /// Use a valid claim while the fake helper determines the result.
     fn claim() -> RequestClaim {
+        claim_of(b"request")
+    }
+
+    /// A valid claim for `request`.
+    fn claim_of(request: &[u8]) -> RequestClaim {
         RequestClaim::new(
             &RequestBinding {
                 h2: [1; 32],
@@ -224,7 +238,7 @@ mod tests {
             &[4; 16],
             &[5; 12],
             1,
-            b"request",
+            request,
             b"record",
         )
     }
@@ -297,12 +311,28 @@ mod tests {
         }
     }
 
-    /// A failed helper or one omitting REQUEST_OK cannot release a request.
+    /// A failed helper, one omitting REQUEST_OK, or one exiting before reading its claim cannot
+    /// release a request, and the error reports how the helper ended.
     #[tokio::test]
     async fn prover_rejects_failure_and_missing_marker() {
-        for (script, expected) in [
-            ("#!/bin/sh\necho failed >&2\nexit 1\n", "proof failed"),
-            ("#!/bin/sh\necho completed >&2\nexit 0\n", "proof failed"),
+        // More than a pipe buffer: the write blocks until the helper exits without reading it.
+        let unread = claim_of(&vec![6; 1 << 20]);
+        for (script, claim, expected) in [
+            (
+                "#!/bin/sh\necho failed >&2\nexit 1\n",
+                claim(),
+                "exit status: 1",
+            ),
+            (
+                "#!/bin/sh\necho completed >&2\nexit 0\n",
+                claim(),
+                "exit status: 0",
+            ),
+            (
+                "#!/bin/sh\nexit 3\n",
+                unread,
+                "exit status: 3; its claim was not delivered: Broken pipe",
+            ),
         ] {
             let (root, runtime) = fake_runtime(script);
             let (control_local, mut control_remote) = duplex(4096);
@@ -327,11 +357,16 @@ mod tests {
                 NativeRole::Concurro,
                 &tunnel,
                 &runtime,
-                &claim(),
+                &claim,
                 1,
             )
             .await;
-            assert!(result.unwrap_err().to_string().contains(expected));
+            let error = format!("{:#}", result.unwrap_err());
+            assert!(
+                error.starts_with("request-1 proof failed for concurro: ")
+                    && error.contains(expected),
+                "expected {expected:?}, got: {error}"
+            );
             fs::remove_dir_all(root).unwrap();
         }
     }
