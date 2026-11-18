@@ -601,6 +601,7 @@ dependencies = [
  "concurro-relay-protocol",
  "futures",
  "serde_json",
+ "socket2",
  "tlsn",
  "tokio",
  "tokio-rustls",

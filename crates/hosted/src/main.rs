@@ -1,9 +1,9 @@
 //! Hosted Rust verifier for owner-approved, admitted subscription relay turns.
 
+mod pool;
 mod registry;
 
 use std::{
-    collections::HashMap,
     fs,
     future::Future,
     net::SocketAddr,
@@ -23,6 +23,7 @@ use concurro_relay_protocol::{
 };
 use concurro_relay_verifier::accept::{self, Accepted, Acceptor};
 use futures::{SinkExt, StreamExt};
+use pool::{Lease, Task};
 use registry::{Binding, HostedRegistry};
 use rustls::{ServerConfig, crypto::ring as rustls_ring, pki_types::CertificateDer};
 use serde::Deserialize;
@@ -31,14 +32,12 @@ use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{Mutex, mpsc, watch},
-    task::AbortHandle,
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 
 type RelayLink = Accepted<TlsStream<TcpStream>>;
-type Slot = (String, u32);
-type Turn = (String, String);
+type Pool = pool::Pool<TlsStream<TcpStream>>;
 
 /// Hosted verifier listeners, durable registry, and native provider settings.
 #[derive(Parser)]
@@ -79,42 +78,9 @@ struct Args {
     /// Provider certificate trust roots.
     #[arg(long, default_value = "/etc/ssl/certs/ca-certificates.crt")]
     provider_ca: PathBuf,
-}
-
-/// One task's exclusive relay link and retained native provider session.
-#[derive(Clone)]
-struct Lease {
-    relay: String,
-    slot: Slot,
-    number: u64,
-    deadline: f64,
-    binding: Binding,
-    address: watch::Receiver<Option<SocketAddr>>,
-    abort: AbortHandle,
-}
-
-/// Unassigned authenticated links and task-bound native sessions.
-#[derive(Default)]
-struct Pool {
-    ready: HashMap<Slot, RelayLink>,
-    leases: HashMap<Turn, Lease>,
-    cancelled: HashMap<Turn, f64>,
-}
-
-impl Pool {
-    /// Retire a task before or during native startup and abort its current worker.
-    fn release(&mut self, turn: Turn, deadline: f64, now: f64) {
-        self.cancelled.retain(|_, expiry| *expiry > now);
-        if deadline > now {
-            self.cancelled
-                .entry(turn.clone())
-                .and_modify(|expiry| *expiry = expiry.max(deadline))
-                .or_insert(deadline);
-        }
-        if let Some(lease) = self.leases.remove(&turn) {
-            lease.abort.abort();
-        }
-    }
+    /// Unix start time; live telemetry before it is unknown.
+    #[arg(skip)]
+    started: f64,
 }
 
 /// Private authenticated request identity supplied by Exchange after its one-use claim.
@@ -129,6 +95,11 @@ struct Dispatch {
     relay_id: String,
     version: u64,
     deadline: f64,
+    /// Task the turn belongs to, reported to the relay's owner while leased.
+    #[serde(default)]
+    repository: Option<String>,
+    #[serde(default)]
+    issue: Option<u64>,
 }
 
 /// Owner-authenticated Vault approval, carrying the immutable record identity.
@@ -157,6 +128,20 @@ struct Release {
     turn: String,
     /// Session deadline bounding the cancellation tombstone.
     deadline: f64,
+}
+
+/// Owner-authenticated Vault read of the live state of that owner's relays.
+#[derive(Deserialize)]
+struct StatusQuery {
+    user_id: u64,
+    /// Relay IDs of the owner's current Vault approvals.
+    relays: Vec<String>,
+}
+
+/// Owner-authenticated Vault lookup of a displayed Sponsor code.
+#[derive(Deserialize)]
+struct PendingQuery {
+    code: String,
 }
 
 /// One bounded HTTP request head on the private service listener.
@@ -281,6 +266,11 @@ fn now_seconds() -> Result<f64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64())
 }
 
+/// Current Unix time for liveness telemetry, which tolerates a clock before the epoch.
+fn clock() -> f64 {
+    now_seconds().unwrap_or_default()
+}
+
 /// Bound every phase of a native task, including startup, by its admitted deadline.
 async fn admitted<T>(deadline: f64, work: impl Future<Output = Result<T>>) -> Result<T> {
     let remaining = (deadline - now_seconds()?).max(0.0);
@@ -396,27 +386,28 @@ async fn lease(
         );
         existing.address
     } else {
-        let (slot, binding) = pool_guard
-            .ready
-            .keys()
-            .find_map(|slot| {
-                registry
-                    .binding_for(&slot.0, &dispatch.route)
-                    .and_then(|binding| {
-                        (binding.user_id == dispatch.user_id
-                            && binding.route == dispatch.route
-                            && binding.entry_id == dispatch.entry_id
-                            && binding.record_id == dispatch.record_id
-                            && binding.version == dispatch.version
-                            && slot.0 == dispatch.relay_id)
-                            .then(|| (slot.clone(), binding))
-                    })
-            })
-            .context("no live relay link for exact record")?;
-        let link = pool_guard
-            .ready
-            .remove(&slot)
-            .expect("slot was just selected");
+        // A candidate whose relay disconnected meanwhile is skipped for the next one.
+        let (slot, binding, link) = loop {
+            let (slot, binding) = pool_guard
+                .ready_slots()
+                .find_map(|slot| {
+                    registry
+                        .binding_for(&slot.0, &dispatch.route)
+                        .and_then(|binding| {
+                            (binding.user_id == dispatch.user_id
+                                && binding.route == dispatch.route
+                                && binding.entry_id == dispatch.entry_id
+                                && binding.record_id == dispatch.record_id
+                                && binding.version == dispatch.version
+                                && slot.0 == dispatch.relay_id)
+                                .then(|| (slot.clone(), binding))
+                        })
+                })
+                .context("no live relay link for exact record")?;
+            if let Some(link) = pool_guard.take(&slot, now).await {
+                break (slot, binding, link);
+            }
+        };
         let number = link.number;
         let (sender, receiver) = watch::channel(None);
         let state = pool.clone();
@@ -430,14 +421,7 @@ async fn lease(
             {
                 eprintln!("hosted native session ended: {error:#}");
             }
-            let mut state = state.lock().await;
-            if state
-                .leases
-                .get(&task_key)
-                .is_some_and(|lease| lease.number == number)
-            {
-                state.leases.remove(&task_key);
-            }
+            state.lock().await.finish(&task_key, number, clock());
         });
         pool_guard.leases.insert(
             key,
@@ -446,6 +430,12 @@ async fn lease(
                 slot: slot.clone(),
                 number,
                 deadline,
+                started: now,
+                task: dispatch
+                    .repository
+                    .clone()
+                    .zip(dispatch.issue)
+                    .map(|(repository, issue)| Task { repository, issue }),
                 binding: lease_binding,
                 address: receiver.clone(),
                 abort: worker.abort_handle(),
@@ -621,6 +611,38 @@ async fn private(
                 }
             }
         }
+        ("POST", "/status") => {
+            let query: StatusQuery = json_body(&mut stream, &head).await?;
+            let now = clock();
+            let pool = pool.lock().await;
+            let relays: Vec<_> = query
+                .relays
+                .iter()
+                .filter(|relay| query.user_id > 0 && registry.owner(relay) == Some(query.user_id))
+                .map(|relay| pool.status(relay, now))
+                .collect();
+            drop(pool);
+            answer(
+                &mut stream,
+                200,
+                serde_json::json!({"started": args.started, "now": now, "relays": relays}),
+            )
+            .await
+        }
+        ("POST", "/pending") => {
+            let query: PendingQuery = json_body(&mut stream, &head).await?;
+            match registry.pending(&query.code) {
+                Some(pending) => answer(&mut stream, 200, serde_json::json!(pending)).await,
+                None => {
+                    answer(
+                        &mut stream,
+                        404,
+                        serde_json::json!({"error":"unknown or expired relay code"}),
+                    )
+                    .await
+                }
+            }
+        }
         ("POST", "/release") => {
             let release: Release = json_body(&mut stream, &head).await?;
             ensure!(release.deadline.is_finite(), "invalid release deadline");
@@ -694,7 +716,9 @@ async fn private(
 /// Start both listeners and retain only authenticated, owner-bound live links.
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Arc::new(Args::parse());
+    let mut args = Args::parse();
+    args.started = clock();
+    let args = Arc::new(args);
     let token = Arc::new(fs::read_to_string(&args.service_token)?.trim().to_owned());
     ensure!(!token.is_empty(), "private service token is empty");
     let (withdrawals, mut withdrawn) = mpsc::unbounded_channel();
@@ -702,7 +726,7 @@ async fn main() -> Result<()> {
         HostedRegistry::open(args.registry.clone(), Some(withdrawals))?
             .with_verification_uri(args.verification_url.clone()),
     );
-    let pool = Arc::new(Mutex::new(Pool::default()));
+    let pool = Pool::shared(clock);
     let (ready, mut accepted) = mpsc::unbounded_channel();
     let relay = TcpListener::bind(args.relay_listen).await?;
     let private_listener = TcpListener::bind(args.private_listen).await?;
@@ -714,36 +738,13 @@ async fn main() -> Result<()> {
     let accepted_pool = pool.clone();
     tokio::spawn(async move {
         while let Some(link) = accepted.recv().await {
-            let slot = (link.relay.clone(), link.slot);
-            let mut pool = accepted_pool.lock().await;
-            if let Some((turn, lease)) = pool
-                .leases
-                .iter()
-                .find(|(_, lease)| lease.slot == slot)
-                .map(|(turn, lease)| (turn.clone(), lease.clone()))
-            {
-                lease.abort.abort();
-                pool.leases.remove(&turn);
-            }
-            pool.ready.insert(slot, link);
+            accepted_pool.lock().await.park(link, clock());
         }
     });
     let withdrawn_pool = pool.clone();
     tokio::spawn(async move {
         while let Some(relay) = withdrawn.recv().await {
-            let mut pool = withdrawn_pool.lock().await;
-            pool.ready.retain(|slot, _| slot.0 != relay);
-            let turns: Vec<_> = pool
-                .leases
-                .iter()
-                .filter(|(_, lease)| lease.relay == relay)
-                .map(|(turn, _)| turn.clone())
-                .collect();
-            for turn in turns {
-                if let Some(lease) = pool.leases.remove(&turn) {
-                    lease.abort.abort();
-                }
-            }
+            withdrawn_pool.lock().await.withdraw(&relay, clock());
         }
     });
     eprintln!("hosted relay verifier listening on {}", args.relay_listen);
@@ -763,6 +764,197 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Arguments for in-process private-listener tests.
+    fn fixture_args(started: f64) -> Arc<Args> {
+        Arc::new(Args {
+            relay_listen: "127.0.0.1:0".parse().unwrap(),
+            private_listen: "127.0.0.1:0".parse().unwrap(),
+            certificate: PathBuf::new(),
+            private_key: PathBuf::new(),
+            registry: PathBuf::new(),
+            service_token: PathBuf::new(),
+            verification_url: "http://localhost/credentials/relay".into(),
+            provider_host: String::new(),
+            provider_port: 0,
+            codex_provider_host: String::new(),
+            codex_provider_port: 0,
+            provider_ca: PathBuf::new(),
+            started,
+        })
+    }
+
+    /// Send one private request and return its status and JSON body.
+    async fn private_call(
+        registry: Arc<HostedRegistry>,
+        pool: Arc<Mutex<Pool>>,
+        token: &str,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            private(
+                stream,
+                Arc::new("service".into()),
+                registry,
+                pool,
+                fixture_args(5.0),
+            )
+            .await
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        // A refused request is answered without reading its body.
+        let body = if body.is_null() {
+            String::new()
+        } else {
+            body.to_string()
+        };
+        client
+            .write_all(
+                format!(
+                    "POST {path} HTTP/1.1\r\nX-Concurro-Verifier-Auth: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        server.await.unwrap().unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        (
+            head[9..12].parse().unwrap(),
+            serde_json::from_str(body).unwrap(),
+        )
+    }
+
+    /// Status reports only the requesting owner's relays; pending lookup shows
+    /// a code's device and exact routes; both require the service bearer.
+    #[tokio::test]
+    async fn private_status_and_pending_are_owner_scoped() {
+        use concurro_relay_protocol::link::Registration;
+        use concurro_relay_verifier::accept::Registry;
+
+        let path = std::env::temp_dir().join(format!(
+            "hosted-status-{}.json",
+            hex::encode(concurro_relay_protocol::identity::random::<8>())
+        ));
+        let registry = Arc::new(HostedRegistry::open(path.clone(), None).unwrap());
+        let code = registry
+            .register(Registration {
+                version: 4,
+                name: "studio".into(),
+                public_key: vec![3; 65],
+                routes: vec![Route::ChatgptSubscription, Route::ClaudeSubscription],
+            })
+            .unwrap();
+        let pool = Pool::shared(clock);
+        let pending = |code: &str| serde_json::json!({ "code": code });
+        assert_eq!(
+            private_call(
+                registry.clone(),
+                pool.clone(),
+                "wrong",
+                "/status",
+                serde_json::Value::Null
+            )
+            .await
+            .0,
+            403
+        );
+        let (status, found) = private_call(
+            registry.clone(),
+            pool.clone(),
+            "service",
+            "/pending",
+            pending(&code.user_code),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(found["name"], "studio");
+        assert_eq!(
+            found["routes"],
+            serde_json::json!(["chatgpt-subscription", "claude-subscription"])
+        );
+        assert_eq!(
+            private_call(
+                registry.clone(),
+                pool.clone(),
+                "service",
+                "/pending",
+                pending("BCDF-GHJK")
+            )
+            .await
+            .0,
+            404
+        );
+        let binding = |route: &str, entry: char| Binding {
+            user_id: 7,
+            login: "owner".into(),
+            route: route.into(),
+            entry_id: entry.to_string().repeat(32),
+            record_id: "b".repeat(64),
+            version: 1,
+        };
+        let relay = registry
+            .approve_routes(
+                &code.user_code,
+                vec![
+                    binding("claude-subscription", 'a'),
+                    binding("chatgpt-subscription", 'c'),
+                ],
+            )
+            .unwrap();
+        let query =
+            |user: u64| serde_json::json!({ "user_id": user, "relays": [relay, "relay-other"] });
+        let (status, mine) = private_call(
+            registry.clone(),
+            pool.clone(),
+            "service",
+            "/status",
+            query(7),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(mine["started"], 5.0);
+        assert_eq!(mine["relays"].as_array().unwrap().len(), 1);
+        assert_eq!(mine["relays"][0]["relay"], relay.as_str());
+        assert_eq!(mine["relays"][0]["idle"], 0);
+        assert!(mine["relays"][0]["last_seen"].is_null());
+        let (_, other) = private_call(
+            registry.clone(),
+            pool.clone(),
+            "service",
+            "/status",
+            query(8),
+        )
+        .await;
+        assert_eq!(other["relays"], serde_json::json!([]));
+        fs::remove_file(path).unwrap();
+    }
+
+    /// The task identity is optional, so an Exchange without it still dispatches.
+    #[test]
+    fn dispatch_binding_task_is_optional() {
+        let base = serde_json::json!({
+            "session": "s", "turn": "t", "user_id": 7, "route": "claude-subscription",
+            "entry_id": "a", "record_id": "b", "relay_id": "relay-x", "version": 1, "deadline": 1.0,
+        });
+        let older: Dispatch = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!((older.repository, older.issue), (None, None));
+        let mut current = base;
+        current["repository"] = "acme/demo".into();
+        current["issue"] = 4.into();
+        let current: Dispatch = serde_json::from_value(current).unwrap();
+        assert_eq!(
+            (current.repository.as_deref(), current.issue),
+            (Some("acme/demo"), Some(4))
+        );
+    }
+
     /// A stalled bootstrap cannot outlive the admitted turn.
     #[tokio::test]
     async fn admitted_deadline_covers_stalled_startup() {
@@ -781,7 +973,7 @@ mod tests {
     async fn released_turn_cannot_create_a_late_lease() {
         let now = now_seconds().unwrap();
         let turn = ("session".into(), "turn".into());
-        let pool = Arc::new(Mutex::new(Pool::default()));
+        let pool = Pool::shared(clock);
         pool.lock().await.release(turn, now + 60.0, now);
         let registry = Arc::new(
             HostedRegistry::open(
@@ -790,20 +982,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let args = Arc::new(Args {
-            relay_listen: "127.0.0.1:0".parse().unwrap(),
-            private_listen: "127.0.0.1:0".parse().unwrap(),
-            certificate: PathBuf::new(),
-            private_key: PathBuf::new(),
-            registry: PathBuf::new(),
-            service_token: PathBuf::new(),
-            verification_url: "http://localhost/credentials/relay".into(),
-            provider_host: String::new(),
-            provider_port: 0,
-            codex_provider_host: String::new(),
-            codex_provider_port: 0,
-            provider_ca: PathBuf::new(),
-        });
+        let args = fixture_args(now);
         let dispatch = Dispatch {
             session: "session".into(),
             turn: "turn".into(),
@@ -814,6 +993,8 @@ mod tests {
             relay_id: "relay-fixture".into(),
             version: 1,
             deadline: now + 60.0,
+            repository: None,
+            issue: None,
         };
         let error = lease(pool, registry, args, &dispatch).await.unwrap_err();
         assert!(error.to_string().contains("released"));
@@ -827,7 +1008,8 @@ mod tests {
         let _sender = sender;
         let now = now_seconds().unwrap();
         let turn = ("session".into(), "turn".into());
-        let mut pool = Pool::default();
+        let pool = Pool::shared(clock);
+        let mut pool = pool.lock().await;
         pool.leases.insert(
             turn.clone(),
             Lease {
@@ -835,6 +1017,8 @@ mod tests {
                 slot: ("relay-fixture".into(), 1),
                 number: 1,
                 deadline: now + 60.0,
+                started: now,
+                task: None,
                 binding: Binding {
                     user_id: 7,
                     login: "owner".into(),

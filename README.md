@@ -64,6 +64,8 @@ Without a command and outside a terminal it behaves as `run`.
 - **Registration:** `login` generates a key pair, asks Concurro for a code and waits for
   the person to approve it. Concurro stores only the public key.
 - **Links:** the relay dials out over TLS and proves it holds its key on each connection.
+  The verifier sets TCP keepalive, so the idle link of a relay that vanished ends within
+  about a minute.
   `--links N` serves N requests or connections at once. A link which ends is opened again with backoff; a
   relay Concurro refuses stops. In the view, `r` registers a refused relay again and
   keeps its provider sign-ins; `concurro-relay login` does the same from the command

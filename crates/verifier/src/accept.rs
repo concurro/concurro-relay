@@ -13,6 +13,7 @@ use concurro_relay_protocol::{
     link::{self, Answer, DeviceCode, Hello, PROTOCOL_VERSION, Registered, Registration, Role},
     wire,
 };
+use socket2::{SockRef, TcpKeepalive};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
@@ -24,6 +25,13 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 /// How long a relay has to say what a new connection is for and, where it
 /// must, prove its identity.
 const HELLO_LIMIT: Duration = Duration::from_secs(10);
+
+/// TCP keepalive on relay connections: a vanished relay's idle link ends
+/// within about a minute instead of looking connected indefinitely.
+const KEEPALIVE: TcpKeepalive = TcpKeepalive::new()
+    .with_time(Duration::from_secs(30))
+    .with_interval(Duration::from_secs(10))
+    .with_retries(3);
 
 /// What a verifier knows of the relays registered with it.
 pub trait Registry: Send + Sync + 'static {
@@ -198,7 +206,11 @@ pub async fn serve<R: Registry>(
     while let Ok((stream, _)) = listener.accept().await {
         let (tls, acceptor) = (tls.clone(), acceptor.clone());
         tokio::spawn(async move {
-            if stream.set_nodelay(true).is_err() {
+            if stream.set_nodelay(true).is_err()
+                || SockRef::from(&stream)
+                    .set_tcp_keepalive(&KEEPALIVE)
+                    .is_err()
+            {
                 return;
             }
             if let Ok(stream) = tls.accept(stream).await {

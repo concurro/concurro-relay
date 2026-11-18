@@ -202,10 +202,8 @@ impl HostedRegistry {
         let registered: HashSet<_> = registration
             .routes
             .iter()
-            .map(|route| match route {
-                Route::ClaudeSubscription => "claude-subscription",
-                Route::ChatgptSubscription => "chatgpt-subscription",
-            })
+            .copied()
+            .map(vault_route)
             .collect();
         ensure!(
             registered == routes && registered.len() == registration.routes.len(),
@@ -247,6 +245,38 @@ impl HostedRegistry {
             .and_then(|(_, bindings)| bindings.get(route).cloned())
     }
 
+    /// The device name and exact Vault routes of an unapproved, unexpired code.
+    pub fn pending(&self, code: &str) -> Option<PendingCode> {
+        let state = self.state.lock().expect("registry lock is not poisoned");
+        state
+            .pending
+            .values()
+            .find(|pending| {
+                pending.user_code == code && pending.approved.is_none() && pending.expires > now()
+            })
+            .map(|pending| PendingCode {
+                name: pending.registration.name.clone(),
+                routes: pending
+                    .registration
+                    .routes
+                    .iter()
+                    .copied()
+                    .map(vault_route)
+                    .collect(),
+                expires: pending.expires,
+            })
+    }
+
+    /// The owner every route binding of an approved, unwithdrawn relay belongs to.
+    pub fn owner(&self, relay: &str) -> Option<u64> {
+        let state = self.state.lock().expect("registry lock is not poisoned");
+        state
+            .approved
+            .get(relay)
+            .filter(|_| !state.blocked.contains(relay))
+            .and_then(|(_, bindings)| bindings.iter().next().map(|binding| binding.user_id))
+    }
+
     /// Atomically replace the state file after each change.
     fn keep(&self, state: &State) -> Result<()> {
         let parent = self.file.parent().unwrap_or(Path::new("."));
@@ -258,6 +288,25 @@ impl HostedRegistry {
         fs::rename(temp, &self.file)?;
         fs::File::open(parent)?.sync_all()?;
         Ok(())
+    }
+}
+
+/// What an owner sees of a pending code before approving it.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub struct PendingCode {
+    /// Name the Sponsor registered, usually its host name.
+    pub name: String,
+    /// Exact Vault routes the approval must bind, in registration order.
+    pub routes: Vec<&'static str>,
+    /// Unix expiry of the code.
+    pub expires: u64,
+}
+
+/// A route's name in Vault records.
+fn vault_route(route: Route) -> &'static str {
+    match route {
+        Route::ClaudeSubscription => "claude-subscription",
+        Route::ChatgptSubscription => "chatgpt-subscription",
     }
 }
 
@@ -448,6 +497,15 @@ mod tests {
         };
         assert!(registry.approve(&code.user_code, claude.clone()).is_err());
         assert!(registry.poll(&code.device_code).unwrap().is_none());
+        let pending = registry.pending(&code.user_code).unwrap();
+        assert_eq!(
+            (pending.name.as_str(), pending.routes.as_slice()),
+            (
+                "mixed",
+                &["claude-subscription", "chatgpt-subscription"][..]
+            )
+        );
+        assert_eq!(registry.pending("BCDF-GHJK"), None);
         let relay = registry
             .approve_routes(&code.user_code, vec![claude.clone(), codex.clone()])
             .unwrap();
@@ -459,6 +517,10 @@ mod tests {
             registry.binding_for(&relay, "chatgpt-subscription"),
             Some(codex.clone())
         );
+        // An approved code is no longer offered for lookup; the owner is exact.
+        assert_eq!(registry.pending(&code.user_code), None);
+        assert_eq!(registry.owner(&relay), Some(7));
+        assert_eq!(registry.owner("relay-unknown"), None);
         assert_eq!(
             registry
                 .approve_routes(&code.user_code, vec![claude.clone(), codex.clone()])
@@ -543,6 +605,7 @@ mod tests {
             state.pending.get_mut(&expired.device_code).unwrap().expires = now() - 1;
         }
         reopened.register(registration).unwrap();
+        assert_eq!(reopened.pending(&expired.user_code), None);
         assert!(
             reopened
                 .approve(
@@ -560,8 +623,10 @@ mod tests {
         );
         let journal = path.with_extension("withdrawn");
         fs::create_dir(&journal).unwrap();
+        assert_eq!(reopened.owner(&relay), Some(7));
         assert!(reopened.deregister(&relay).is_err());
         assert_eq!(received.try_recv().unwrap(), relay);
+        assert_eq!(reopened.owner(&relay), None);
         assert_eq!(reopened.binding_for(&relay, "claude-subscription"), None);
         assert!(reopened.public_key(&relay).is_some());
         assert!(HostedRegistry::open(path.clone(), None).is_err());
