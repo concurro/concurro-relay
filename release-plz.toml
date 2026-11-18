@@ -1,0 +1,80 @@
+# Version, changelog and `vX.Y.Z` tag of the Sponsor relay; see docs/releasing.md.
+# dist (dist-workspace.toml) builds the Sponsor bundle and creates the GitHub Release.
+
+[workspace]
+# Nothing goes to crates.io; the latest version comes from git tags.
+git_only = true
+publish = false
+git_release_enable = false
+git_tag_name = "v{{ version }}"
+# Release only when the release PR is merged, not on every push to main.
+release_always = false
+semver_check = false
+pr_labels = ["release"]
+# One product, the Sponsor (concurro-relay). Crates it does not ship are not released; every
+# crate inherits the workspace version, so all stay at the product's version.
+release = false
+changelog_update = false
+git_tag_enable = false
+
+# release-plz notices only changes inside a package's directory. The crates the Sponsor
+# ships form one version group, so a change to any of them proposes a Sponsor release.
+# Changes outside every crate (native/, patches/) need a hand-made release PR;
+# see docs/releasing.md.
+[[package]]
+name = "concurro-relay"
+release = true
+version_group = "sponsor"
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+git_tag_enable = true
+changelog_include = [
+  "concurro-relay-native",
+  "concurro-relay-native-transport",
+  "concurro-relay-protocol",
+  "concurro-relay-provider-protocol",
+  "concurro-relay-tls13",
+]
+
+[[package]]
+name = "concurro-relay-native"
+release = true
+version_group = "sponsor"
+
+[[package]]
+name = "concurro-relay-native-transport"
+release = true
+version_group = "sponsor"
+
+[[package]]
+name = "concurro-relay-protocol"
+release = true
+version_group = "sponsor"
+
+[[package]]
+name = "concurro-relay-provider-protocol"
+release = true
+version_group = "sponsor"
+
+[[package]]
+name = "concurro-relay-tls13"
+release = true
+version_group = "sponsor"
+
+[changelog]
+header = """
+# Changelog
+
+User-facing changes to the Sponsor relay per release.
+
+## [Unreleased]
+"""
+# Commits are plain sentences, not Conventional Commits: everything lands under "Changed"
+# unless it uses a conventional prefix. Edit the entry in the release PR.
+commit_parsers = [
+  { message = "^Merge ", skip = true },
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^(docs|chore|ci|test|style)(\\(.*\\))?:", skip = true },
+  { message = ".*", group = "Changed" },
+]

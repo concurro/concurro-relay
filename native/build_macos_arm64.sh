@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the macOS arm64 native helper runtime from pinned, checked-in source inputs, in the
 # layout native/package.py packages. BUILD_DIR must not exist. Requires Homebrew's cmake,
-# boost, gmp, libsodium and openssl, Python 3 and scripts/upstream.sh's upstream/mpz2.
+# boost, gmp, libsodium and openssl, Go (for BoringSSL), Python 3 and scripts/upstream.sh's
+# upstream/mpz2.
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then

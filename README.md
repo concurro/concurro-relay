@@ -44,12 +44,12 @@ it to prepare it again after a patch changes.
   request, `main` push and manual run. Only a `main` push whose checks passed publishes the
   hosted verifier and Responses bridge as `ghcr.io/concurro/verifier:<full commit SHA>`,
   built from source by [`native/build_linux_amd64.sh`](native/linux-amd64-build.md).
-- **Sponsor packages:** pushing a `vX.Y.Z` tag equal to the workspace version runs the
-  [release workflow](.github/workflows/release.yml). It builds the native helpers from source,
-  packages the self-contained Sponsor for macOS arm64, tests the archive offline, and
-  publishes `concurro-relay-X.Y.Z-macos-arm64.tar.gz` with `SHA256SUMS`. Every run, including
-  a manual one, keeps both as a downloadable Actions artifact; only a tag publishes a release. Packages are ad hoc signed, not notarized. macOS arm64 is the
-  only packaged platform.
+- **Sponsor releases:** for changes to the Sponsor's crates, [release-plz](https://release-plz.dev)
+  keeps a release PR with the next version and changelog. Changes outside the crates, such as
+  `native/`, need a hand-made release PR. Merging either tags `vX.Y.Z`, and [dist](https://github.com/axodotdev/cargo-dist)
+  builds the self-contained macOS arm64 Sponsor bundle and publishes the GitHub Release. See
+  [docs/releasing.md](docs/releasing.md), including the install command. Packages are ad hoc
+  signed, not notarized; macOS arm64 is the only packaged platform.
 
 The tests are in `crates/dev/tests`, against a mock provider:
 

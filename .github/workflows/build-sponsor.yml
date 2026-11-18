@@ -1,0 +1,91 @@
+name: Build Sponsor
+
+# dist's local-artifacts job (dist-workspace.toml): builds the self-contained macOS arm64
+# Sponsor bundle from source, installs the archive the way docs/releasing.md documents,
+# tests the installed bundle offline, and uploads the archive and checksum dist planned.
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  aarch64-apple-darwin:
+    name: Sponsor bundle (aarch64-apple-darwin)
+    runs-on: macos-15
+    timeout-minutes: 150
+    env:
+      PLAN: ${{ inputs.plan }}
+      TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the planned version and archive
+        run: |
+          printf '%s' "$PLAN" > "$RUNNER_TEMP/plan.json"
+          python3 - >> "$GITHUB_ENV" <<'EOF'
+          import json, os
+          plan = json.loads(os.environ["PLAN"])
+          release, = plan["releases"]
+          archive, = [name for name, artifact in plan["artifacts"].items()
+                      if artifact["kind"] == "executable-zip" and os.environ["TARGET"] in artifact["target_triples"]]
+          print(f"VERSION={release['app_version']}")
+          print(f"ARCHIVE={archive.removesuffix('.tar.gz')}")
+          EOF
+      # BoringSSL in DiStefano generates sources with Go.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27.4"
+          cache: false
+      - name: Install build dependencies
+        run: |
+          brew install cmake boost gmp libsodium openssl
+          brew list --versions cmake boost gmp libsodium openssl
+          go version
+      - name: Prepare pinned upstream sources
+        run: ./scripts/upstream.sh
+      - name: Build the native runtime from source
+        run: native/build_macos_arm64.sh "$RUNNER_TEMP/native"
+      - name: Build and package both roles
+        run: |
+          RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/build --remap-path-prefix=$HOME=/home" \
+            cargo build --release --locked -p concurro-relay -p concurro-relay-dev -p concurro-relay-native --bins
+          for role in sponsor concurro; do
+            python3 native/package.py --role "$role" --runtime "$RUNNER_TEMP/native" \
+              --openssl "$(brew --prefix openssl)/bin/openssl" \
+              --relay target/release/concurro-relay --verifier target/release/dev-verifier \
+              --worker target/release/concurro-native-worker --output "$RUNNER_TEMP/packages/$role"
+          done
+          python3 -B -m unittest native.test_package -v
+      - name: Archive the Sponsor package
+        run: |
+          python3 native/release.py --package "$RUNNER_TEMP/packages/sponsor" \
+            --name "$ARCHIVE" --output target/distrib --plan "$RUNNER_TEMP/plan.json" \
+            --version "$VERSION" --commit "$GITHUB_SHA" --platform "$TARGET" \
+            --epoch "$(git log -1 --format=%ct)" \
+            --forbid "$HOME" --forbid "$GITHUB_WORKSPACE" --forbid "$RUNNER_TEMP"
+      - name: Install the archive and test it offline
+        run: |
+          # The documented install: verify the checksum, extract, run bin/concurro-relay.
+          install="$RUNNER_TEMP/install"
+          mkdir "$install"
+          (cd target/distrib && shasum -a 256 -c "$ARCHIVE.tar.gz.sha256")
+          tar -xzf "target/distrib/$ARCHIVE.tar.gz" -C "$install"
+          "$install/$ARCHIVE/bin/concurro-relay" --version
+          # The bootstrap test pairs the installed Sponsor with the Concurro role package.
+          check="$RUNNER_TEMP/check"
+          mkdir "$check"
+          ln -s "$install/$ARCHIVE" "$check/sponsor"
+          cp -R "$RUNNER_TEMP/packages/concurro" "$check/concurro"
+          CONCURRO_PHASE3_FIXTURE_BUNDLE="$check/sponsor/native-runtime" \
+            cargo test --release --locked -p concurro-relay-native --test bootstrap -- --ignored rust_bootstrap
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-build-local-${{ env.TARGET }}
+          path: target/distrib/
+          if-no-files-found: error

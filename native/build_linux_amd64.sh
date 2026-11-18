@@ -27,6 +27,9 @@ docker run --rm --platform linux/amd64 \
     -e HANDOFF_LIBOTE2_INCLUDE=/work/MP-SPDZ/local/include \
     -e CXX=clang++-19 -e "HANDOFF_CXXFLAGS=-mssse3 -maes -mpclmul" \
     concurro-native-builder:hosted-amd64-rust100 bash -eux -c '
+# The mounted sources belong to the invoking user, not the container root. Trust exactly their
+# git repositories, so MP-SPDZ make can run git on its submodules.
+find /work/DiStefano /work/MP-SPDZ -name .git -prune -printf "%h\n" | xargs -r -n 1 git config --global --add safe.directory
 cmake -S /work/MP-SPDZ/deps/libOTe2 -B /work/MP-SPDZ/deps/libOTe2/out/build/linux-clang19 \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-19 -DCMAKE_CXX_COMPILER=clang++-19 \
     -DLIBOTE_BUILD_DIR=/work/MP-SPDZ/deps/libOTe2/out/build/linux-clang19 \

@@ -1,0 +1,132 @@
+# Releasing
+
+| Piece | Tool | Config |
+| ---- | ---- | ---- |
+| Version, changelog, `vX.Y.Z` tag | [release-plz](https://release-plz.dev) | `release-plz.toml`, `.github/workflows/release-plz.yml` |
+| Sponsor bundle, checksums, GitHub Release | [dist](https://github.com/axodotdev/cargo-dist) | `dist-workspace.toml`, `.github/workflows/release.yml` (generated), `.github/workflows/build-sponsor.yml` |
+| Hosted verifier image | CI | `.github/workflows/ci.yml` ([details](../native/linux-amd64-build.md)) |
+
+The released product is `concurro-relay`, the Sponsor. Every crate inherits the workspace
+version, so all of them move with it. Nothing is published to crates.io; release-plz reads the
+latest version from `v*` tags.
+
+## Flow
+
+1. A push to `main` that changes `concurro-relay` or a crate it ships opens or updates the
+   release PR (label `release`), authored by Concurro Release Bot. The PR bumps the workspace
+   version and adds a `CHANGELOG.md` entry from those commits.
+2. Edit the PR before merging: tidy the changelog entry, which leaves out commits outside
+   the crates such as `native/` or `patches/`, and pick the version. release-plz bumps the
+   patch version for plain commits; for another version, edit `[workspace.package]` `version`
+   in `Cargo.toml` and run `cargo update --workspace`. Don't use `release-plz set-version`: it
+   replaces each crate's `version.workspace = true` with a literal version.
+3. Merging it creates the tag and dispatches `release.yml` for it. No workflow runs on tag
+   pushes; the dispatch starts the build.
+4. In `release.yml`, dist plans the release and calls `build-sponsor.yml`. That job builds the
+   native runtime from source (`native/build_macos_arm64.sh`), packages both roles
+   (`native/package.py`) and archives the Sponsor package (`native/release.py`). It then
+   installs the archive as below and runs the offline bootstrap test against the installed
+   bundle. dist adds the source tarball and `sha256.sum`, then creates the GitHub Release with
+   the version's `CHANGELOG.md` section as notes.
+
+The release PR changes only the version and the changelog. CI runs on it like on any PR,
+including `dist plan`. Nothing approves or merges it automatically; it is reviewed and merged
+by hand.
+
+### Releasing changes outside the crates
+
+release-plz detects changes only inside a crate's directory. A change to `native/`,
+`patches/` or other bundle inputs alone opens no release PR; it is not detected
+automatically. Release it with a normal reviewed PR that sets the version and changelog:
+
+- If a release PR is open, add the change to its changelog entry.
+- Otherwise open a PR from a branch named `release-plz-<anything>`. Bump
+  `[workspace.package]` `version` in `Cargo.toml`, run `cargo update --workspace`, and add the
+  version's `CHANGELOG.md` section. Review and merge it; release-plz treats a merged
+  `release-plz-` branch PR as a release PR, so step 3 follows.
+
+release-plz treats every open `release-plz-` PR as its release PR. If a crate change lands
+while yours is open, it closes yours (the branch stays) and opens its own; carry the entry
+over to that one.
+
+To build or release by hand:
+
+```bash
+gh workflow run release.yml -f tag=dry-run                  # build and test; publish nothing
+gh workflow run release.yml --ref v0.1.0 -f tag=v0.1.0      # release an existing tag
+```
+
+## The Sponsor bundle and installing it
+
+The archive `concurro-relay-aarch64-apple-darwin.tar.gz` holds one directory:
+
+- `bin/concurro-relay`;
+- `native-runtime/`: the native worker, DiStefano and MP-SPDZ helpers, request-proof,
+  OpenSSL, their dylibs and the public circuits;
+- `manifest.json` (file hashes) and `release.json` (version, commit, platform).
+
+The relay finds `native-runtime/` beside its `bin/`. dist's shell and Homebrew installers
+install only executables, so dist generates no installer. Install with:
+
+```bash
+curl -fLO https://github.com/concurro/concurro-relay/releases/latest/download/concurro-relay-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/concurro/concurro-relay/releases/latest/download/concurro-relay-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 -c concurro-relay-aarch64-apple-darwin.tar.gz.sha256
+mkdir -p ~/.local/opt && tar -xzf concurro-relay-aarch64-apple-darwin.tar.gz -C ~/.local/opt
+export PATH="$HOME/.local/opt/concurro-relay-aarch64-apple-darwin/bin:$PATH"
+```
+
+Put the directory on `PATH` rather than symlinking the executable elsewhere: the relay locates
+the bundle from its own path. The packages are ad hoc signed, not notarized; a browser
+download is quarantined by Gatekeeper, and `curl` is not.
+
+## Requirements
+
+- **Concurro Release Bot**, below: the release workflow's GitHub identity.
+- **Build dependencies on the macOS runner:** Homebrew `cmake boost gmp libsodium openssl`,
+  and Go (pinned with `actions/setup-go`) for BoringSSL.
+
+### Concurro Release Bot
+
+The organization does not let GitHub Actions create pull requests, so `release-plz.yml` acts
+as a dedicated GitHub App. Each job mints a short-lived installation token for this repository
+only, with the job's permissions below. dist (`release.yml`, `build-sponsor.yml`) and CI keep
+the job-scoped `GITHUB_TOKEN`.
+
+| Job | Contents | Pull requests | Actions |
+| ---- | ---- | ---- | ---- |
+| Release PR (branch, commit, PR, `release` label) | write | write | — |
+| Release (find the merged release PR, tag, dispatch `release.yml`) | write | read | write |
+
+To set it up (organization owner):
+
+1. *Organization settings → Developer settings → GitHub Apps → New GitHub App*.
+   - Name `Concurro Release Bot`; homepage URL
+     `https://github.com/concurro/concurro-relay`.
+   - Webhook: clear **Active**. Nothing listens for events.
+   - Repository permissions: **Contents** read and write, **Pull requests** read and write,
+     **Actions** read and write. **Metadata** read-only is added automatically. Leave every
+     other repository, organization and account permission at *No access*.
+   - Subscribe to no events.
+   - *Where can this GitHub App be installed?* **Only on this account**.
+2. *Install App* → `concurro` → **Only select repositories** → `concurro-relay`.
+3. In the App's settings, copy the **Client ID** and generate a private key. Store both in
+   *concurro-relay → Settings → Secrets and variables → Actions*:
+   - variable `RELEASE_BOT_CLIENT_ID`: the Client ID (not secret);
+   - secret `RELEASE_BOT_PRIVATE_KEY`: the entire `.pem` file.
+
+   Then delete the downloaded `.pem` file; GitHub keeps only the public key.
+
+The App bypasses no branch or tag rule, approves nothing and merges nothing. To rotate the
+key, generate a new one, update the secret, then delete the old key in the App's settings.
+
+## Changing the dist config
+
+Edit `dist-workspace.toml`, then regenerate the workflow with the same dist version as
+`cargo-dist-version`. Actions are pinned by `[dist.github-action-commits]`.
+
+```bash
+cargo install --locked cargo-dist@0.34.0
+dist generate
+dist plan        # one app, one target, one archive
+```

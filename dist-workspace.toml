@@ -1,0 +1,35 @@
+[workspace]
+members = ["cargo:."]
+
+# Releases of the Sponsor relay; see docs/releasing.md. release-plz (release-plz.toml) sets
+# the version, changelog and tag; dist builds and publishes the GitHub Release for that tag.
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.34.0"
+# CI backends to support
+ci = "github"
+# Only the Sponsor package (crates/relay) is distributed.
+dist = false
+# Its archive is the self-contained bundle: bin/concurro-relay with native-runtime/ beside it.
+# dist's installers install only executables, which would drop native-runtime/, so none
+# are generated; docs/releasing.md has the install command.
+installers = []
+targets = ["aarch64-apple-darwin"]
+# Where to host releases
+hosting = "github"
+# Whether to install an updater program
+install-updater = false
+# release-plz dispatches release.yml for its tag; a manual run with tag `dry-run` builds only.
+dispatch-releases = true
+# The bundle is built from source by .github/workflows/build-sponsor.yml, which reuses
+# native/build_macos_arm64.sh, native/package.py and native/release.py.
+build-local-artifacts = false
+local-artifacts-jobs = ["./build-sponsor"]
+unix-archive = ".tar.gz"
+# The custom job builds the archive; dist adds no README or license files to it.
+auto-includes = false
+
+[dist.github-action-commits]
+"actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1" # v7.0.1
+"actions/upload-artifact" = "cf430e030ddbb5b0abf93d22962f4752f3646cd9" # v7.0.2
+"actions/download-artifact" = "9000827ccba6bdab643e8b6fd33ac0654aef8333" # v8.0.2

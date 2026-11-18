@@ -3,6 +3,12 @@ name = "concurro-relay"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+description = "Keeps a sponsor's provider login on their machine and performs the requests Concurro orders with it"
+repository = "https://github.com/concurro/concurro-relay"
+
+# The one distributed package; see dist-workspace.toml.
+[package.metadata.dist]
+dist = true
 
 [dependencies]
 concurro-relay-protocol.workspace = true

@@ -1,0 +1,87 @@
+name: Release-plz
+
+# On every push to main: keep a release PR open with the next version and changelog. When that
+# PR is merged: push the `vX.Y.Z` tag and dispatch release.yml (dist) for it. Nothing is
+# published to crates.io.
+#
+# GitHub writes go through the Concurro Release Bot GitHub App, not GITHUB_TOKEN, because the
+# organization does not let Actions create pull requests. Each job mints an installation token
+# for this repository only, with only the permissions it needs; it is revoked when the job
+# ends. Setup: docs/releasing.md.
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release:
+    name: Release
+    if: github.repository_owner == 'concurro'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # checkout
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # release-plz runs cargo, whose patch table needs the pinned upstream sources.
+      - name: Prepare pinned upstream sources
+        run: ./scripts/upstream.sh
+      - id: token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write # the vX.Y.Z tag
+          permission-pull-requests: read # is this commit a merged release PR?
+          permission-actions: write # dispatch release.yml
+      - id: release
+        uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
+        with:
+          command: release
+          version: 0.4.3
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+      - name: Build the Sponsor bundle and the GitHub Release
+        if: steps.release.outputs.releases_created == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          TAG: ${{ fromJSON(steps.release.outputs.releases)[0].tag }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG" -f tag="$TAG"
+
+  release-pr:
+    name: Release PR
+    if: github.repository_owner == 'concurro'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # checkout
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare pinned upstream sources
+        run: ./scripts/upstream.sh
+      - id: token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write # the release branch and its commit
+          permission-pull-requests: write # open, update or close the PR; its label
+      - uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
+        with:
+          command: release-pr
+          version: 0.4.3
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
