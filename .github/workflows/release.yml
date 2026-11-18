@@ -64,6 +64,8 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Prepare pinned upstream sources
+        run: ./scripts/upstream.sh
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
@@ -114,6 +116,8 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Prepare pinned upstream sources
+        run: ./scripts/upstream.sh
       - name: Install cached dist
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
@@ -164,6 +168,8 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Prepare pinned upstream sources
+        run: ./scripts/upstream.sh
       - name: Install cached dist
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:

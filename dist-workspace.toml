@@ -28,6 +28,9 @@ local-artifacts-jobs = ["./build-sponsor"]
 unix-archive = ".tar.gz"
 # The custom job builds the archive; dist adds no README or license files to it.
 auto-includes = false
+# release.yml is dist's output plus an upstream-sources step; regenerate it only with
+# scripts/dist-generate.sh, which also checks it (--check).
+allow-dirty = ["ci"]
 
 [dist.github-action-commits]
 "actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1" # v7.0.1
