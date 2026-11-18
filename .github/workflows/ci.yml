@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Per commit outside pull requests: every main commit publishes its verifier image.
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Prepare pinned upstream sources
+        run: ./scripts/upstream.sh
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Install cargo-nextest
+        run: cargo install --locked cargo-nextest@0.9.145
+      - name: Test
+        run: cargo nextest run --workspace --locked
+      - name: Check shell scripts
+        run: shellcheck scripts/*.sh native/*.sh
+
+  verifier:
+    name: Verifier image
+    # Publish only an image whose commit passed the checks.
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/concurro/verifier:${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Prepare pinned upstream sources
+        run: ./scripts/upstream.sh
+      - name: Build the native runtime from source
+        run: native/build_linux_amd64.sh "$RUNNER_TEMP/native"
+      - name: Build the image
+        run: |
+          docker build --platform linux/amd64 --tag "$IMAGE" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=${IMAGE##*:}" \
+            --label "org.opencontainers.image.title=Concurro hosted relay verifier" \
+            -f native/Dockerfile.amd64-runtime "$RUNNER_TEMP/native"
+      - name: Smoke test both entrypoints
+        run: |
+          docker run --rm "$IMAGE" --help
+          docker run --rm --entrypoint responses-bridge "$IMAGE" --help
+      - name: Publish
+        # Only a push to main publishes; pull requests and manual runs build and test only.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$GITHUB_TOKEN"
+          docker push "$IMAGE"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE")
+          # shellcheck disable=SC2016
+          printf 'Published `%s`\n\nDigest: `%s`\n' "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"

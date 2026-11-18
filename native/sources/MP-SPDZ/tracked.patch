@@ -1,0 +1,205 @@
+diff --git a/Makefile b/Makefile
+index 48533be6..b6c3d58f 100644
+--- a/Makefile
++++ b/Makefile
+@@ -25,6 +25,9 @@ VMOBJS = $(PROCESSOR) $(COMMONOBJS) GC/square64.o GC/Instruction.o OT/OTTripleSe
+ VM = $(MINI_OT) $(SHAREDLIB)
+ COMMON = $(SHAREDLIB)
+ TINIER =  Machines/Tinier.o $(OT)
++ifneq ($(MASCOT_MRR_BASE_OT_OBJECT),)
++TINIER += $(MASCOT_MRR_BASE_OT_OBJECT)
++endif
+ SPDZ = Machines/SPDZ.o $(TINIER)
+ 
+ 
+diff --git a/Networking/sockets.cpp b/Networking/sockets.cpp
+index 45df233f..807f1ad5 100644
+--- a/Networking/sockets.cpp
++++ b/Networking/sockets.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include <iostream>
+ #include <fcntl.h>
++#include <cstdlib>
+ using namespace std;
+ 
+ void error(const char *str, bool interrupted, size_t length)
+@@ -25,6 +26,9 @@ void error(const char *str, bool interrupted, size_t length)
+ 
+ void set_up_client_socket(int& mysocket,const char* hostname,int Portnum)
+ {
++   const char* sponsor_proxy = std::getenv("HANDOFF_MASCOT_PROXY_PORT");
++   if (sponsor_proxy != nullptr && Portnum == 37911)
++     Portnum = std::atoi(sponsor_proxy);
+    struct addrinfo hints, *ai=NULL,*rp;
+    memset (&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+diff --git a/OT/BaseOT.cpp b/OT/BaseOT.cpp
+index 14ccc506..4f658b44 100644
+--- a/OT/BaseOT.cpp
++++ b/OT/BaseOT.cpp
+@@ -4,6 +4,12 @@
+ #include "Tools/Bundle.h"
+ #include "Tools/CodeLocations.h"
+ #include "Processor/OnlineOptions.h"
++#ifdef HANDOFF_MRR_BASE_OT
++#include "HandoffBaseOT.hpp"
++#include <array>
++#include <algorithm>
++#include <cstring>
++#endif
+ 
+ #include <stdio.h>
+ #include <iostream>
+@@ -25,6 +31,51 @@ extern "C" {
+ 
+ using namespace std;
+ 
++#ifdef HANDOFF_MRR_BASE_OT
++namespace {
++/** Present MP-SPDZ's framed player messages as a byte stream to MRR. */
++struct MrrChannel
++{
++    TwoPartyPlayer* player;
++    vector<octet> pending;
++    size_t offset = 0;
++};
++
++/** Send one MRR message over MP-SPDZ's existing two-party channel. */
++void mrr_send_bytes(void* context, const void* data, size_t size)
++{
++    octetStream message;
++    message.append(static_cast<const octet*>(data), size);
++    static_cast<MrrChannel*>(context)->player->send(message);
++}
++
++/** Receive one exact MRR message over MP-SPDZ's existing two-party channel. */
++void mrr_receive_bytes(void* context, void* data, size_t size)
++{
++    auto& channel = *static_cast<MrrChannel*>(context);
++    size_t copied = 0;
++    while (copied < size)
++    {
++        if (channel.offset == channel.pending.size())
++        {
++            octetStream message;
++            channel.player->receive(message);
++            channel.pending.assign(message.get_data(),
++                                   message.get_data() + message.get_length());
++            channel.offset = 0;
++            if (channel.pending.empty())
++                throw invalid_length("MRR base OT empty frame");
++        }
++        auto count = min(size - copied, channel.pending.size() - channel.offset);
++        memcpy(static_cast<octet*>(data) + copied,
++               channel.pending.data() + channel.offset, count);
++        copied += count;
++        channel.offset += count;
++    }
++}
++}
++#endif
++
+ const char* role_to_str(OT_ROLE role)
+ {
+     if (role == RECEIVER)
+@@ -145,12 +196,68 @@ bool BaseOT::use_avx()
+ 
+ void BaseOT::exec_base(bool new_receiver_inputs)
+ {
++#ifdef HANDOFF_MRR_BASE_OT
++    if (nOT != 128)
++        throw invalid_length("MRR base OT count");
++    PRNG random;
++    random.ReSeed();
++    allocate();
++    array<bool, 128> choices;
++    array<unsigned char, 128 * AES_BLK_SIZE> selected, first, second;
++    MrrChannel channel{P, {}, 0};
++    if (ot_role & RECEIVER)
++        for (int i = 0; i < nOT; ++i)
++        {
++            if (new_receiver_inputs)
++                receiver_inputs[i] = random.get_uchar() & 1;
++            choices[i] = receiver_inputs[i].get();
++        }
++
++    // Opposite role order keeps both authenticated players on the same stream.
++    auto send_base = [&] {
++        handoff_base_ot_send(&channel, mrr_send_bytes, mrr_receive_bytes,
++                             first.data(), second.data());
++        for (int i = 0; i < nOT; ++i)
++            for (int j = 0; j < AES_BLK_SIZE; ++j)
++            {
++                sender_inputs[i][0].set_byte(j, first[i * AES_BLK_SIZE + j]);
++                sender_inputs[i][1].set_byte(j, second[i * AES_BLK_SIZE + j]);
++            }
++    };
++    auto receive_base = [&] {
++        handoff_base_ot_receive(&channel, mrr_send_bytes, mrr_receive_bytes,
++                                choices.data(), selected.data());
++        for (int i = 0; i < nOT; ++i)
++            for (int j = 0; j < AES_BLK_SIZE; ++j)
++                receiver_outputs[i].set_byte(j, selected[i * AES_BLK_SIZE + j]);
++    };
++    if (ot_role == BOTH)
++    {
++        if (P->my_num() == 0) { send_base(); receive_base(); }
++        else { receive_base(); send_base(); }
++    }
++    else if (ot_role == SENDER)
++        send_base();
++    else
++        receive_base();
++
++    for (int i = 0; i < nOT; ++i)
++    {
++        if (ot_role & RECEIVER)
++            hash_with_id(receiver_outputs[i], i);
++        if (ot_role & SENDER)
++            for (int j = 0; j < 2; ++j)
++                hash_with_id(sender_inputs[i][j], i);
++    }
++    set_seeds();
++#else
+ #ifndef NO_AVX_OT
+     if (use_avx())
+         exec_base<SIMPLEOT_SENDER, SIMPLEOT_RECEIVER>(new_receiver_inputs);
+     else
+ #endif
+         exec_base<ref10_SENDER, ref10_RECEIVER>(new_receiver_inputs);
++#endif
+ }
+ 
+ // See https://eprint.iacr.org/2015/267.pdf
+diff --git a/Processor/PrivateOutput.hpp b/Processor/PrivateOutput.hpp
+index d2cee8a1..3b8f6273 100644
+--- a/Processor/PrivateOutput.hpp
++++ b/Processor/PrivateOutput.hpp
+@@ -5,6 +5,7 @@
+ 
+ #include "PrivateOutput.h"
+ #include "Processor.h"
++#include <cstdlib>
+ 
+ template<class T>
+ PrivateOutput<T>::PrivateOutput(SubProcessor<T>& proc) :
+@@ -28,6 +29,12 @@ void PrivateOutput<T>::prepare_sending(const T& source, int player)
+     T res;
+     proc.DataF.get_input(res, mask, player);
+     res += source;
++    if (proc.P.my_num() == 0 && std::getenv("CONCURRO_TAMPER_PRIVATE_OUTPUT"))
++    {
++        auto share = res.get_share();
++        share += typename T::clear(1);
++        res.set_share(share);
++    }
+ 
+     if (player == proc.P.my_num())
+         masks.push_back(mask);
+diff --git a/deps/libOTe2 b/deps/libOTe2
+--- a/deps/libOTe2
++++ b/deps/libOTe2
+@@ -1 +1 @@
+-Subproject commit fe6b2ff82a976a5332b3a2efe325831588b1324a
++Subproject commit fe6b2ff82a976a5332b3a2efe325831588b1324a-dirty

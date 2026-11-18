@@ -19,6 +19,7 @@ and it depends on a pre-release proof stack carrying local patches.
 | `crates/dev` | Stand-ins for Concurro: `dev-verifier`, a gateway for a real harness, a mock provider |
 | `patches/` | Local patches to TLSNotary, mpz and rangeset |
 | `scripts/upstream.sh` | Fetches the pinned upstream sources into `upstream/` and applies the patches |
+| `native/` | Native TLS 1.3 helper sources, build recipes and packagers |
 
 ## Building
 
@@ -36,6 +37,19 @@ cargo nextest run --workspace
 
 `upstream/` is not committed. The script refuses to overwrite a source directory; remove
 it to prepare it again after a patch changes.
+
+## Releases
+
+- **Verifier image:** [CI](.github/workflows/ci.yml) checks, tests and builds every pull
+  request, `main` push and manual run. Only a `main` push whose checks passed publishes the
+  hosted verifier and Responses bridge as `ghcr.io/concurro/verifier:<full commit SHA>`,
+  built from source by [`native/build_linux_amd64.sh`](native/linux-amd64-build.md).
+- **Sponsor packages:** pushing a `vX.Y.Z` tag equal to the workspace version runs the
+  [release workflow](.github/workflows/release.yml). It builds the native helpers from source,
+  packages the self-contained Sponsor for macOS arm64, tests the archive offline, and
+  publishes `concurro-relay-X.Y.Z-macos-arm64.tar.gz` with `SHA256SUMS`. Every run, including
+  a manual one, keeps both as a downloadable Actions artifact; only a tag publishes a release. Packages are ad hoc signed, not notarized. macOS arm64 is the
+  only packaged platform.
 
 The tests are in `crates/dev/tests`, against a mock provider:
 

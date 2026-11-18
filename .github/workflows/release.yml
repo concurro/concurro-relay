@@ -1,0 +1,97 @@
+name: Release
+
+# A `vX.Y.Z` tag matching the workspace version publishes the self-contained Sponsor
+# packages as a GitHub release. Every run keeps the archive and SHA256SUMS as an Actions
+# artifact; a manual run publishes nothing else.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos-arm64:
+    name: Sponsor package (macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 150
+    permissions:
+      contents: write
+    env:
+      PLATFORM: macos-arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select the version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            test "$GITHUB_REF_NAME" = "v$version" || { echo "tag $GITHUB_REF_NAME is not v$version" >&2; exit 1; }
+            echo "VERSION=$version" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=$version-${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+          fi
+      - name: Install build dependencies
+        run: |
+          brew install cmake boost gmp libsodium openssl
+          brew list --versions cmake boost gmp libsodium openssl
+      - name: Prepare pinned upstream sources
+        run: ./scripts/upstream.sh
+      - name: Build the native runtime from source
+        run: native/build_macos_arm64.sh "$RUNNER_TEMP/native"
+      - name: Build and package both roles
+        run: |
+          RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/build --remap-path-prefix=$HOME=/home" \
+            cargo build --release --locked -p concurro-relay -p concurro-relay-dev -p concurro-relay-native --bins
+          for role in sponsor concurro; do
+            python3 native/package.py --role "$role" --runtime "$RUNNER_TEMP/native" \
+              --openssl "$(brew --prefix openssl)/bin/openssl" \
+              --relay target/release/concurro-relay --verifier target/release/dev-verifier \
+              --worker target/release/concurro-native-worker --output "$RUNNER_TEMP/packages/$role"
+          done
+          python3 -B -m unittest native.test_package -v
+      - name: Archive the Sponsor package
+        run: |
+          python3 native/release.py --package "$RUNNER_TEMP/packages/sponsor" \
+            --version "$VERSION" --commit "$GITHUB_SHA" --platform "$PLATFORM" \
+            --epoch "$(git log -1 --format=%ct)" \
+            --forbid "$HOME" --forbid "$GITHUB_WORKSPACE" --forbid "$RUNNER_TEMP"
+      - name: Test the archived package offline
+        run: |
+          check="$RUNNER_TEMP/check"
+          mkdir "$check"
+          tar -xzf "$RUNNER_TEMP/packages/concurro-relay-$VERSION-$PLATFORM.tar.gz" -C "$check"
+          mv "$check/concurro-relay-$VERSION-$PLATFORM" "$check/sponsor"
+          cp -R "$RUNNER_TEMP/packages/concurro" "$check/concurro"
+          "$check/sponsor/bin/concurro-relay" --version
+          CONCURRO_PHASE3_FIXTURE_BUNDLE="$check/sponsor/native-runtime" \
+            cargo test --release --locked -p concurro-relay-native --test bootstrap -- --ignored rust_bootstrap
+      - name: Collect the release files
+        run: |
+          mkdir "$RUNNER_TEMP/release"
+          cp "$RUNNER_TEMP/packages/concurro-relay-$VERSION-$PLATFORM.tar.gz" "$RUNNER_TEMP/release/"
+          cat "$RUNNER_TEMP"/packages/*.sha256 > "$RUNNER_TEMP/release/SHA256SUMS"
+      - name: Keep the release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: concurro-relay-${{ env.VERSION }}-${{ env.PLATFORM }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP/release"
+          # shellcheck disable=SC2016
+          printf 'Sponsor %s from %s.\n\nmacOS arm64 (Apple Silicon) only. Verify with `shasum -a 256 -c SHA256SUMS`.\n' \
+            "$VERSION" "$GITHUB_SHA" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "concurro-relay $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+            "concurro-relay-$VERSION-$PLATFORM.tar.gz" SHA256SUMS

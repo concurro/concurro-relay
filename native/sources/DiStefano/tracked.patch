@@ -1,0 +1,1208 @@
+diff --git a/src/2pc/CircuitSynthesis.cpp b/src/2pc/CircuitSynthesis.cpp
+index dd2de37..74f8c93 100644
+--- a/src/2pc/CircuitSynthesis.cpp
++++ b/src/2pc/CircuitSynthesis.cpp
+@@ -178,6 +178,17 @@ assert_valid_filepath([[maybe_unused]] const char *const filepath) noexcept {
+ #endif
+ }
+ 
++/** Compress one SHA-256 message block using the circuit's internal digest order. */
++static void sha256_compress(emp::BristolFormat &circuit,
++                            const emp::block *const message,
++                            const emp::block *const digest,
++                            emp::block *const output) noexcept {
++  emp::block input[768];
++  std::copy(message, message + 512, input);
++  std::copy(digest, digest + 256, input + 512);
++  circuit.compute(output, input, input);
++}
++
+ static void sha256_internal(const emp::block *const input,
+                             const size_t input_size,
+                             emp::block *const output) noexcept {
+@@ -202,7 +213,6 @@ static void sha256_internal(const emp::block *const input,
+   // always returns a multiple of 512), this division has no rounding behaviour,
+   // and so it's always precise.
+   const auto num_blocks = padded_len / 512;
+-  emp::block input_to_sha256_circuit[768];
+   emp::block output_from_sha256_circuit[256];
+   emp::block digest_bits[256];
+   CircuitSynthesis::produce_digest_bits(digest_bits);
+@@ -218,16 +228,7 @@ static void sha256_internal(const emp::block *const input,
+   auto iter = padded_input.cbegin();
+ 
+   for (unsigned b = 0; b < num_blocks; b++) {
+-    // We fill up the first 512 bits with the padded input.
+-    std::copy(iter, iter + 512, input_to_sha256_circuit);
+-    // N.B We always write the 256 digest bits to input[512]. This is
+-    // so that the first 512 bits are the input to the hash function.
+-    std::copy(std::cbegin(digest_bits), std::cend(digest_bits),
+-              &input_to_sha256_circuit[512]);
+-
+-    // This calls the SHA256 circuit.
+-    bf.compute(output_from_sha256_circuit, input_to_sha256_circuit,
+-               input_to_sha256_circuit);
++    sha256_compress(bf, iter, digest_bits, output_from_sha256_circuit);
+ 
+     // Copy the output bits back over into the digest bits.
+     std::copy(std::cbegin(output_from_sha256_circuit),
+@@ -271,6 +272,63 @@ static void input_key_xor(emp::block *const output, const emp::block *const key,
+   }
+ }
+ 
++/** Internal SHA-256 states after the HMAC key's ipad and opad blocks. */
++struct HmacKeyStates {
++  std::array<emp::block, 256> inner;
++  std::array<emp::block, 256> outer;
++};
++
++/** Compress each HMAC key pad once for several messages under the same key. */
++static HmacKeyStates hmac_key_states(const emp::block *const key,
++                                     const size_t key_len) noexcept {
++  assert(key_len <= 512);
++  HmacKeyStates states;
++  EmpBlockOwningSpan pad(512), transformed(512);
++  emp::block initial[256];
++  CircuitSynthesis::produce_digest_bits(initial);
++  assert_valid_filepath(CircuitSynthesis::SHA256_FILEPATH);
++  emp::BristolFormat circuit(CircuitSynthesis::SHA256_FILEPATH);
++  arr_to_block(pad.begin(), create_array<0x36>());
++  input_key_xor(pad.data(), key, key_len);
++  change_endian_internal(pad.data(), pad.size(), transformed.data());
++  sha256_compress(circuit, transformed.data(), initial, states.inner.data());
++  arr_to_block(pad.begin(), create_array<0x5c>());
++  input_key_xor(pad.data(), key, key_len);
++  change_endian_internal(pad.data(), pad.size(), transformed.data());
++  sha256_compress(circuit, transformed.data(), initial, states.outer.data());
++  return states;
++}
++
++/** Continue SHA-256 from a cached first block for a one-block suffix. */
++static void sha256_continue(const emp::block *const state,
++                            const emp::block *const data, size_t data_len,
++                            emp::block *const output) noexcept {
++  const size_t total = 512 + data_len;
++  EmpBlockOwningSpan message(total), transformed(total);
++  std::fill(message.begin(), message.begin() + 512,
++            emp::CircuitExecution::circ_exec->public_label(false));
++  std::copy(data, data + data_len, message.begin() + 512);
++  change_endian_internal(message.data(), total, transformed.data());
++  EmpBlockOwningSpan padded(CircuitSynthesis::get_padded_len(total));
++  CircuitSynthesis::padding(transformed, padded.data());
++  assert(padded.size() == 1024);
++  assert_valid_filepath(CircuitSynthesis::SHA256_FILEPATH);
++  emp::BristolFormat circuit(CircuitSynthesis::SHA256_FILEPATH);
++  sha256_compress(circuit, padded.data() + 512, state, output);
++}
++
++/** Evaluate HMAC with cached key-pad states and a one-block inner suffix. */
++static void hmac_precomputed(const HmacKeyStates &states,
++                             const emp::block *const data, size_t data_len,
++                             emp::block *const output) noexcept {
++  assert(data_len <= 447);
++  emp::block inner_raw[256], inner_digest[256], outer_raw[256];
++  sha256_continue(states.inner.data(), data, data_len, inner_raw);
++  CircuitSynthesis::change_endian_four(inner_raw, inner_digest);
++  sha256_continue(states.outer.data(), inner_digest, 256, outer_raw);
++  CircuitSynthesis::change_endian_four(outer_raw, output);
++}
++
+ static void hmac_internal(const emp::block *const key, const size_t key_len,
+                           const emp::block *const data, const size_t data_len,
+                           emp::block *const output) noexcept {
+@@ -379,7 +437,8 @@ static void hkdf_expand_internal(const emp::block *const key,
+                                  const emp::block *const info,
+                                  const size_t info_len,
+                                  emp::block *const output,
+-                                 const unsigned output_byte_len) noexcept {
++                                 const unsigned output_byte_len,
++                                 const HmacKeyStates *const cached = nullptr) noexcept {
+ 
+   // Preconditions.
+   assert(key);
+@@ -410,7 +469,10 @@ static void hkdf_expand_internal(const emp::block *const key,
+   std::fill(input.begin() + info_len + 1, input.begin() + info_len + 8, zero);
+ 
+   // Now we'll do the hmac invocation.
+-  hmac_internal(key, key_len, input.data(), input.size(), cur_T);
++  if (cached && input.size() <= 447)
++    hmac_precomputed(*cached, input.data(), input.size(), cur_T);
++  else
++    hmac_internal(key, key_len, input.data(), input.size(), cur_T);
+ 
+   // We'll break here if we're taking only the first output_byte_len entries.
+   // The way to do this is to copy the first 256 entries at most,
+@@ -442,7 +504,10 @@ static void hkdf_expand_internal(const emp::block *const key,
+     }
+ 
+     // Now hmac.
+-    hmac_internal(key, key_len, input.data(), input.size(), cur_T);
++    if (cached && input.size() <= 447)
++      hmac_precomputed(*cached, input.data(), input.size(), cur_T);
++    else
++      hmac_internal(key, key_len, input.data(), input.size(), cur_T);
+     // And finally we'll conditionally copy over.
+     for (unsigned j = 0; j < 256; j++) {
+       const auto index = (i - 1) * 256 + j;
+@@ -486,7 +551,8 @@ static void copy_loop(EmpBlockOwningSpan &out, unsigned start, T &value,
+ static void hkdf_expand_label_internal(
+     const emp::block *const key, const size_t key_len, const std::string &label,
+     const emp::block *const context, const size_t context_len,
+-    emp::block *const output, const unsigned output_byte_len, bool) noexcept {
++    emp::block *const output, const unsigned output_byte_len, bool,
++    const HmacKeyStates *const cached = nullptr) noexcept {
+ 
+   // Preconditions.
+   assert(key);
+@@ -546,7 +612,7 @@ static void hkdf_expand_label_internal(
+   assert(offset == hkdf_label.size());
+   // Now we'll call the hkdf expansion.
+   hkdf_expand_internal(key, key_len, hkdf_label.data(), hkdf_label.size(),
+-                       output, output_byte_len);
++                       output, output_byte_len, cached);
+ }
+ 
+ void CircuitSynthesis::hkdf_expand_label(const EmpBlockOwningSpan &key,
+@@ -571,6 +637,16 @@ void CircuitSynthesis::hkdf_expand_label(const EmpBlockNonOwningSpan key,
+                              context.size(), output, output_byte_len, force);
+ }
+ 
++void CircuitSynthesis::hkdf_expand_label_batch(
++    EmpBlockNonOwningSpan key,
++    std::initializer_list<HkdfLabelRequest> requests) noexcept {
++  const auto cached = hmac_key_states(key.data(), key.size());
++  for (const auto &request : requests)
++    hkdf_expand_label_internal(key.data(), key.size(), request.label,
++                               request.context.data(), request.context.size(),
++                               request.output, request.output_byte_len, false, &cached);
++}
++
+ EmpBlockOwningSpan CircuitSynthesis::convert_bssl_array_to_emp_span(
+     const bssl::Array<uint8_t> &a) noexcept {
+ 
+diff --git a/src/2pc/CircuitSynthesis.hpp b/src/2pc/CircuitSynthesis.hpp
+index 921dd76..d64942a 100644
+--- a/src/2pc/CircuitSynthesis.hpp
++++ b/src/2pc/CircuitSynthesis.hpp
+@@ -6,6 +6,7 @@
+ #include "openssl/base.h"           // Needed for bssl::Array etc
+ #include "ssl/internal.h"           // Needed for other bssl types.
+ #include <emp-tool/emp-tool.h>      // Needed for circuit building.
++#include <initializer_list>
+ 
+ /**
+    CircuitSynthesis. This header file contains various implementation
+@@ -412,6 +413,22 @@ void hkdf_expand_label(const EmpBlockNonOwningSpan key,
+                        emp::block *const output, const unsigned output_byte_len,
+                        const bool force = false) noexcept;
+ 
++/** One TLS HKDF label expansion sharing its key with the rest of a batch. */
++struct HkdfLabelRequest {
++  /// The TLS label without its fixed "tls13 " prefix.
++  std::string label;
++  /// Public or private context bits in the existing wire order.
++  EmpBlockNonOwningSpan context;
++  /// Destination for at least output_byte_len bytes of result bits.
++  emp::block *output;
++  /// Number of bytes to derive.
++  unsigned output_byte_len;
++};
++
++/** Expand several TLS labels while reusing their secret HMAC key states. */
++void hkdf_expand_label_batch(EmpBlockNonOwningSpan key,
++                             std::initializer_list<HkdfLabelRequest> requests) noexcept;
++
+ /**
+    convert_bssl_array_to_emp_span. This function accepts a serialised bssl
+ bignum `a` and converts it into a span of emp::blocks. In particular, this
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 4a6d6fd..6019404 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -301,3 +301,99 @@ if(BENCHMARKING)
+ endif()
+ 
+ 
++
++# Standalone baseline without the optional Google Benchmark dependency.
++add_executable(HandoffBaseline benchmarks/E2E.b.cpp)
++target_compile_options(HandoffBaseline PRIVATE ${C_OPT_FLAGS})
++target_link_libraries(HandoffBaseline PRIVATE TLSAttestOpt ${L_FLAGS})
++
++add_executable(HandoffFieldTest 2pc/HandoffFieldTest.cpp)
++target_compile_options(HandoffFieldTest PRIVATE ${C_OPT_FLAGS})
++target_link_libraries(HandoffFieldTest PRIVATE TLSAttestOpt ${L_FLAGS})
++
++add_executable(HandoffDerive 2pc/HandoffDerive.cpp)
++target_compile_options(HandoffDerive PRIVATE ${C_OPT_FLAGS})
++target_link_libraries(HandoffDerive PRIVATE TLSAttestOpt ${L_FLAGS})
++
++add_executable(HandoffDeriveShares 2pc/HandoffDerive.cpp)
++target_compile_definitions(HandoffDeriveShares PRIVATE HANDOFF_ARITHMETIC_SHARES)
++target_compile_options(HandoffDeriveShares PRIVATE ${C_OPT_FLAGS})
++target_link_libraries(HandoffDeriveShares PRIVATE TLSAttestOpt ${L_FLAGS})
++
++add_executable(HandoffParty 2pc/HandoffParty.cpp)
++target_compile_options(HandoffParty PRIVATE ${C_OPT_FLAGS})
++target_link_libraries(HandoffParty PRIVATE TLSAttestOpt ${L_FLAGS})
++
++set(HANDOFF_LIBOTE2_SOURCE "" CACHE PATH "Source of the pinned libOTe base OT")
++set(HANDOFF_LIBOTE2_BUILD "" CACHE PATH "Build of the pinned libOTe base OT")
++set(HANDOFF_LIBOTE2_DEPS_BUILD "" CACHE PATH "Build of libOTe's coproto and macoro dependencies")
++set(HANDOFF_LIBOTE2_INSTALL_INCLUDE "" CACHE PATH "Include directory for libOTe's installed dependencies")
++if(HANDOFF_LIBOTE2_SOURCE AND HANDOFF_LIBOTE2_BUILD)
++  if(NOT HANDOFF_LIBOTE2_DEPS_BUILD OR NOT HANDOFF_LIBOTE2_INSTALL_INCLUDE)
++    message(FATAL_ERROR "HandoffPartyMrr requires dependency build and include paths")
++  endif()
++  find_path(HANDOFF_SODIUM_INCLUDE sodium.h)
++  find_library(HANDOFF_SODIUM_LIBRARY sodium)
++  if(NOT HANDOFF_SODIUM_INCLUDE OR NOT HANDOFF_SODIUM_LIBRARY)
++    message(FATAL_ERROR "HandoffPartyMrr requires libsodium headers and library")
++  endif()
++  add_executable(HandoffPartyMrr 2pc/HandoffParty.cpp 2pc/HandoffBaseOT.cpp)
++  set_source_files_properties(2pc/HandoffBaseOT.cpp PROPERTIES COMPILE_FLAGS "-std=c++20 -I${HANDOFF_SODIUM_INCLUDE}")
++  target_compile_definitions(HandoffPartyMrr PRIVATE HANDOFF_MRR_BASE_OT)
++  target_include_directories(HandoffPartyMrr PRIVATE
++    2pc
++    ${HANDOFF_LIBOTE2_BUILD}
++    ${HANDOFF_LIBOTE2_BUILD}/cryptoTools
++    ${HANDOFF_LIBOTE2_SOURCE}
++    ${HANDOFF_LIBOTE2_SOURCE}/cryptoTools
++    ${HANDOFF_LIBOTE2_SOURCE}/cryptoTools/thirdparty
++    ${HANDOFF_LIBOTE2_SOURCE}/out/coproto
++    ${HANDOFF_LIBOTE2_SOURCE}/out/macoro
++    ${HANDOFF_LIBOTE2_DEPS_BUILD}/coproto
++    ${HANDOFF_LIBOTE2_DEPS_BUILD}/macoro
++    ${HANDOFF_LIBOTE2_INSTALL_INCLUDE})
++  target_compile_options(HandoffPartyMrr PRIVATE ${C_OPT_FLAGS})
++  target_link_libraries(HandoffPartyMrr PRIVATE TLSAttestOpt ${L_FLAGS}
++    ${HANDOFF_LIBOTE2_BUILD}/libOTe/liblibOTe.a
++    ${HANDOFF_LIBOTE2_BUILD}/cryptoTools/cryptoTools/libcryptoTools.a
++    ${HANDOFF_LIBOTE2_DEPS_BUILD}/coproto/coproto/libcoproto.a
++    ${HANDOFF_LIBOTE2_DEPS_BUILD}/macoro/macoro/libmacoro.a
++    ${HANDOFF_SODIUM_LIBRARY})
++
++  add_executable(HandoffPartyPrewarm 2pc/HandoffPartyPrewarm.cpp 2pc/HandoffBaseOT.cpp)
++  get_target_property(HANDOFF_MRR_INCLUDES HandoffPartyMrr INCLUDE_DIRECTORIES)
++  get_target_property(HANDOFF_MRR_LINKS HandoffPartyMrr LINK_LIBRARIES)
++  target_compile_definitions(HandoffPartyPrewarm PRIVATE HANDOFF_MRR_BASE_OT)
++  target_include_directories(HandoffPartyPrewarm PRIVATE ${HANDOFF_MRR_INCLUDES})
++  target_compile_options(HandoffPartyPrewarm PRIVATE ${C_OPT_FLAGS})
++  target_link_libraries(HandoffPartyPrewarm PRIVATE ${HANDOFF_MRR_LINKS})
++
++  add_executable(HandoffPartyGrr3 2pc/HandoffPartyGrr3.cpp 2pc/HandoffBaseOT.cpp)
++  target_compile_definitions(HandoffPartyGrr3 PRIVATE HANDOFF_MRR_BASE_OT)
++  target_include_directories(HandoffPartyGrr3 PRIVATE ${HANDOFF_MRR_INCLUDES})
++  target_compile_options(HandoffPartyGrr3 PRIVATE ${C_OPT_FLAGS})
++  target_link_libraries(HandoffPartyGrr3 PRIVATE ${HANDOFF_MRR_LINKS})
++
++  add_executable(HandoffPartyKrrw 2pc/HandoffPartyKrrw.cpp 2pc/HandoffBaseOT.cpp)
++  target_compile_definitions(HandoffPartyKrrw PRIVATE HANDOFF_MRR_BASE_OT)
++  target_include_directories(HandoffPartyKrrw PRIVATE ${HANDOFF_MRR_INCLUDES})
++  target_compile_options(HandoffPartyKrrw PRIVATE ${C_OPT_FLAGS})
++  target_link_libraries(HandoffPartyKrrw PRIVATE ${HANDOFF_MRR_LINKS})
++endif()
++
++add_executable(HandoffPlain 2pc/HandoffPlain.cpp)
++target_compile_options(HandoffPlain PRIVATE ${C_OPT_FLAGS})
++target_link_libraries(HandoffPlain PRIVATE TLSAttestOpt ${L_FLAGS})
++
++add_executable(HandoffPlainShares 2pc/HandoffPlain.cpp)
++target_compile_definitions(HandoffPlainShares PRIVATE HANDOFF_ARITHMETIC_SHARES)
++target_compile_options(HandoffPlainShares PRIVATE ${C_OPT_FLAGS})
++target_link_libraries(HandoffPlainShares PRIVATE TLSAttestOpt ${L_FLAGS})
++
++add_executable(HandoffPrefix 2pc/HandoffPrefix.cpp)
++target_compile_options(HandoffPrefix PRIVATE ${C_OPT_FLAGS})
++target_link_libraries(HandoffPrefix PRIVATE TLSAttestOpt ${L_FLAGS})
++
++add_executable(HandoffKeyShare 2pc/HandoffKeyShare.cpp)
++target_compile_options(HandoffKeyShare PRIVATE ${C_OPT_FLAGS})
++target_link_libraries(HandoffKeyShare PRIVATE TLSAttestOpt ${L_FLAGS})
+diff --git a/src/benchmarks/E2E.b.cpp b/src/benchmarks/E2E.b.cpp
+index 5274f99..e9b5705 100644
+--- a/src/benchmarks/E2E.b.cpp
++++ b/src/benchmarks/E2E.b.cpp
+@@ -67,7 +67,7 @@ static bool server_run(Server &server, Server &verifier) {
+   std::cerr << "[Server] Running benchmark" << std::endl;
+   auto worked = verifier.run(Server::ServerState::DONE, true, true);
+   server_thread.join();
+-  return worked;
++  return worked && s_fut.get();
+ }
+ 
+ int main(int argc, char *argv[]) {
+@@ -122,7 +122,7 @@ int main(int argc, char *argv[]) {
+               << "./E2EBench --ip " << ip << " -p " << server_port << " -v "
+               << verifier_port << std::endl;
+ 
+-    server_run(server, verifier);
++    return server_run(server, verifier) ? 0 : 1;
+   } else {
+     struct Prover {
+       TLSSocket connection_to_verifier;
+@@ -157,6 +157,6 @@ int main(int argc, char *argv[]) {
+     }
+ 
+     // Just run the connection.
+-    prover.connection_to_server.connect_to(ip, server_port);
++    return prover.connection_to_server.connect_to(ip, server_port) ? 0 : 1;
+   }
+ }
+diff --git a/src/emp-ag2pc/emp-ag2pc/2pc.h b/src/emp-ag2pc/emp-ag2pc/2pc.h
+index 56f9d0b..933b886 100644
+--- a/src/emp-ag2pc/emp-ag2pc/2pc.h
++++ b/src/emp-ag2pc/emp-ag2pc/2pc.h
+@@ -8,8 +8,8 @@ template <typename T, int threads, template <typename> class OTType,
+           bool debug = false>
+ class C2PC {
+ public:
+-  const static int SSP = 5; // 5*8 in fact...
+-  const block MASK = makeBlock(0x0ULL, 0xFFFFFULL);
++  const static int SSP = 16; // Transmit complete authentication blocks.
++  const block MASK = makeBlock(0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL);
+ 
+   using FpreType = Fpre<T, threads, OTType, debug>;
+   FpreType *fpre = nullptr;
+@@ -254,6 +254,21 @@ public:
+ 
+     io->flush();
+ 
++    // Synthetic regression: show mask shares exposed by uninitialized triples.
++    if (party == BOB && std::getenv("HANDOFF_TEST_TRACE_ZERO_TRIPLES")) {
++      const auto zero = makeBlock(0, 0);
++      int gate = 0;
++      for (int i = 0; i < cf->num_gate; ++i) {
++        if (cf->gates[4 * i + 3] != AND_GATE) continue;
++        if (cmpBlock(ANDS_mac + 3 * gate, &zero, 1) && cmpBlock(ANDS_key + 3 * gate, &zero, 1)) {
++          const auto wire = cf->gates[4 * i];
++          if (wire >= cf->n1 && wire < cf->n1 + cf->n2)
++            std::cerr << "HANDOFF_EXPOSED_MASK " << wire << " " << (x2[gate] ^ getLSB(mac[wire])) << std::endl;
++        }
++        ++gate;
++      }
++    }
++
+     delete[] x1;
+     delete[] x2;
+     delete[] y1;
+@@ -275,7 +290,7 @@ public:
+         else if (cmpBlock(&tmp, &ttt, 1))
+           mask[i] = true;
+         else
+-          cout << "no match! ALICE\t" << i << endl;
++          error("C2PC authentication failed\n");
+       }
+     } else {
+       for (int i = 0; i < cf->n1; ++i) {
+@@ -289,7 +304,7 @@ public:
+         } else if (cmpBlock(&tmp, &ttt, 1)) {
+           mask[i] = true;
+         } else
+-          cout << "no match! BOB\t" << i << endl;
++          error("C2PC authentication failed\n");
+       }
+ 
+       send_partial_block<T, SSP>(io, mac + cf->n1, cf->n2);
+@@ -330,6 +345,10 @@ public:
+       io->send_data(mask_input, cf->n1);
+       io->flush();
+       io->recv_data(mask_input + cf->n1, cf->n2);
++      if (std::getenv("HANDOFF_TEST_TRACE_ZERO_TRIPLES")) {
++        for (int i = cf->n1; i < cf->n1 + cf->n2; ++i)
++          std::cerr << "HANDOFF_MASKED_INPUT " << i << " " << int(mask_input[i]) << std::endl;
++      }
+       io->recv_block(labels, cf->n1 + cf->n2);
+     }
+     int ands = 0;
+@@ -359,7 +378,7 @@ public:
+           else if (cmpBlock(&GT[ands][index][0], &ttt, 1))
+             mask_input[cf->gates[4 * i + 2]] = true;
+           else
+-            cout << ands << " no match GT!" << endl;
++            error("C2PC authentication failed\n");
+           mask_input[cf->gates[4 * i + 2]] = logic_xor(
+               mask_input[cf->gates[4 * i + 2]], getLSB(GTM[ands][index]));
+ 
+@@ -387,7 +406,7 @@ public:
+         else if (cmpBlock(&tmp, &ttt, 1))
+           o[i] = true;
+         else
+-          cout << "no match output label!" << endl;
++          error("C2PC authentication failed\n");
+       }
+       for (int i = 0; i < cf->n3; ++i) {
+         output[i] = logic_xor(o[i], mask_input[cf->num_wire - cf->n3 + i]);
+@@ -424,14 +443,14 @@ public:
+           else if (cmpBlock(&tmp, &ttt, 1))
+             output[i] = true;
+           else
+-            cout << "no match output label!" << endl;
++            error("C2PC authentication failed\n");
+           block mask_label = tmp_label[i];
+           if (tmp_mask_input[i])
+             mask_label = mask_label ^ fpre->Delta();
+           mask_label = mask_label & MASK;
+           block masked_labels = labels[cf->num_wire - cf->n3 + i] & MASK;
+           if (!cmpBlock(&mask_label, &masked_labels, 1))
+-            cout << "no match output label2!" << endl;
++            error("C2PC authentication failed\n");
+ 
+           output[i] = logic_xor(output[i], tmp_mask_input[i]);
+           output[i] =
+diff --git a/src/emp-ag2pc/emp-ag2pc/fpre_ferret_cot.h b/src/emp-ag2pc/emp-ag2pc/fpre_ferret_cot.h
+index fd2754f..be2834b 100644
+--- a/src/emp-ag2pc/emp-ag2pc/fpre_ferret_cot.h
++++ b/src/emp-ag2pc/emp-ag2pc/fpre_ferret_cot.h
+@@ -4,7 +4,9 @@
+ #include "emp-ag2pc/helper.h"
+ #include <emp-ot/emp-ot.h>
+ #include <emp-tool/emp-tool.h>
++#include <cstdlib>
+ #include <thread>
++#include <vector>
+ 
+ namespace emp {
+ 
+@@ -166,19 +168,8 @@ public:
+       check_correctness(MAC, KEY, batch_size, true);
+     }
+     block S = coin_tossing(prg, io[0], party);
+-    if (bucket_size > 4) {
+-      combine(S, 0, MAC, KEY, batch_size, bucket_size, MAC_res, KEY_res);
+-    } else {
+-      int width = min((batch_size + threads - 1) / threads, permute_batch_size);
+-      for (int i = 0; i < threads; ++i) {
+-        int start = i * width;
+-        int length = min((i + 1) * width, batch_size) - i * width;
+-        combine(S, i, MAC + start * bucket_size * 3,
+-                  KEY + start * bucket_size * 3, length, bucket_size,
+-                  MAC_res + start * 3, KEY_res + start * 3);
+-        
+-      }
+-    }
++    // One global permutation covers every triple, including all partial batches.
++    combine(S, 0, MAC, KEY, batch_size, bucket_size, MAC_res, KEY_res);
+     /*
+     if (party == ALICE) {
+       cout << "permute\t" << time_from(start_time) << "\n";
+@@ -293,42 +284,53 @@ public:
+     for (int i = 0; i < length * bucket_size; ++i)
+       location[i] = i;
+     PRG prg(&S, I);
+-    int *ind = new int[length * bucket_size];
+-    prg.random_data(ind, length * bucket_size * 4);
+-    for (int i = length * bucket_size - 1; i >= 0; --i) {
+-      int index = ind[i] % (i + 1);
+-      index = index > 0 ? index : (-1 * index);
+-      int tmp = location[i];
+-      location[i] = location[index];
+-      location[index] = tmp;
++    for (int i = length * bucket_size - 1; i > 0; --i) {
++      const uint32_t bound = static_cast<uint32_t>(i) + 1;
++      const uint32_t threshold = (uint32_t(0) - bound) % bound;
++      uint32_t sample;
++      do { prg.random_data(&sample, sizeof(sample)); } while (sample < threshold);
++      const auto index = sample % bound;
++      std::swap(location[i], location[index]);
+     }
+-    delete[] ind;
+ 
+     bool *data = new bool[length * bucket_size]{};
+     bool *data2 = new bool[length * bucket_size]{};
++    std::vector<block> tags(length * bucket_size), remote_tags(length * bucket_size);
+     
+     for (int i = 0; i < length; ++i) {
+       for (int j = 1; j < bucket_size; ++j) {
+-        data[i * bucket_size + j] =
+-            getLSB(MAC[location[i * bucket_size] * 3 + 1] ^
+-                   MAC[location[i * bucket_size + j] * 3 + 1]);
++        const int offset = i * bucket_size + j;
++        tags[offset] = MAC[location[i * bucket_size] * 3 + 1] ^
++                       MAC[location[offset] * 3 + 1];
++        data[offset] = getLSB(tags[offset]);
+       }
+     }
++    // Test-only fault: change the opened share without its authenticator.
++    if (std::getenv("HANDOFF_TEST_CORRUPT_COMBINE_OPENING")) data[1] = !data[1];
+     
+     if (party == ALICE) {
+       io[I]->send_bool(data, length * bucket_size);
++      io[I]->send_block(tags.data(), length * bucket_size);
+       io[I]->flush();
+       io[I]->recv_bool(data2, length * bucket_size);
++      io[I]->recv_block(remote_tags.data(), length * bucket_size);
+     } else {
+       io[I]->recv_bool(data2, length * bucket_size);
++      io[I]->recv_block(remote_tags.data(), length * bucket_size);
+       io[I]->send_bool(data, length * bucket_size);
++      io[I]->send_block(tags.data(), length * bucket_size);
+       io[I]->flush();
+     }
+     
+     for (int i = 0; i < length; ++i) {
+       for (int j = 1; j < bucket_size; ++j) {
+-        data[i * bucket_size + j] =
+-            (data[i * bucket_size + j] != data2[i * bucket_size + j]);
++        const int offset = i * bucket_size + j;
++        const block remote_key = KEY[location[i * bucket_size] * 3 + 1] ^
++                                 KEY[location[offset] * 3 + 1];
++        const block expected = remote_key ^ (select_mask[data2[offset]] & Delta);
++        if (!cmpBlock(&remote_tags[offset], &expected, 1))
++          error("combine opening authentication failed\n");
++        data[offset] = data[offset] != data2[offset];
+       }
+     }
+     for (int i = 0; i < length; ++i) {
+diff --git a/src/emp-ot/emp-ot/ferret/mpcot_reg.h b/src/emp-ot/emp-ot/ferret/mpcot_reg.h
+index 8c38cb3..7753fa3 100644
+--- a/src/emp-ot/emp-ot/ferret/mpcot_reg.h
++++ b/src/emp-ot/emp-ot/ferret/mpcot_reg.h
+@@ -180,7 +180,7 @@ public:
+ 			block recv[2];
+ 			this->netio->recv_data(recv, 2*sizeof(block));
+ 			if(!cmpBlock(dig, recv, 2))
+-				std::cout << "SPCOT consistency check fails" << std::endl;
++				error("SPCOT consistency check fails");
+ 		}
+ 	}
+ };
+diff --git a/src/emp-ot/emp-ot/iknp.h b/src/emp-ot/emp-ot/iknp.h
+index fbf19d5..bef5913 100644
+--- a/src/emp-ot/emp-ot/iknp.h
++++ b/src/emp-ot/emp-ot/iknp.h
+@@ -2,6 +2,11 @@
+ #define EMP_IKNP_H__
+ #include "emp-ot/co.h"
+ #include "emp-ot/cot.h"
++#include <array>
++#include <vector>
++#ifdef HANDOFF_MRR_BASE_OT
++#include "HandoffBaseOT.hpp"
++#endif
+ 
+ namespace emp {
+ 
+@@ -25,13 +30,29 @@ public:
+ 
+   const static int64_t block_size = 1024 * 2;
+   block local_out[block_size];
+-  bool s[128], local_r[256];
++  bool s[128], local_r[128];
+   PRG prg, G0[128], G1[128];
+   bool malicious = false;
+   block k0[128], k1[128];
++  // Keep untransposed columns until the post-extension consistency check.
++  std::vector<block> check_columns, check_choices;
+   IKNP(T *io, bool malicious = false) : malicious(malicious) { this->io = io; }
+   ~IKNP() { delete_array_null(extended_r); }
+ 
++#ifdef HANDOFF_MRR_BASE_OT
++  /** Send and flush one base-OT message on the authenticated EMP channel. */
++  static void base_send_bytes(void *context, const void *data, size_t length) {
++    auto *channel = static_cast<T *>(context);
++    channel->send_data(data, length);
++    channel->flush();
++  }
++
++  /** Receive one exact base-OT message on the authenticated EMP channel. */
++  static void base_receive_bytes(void *context, void *data, size_t length) {
++    static_cast<T *>(context)->recv_data(data, length);
++  }
++#endif
++
+   void setup_send(const bool *in_s = nullptr, block *in_k0 = nullptr) {
+     setup = true;
+     if (in_s == nullptr)
+@@ -42,10 +63,17 @@ public:
+     if (in_k0 != nullptr) {
+       memcpy(k0, in_k0, 128 * sizeof(block));
+     } else {
+-      this->base_ot = new OTCO<T>(io);
+-      base_ot->recv(k0, s, 128);
+-      io->flush();
+-      delete base_ot;
++#ifdef HANDOFF_MRR_BASE_OT
++      if (malicious) {
++        handoff_base_ot_receive(io, base_send_bytes, base_receive_bytes, s, k0);
++      } else
++#endif
++      {
++        this->base_ot = new OTCO<T>(io);
++        base_ot->recv(k0, s, 128);
++        io->flush();
++        delete base_ot;
++      }
+     }
+     for (int64_t i = 0; i < 128; ++i)
+       G0[i].reseed(&k0[i]);
+@@ -59,12 +87,19 @@ public:
+       memcpy(k0, in_k0, 128 * sizeof(block));
+       memcpy(k1, in_k1, 128 * sizeof(block));
+     } else {
+-      this->base_ot = new OTCO<T>(io);
+-      prg.random_block(k0, 128);
+-      prg.random_block(k1, 128);
+-      base_ot->send(k0, k1, 128);
+-      io->flush();
+-      delete base_ot;
++#ifdef HANDOFF_MRR_BASE_OT
++      if (malicious) {
++        handoff_base_ot_send(io, base_send_bytes, base_receive_bytes, k0, k1);
++      } else
++#endif
++      {
++        this->base_ot = new OTCO<T>(io);
++        prg.random_block(k0, 128);
++        prg.random_block(k1, 128);
++        base_ot->send(k0, k1, 128);
++        io->flush();
++        delete base_ot;
++      }
+     }
+     for (int64_t i = 0; i < 128; ++i) {
+       G0[i].reseed(&k0[i]);
+@@ -74,6 +109,7 @@ public:
+   void send_pre(block *out, int64_t length) {
+     if (not setup)
+       setup_send();
++    check_columns.clear();
+     int64_t j = 0;
+     for (; j < length / block_size; ++j)
+       send_pre_block(out + j * block_size, block_size);
+@@ -83,7 +119,7 @@ public:
+       memcpy(out + j * block_size, local_out, sizeof(block) * remain);
+     }
+     if (malicious)
+-      send_pre_block(local_out, 256);
++      send_pre_block(local_out, 128);
+   }
+ 
+   void send_pre_block(block *out, int64_t len) {
+@@ -99,12 +135,19 @@ public:
+                       local_block_size / 128);
+     }
+ 
++    if (malicious)
++      for (int64_t j = 0; j < local_block_size / 128; ++j)
++        for (int64_t i = 0; i < 128; ++i)
++          check_columns.push_back(t[i * (block_size / 128) + j]);
++
+     sse_trans((uint8_t *)(out), (uint8_t *)t, 128, block_size);
+   }
+ 
+   void recv_pre(block *out, const bool *r, int64_t length) {
+     if (not setup)
+       setup_recv();
++    check_columns.clear();
++    check_choices.clear();
+ 
+     block *block_r = new block[(length + 127) / 128];
+     for (int64_t i = 0; i < length / 128; ++i)
+@@ -129,11 +172,10 @@ public:
+     }
+ 
+     if (malicious) {
+-      block local_r_block[2];
+-      prg.random_bool(local_r, 256);
++      block local_r_block[1];
++      prg.random_bool(local_r, 128);
+       local_r_block[0] = bool_to_block(local_r);
+-      local_r_block[1] = bool_to_block(local_r + 128);
+-      recv_pre_block(local_out, local_r_block, 256);
++      recv_pre_block(local_out, local_r_block, 128);
+     }
+ 
+     delete[] block_r;
+@@ -152,102 +194,91 @@ public:
+       io->send_data(tmp, local_block_size / 8);
+     }
+ 
++    if (malicious)
++      for (int64_t j = 0; j < local_block_size / 128; ++j) {
++        check_choices.push_back(r[j]);
++        for (int64_t i = 0; i < 128; ++i)
++          check_columns.push_back(t[i * (block_size / 128) + j]);
++      }
++
+     sse_trans((uint8_t *)(out), (uint8_t *)t, 128, block_size);
+   }
+ 
+   void send_cot(block *data, int64_t length) override {
+     send_pre(data, length);
+     if (malicious)
+-      if (!send_check(data, length))
++      if (!send_check())
+         error("OT Extension check failed");
+   }
+   void recv_cot(block *data, const bool *b, int64_t length) override {
+     recv_pre(data, b, length);
+     if (malicious)
+-      recv_check(data, b, length);
++      recv_check();
+   }
+ 
+   /*
+-   *
+-   * [REF] Implementation of "Actively Secure OT Extension with Optimal
+-   * Overhead" https://eprint.iacr.org/2015/546.pdf
++   * Corrected KOS consistency check, Fig. 10 of ePrint 2015/546.
++   * The sender challenges after all extension rows have been sent and checks
++   * each base-OT column separately. The last 128 OTs are sacrificed.
+    */
+-  bool send_check(block *out, int64_t length) {
+-    block seed2, x, t[2], q[2], tmp[2];
+-    block chi[block_size];
+-    q[0] = q[1] = makeBlock(0, 0);
+-    io->recv_block(&seed2, 1);
++  bool send_check() {
++    block seed;
++    prg.random_block(&seed, 1);
++    io->send_block(&seed, 1);
+     io->flush();
+-    PRG chiPRG(&seed2);
+ 
+-    for (int64_t i = 0; i < length / block_size; ++i) {
+-      chiPRG.random_block(chi, block_size);
+-      vector_inn_prdt_sum_no_red<block_size>(tmp, chi, out + i * block_size);
+-      q[0] = q[0] ^ tmp[0];
+-      q[1] = q[1] ^ tmp[1];
+-    }
+-    int64_t remain = length % block_size;
+-    if (remain != 0) {
+-      chiPRG.random_block(chi, block_size);
+-      vector_inn_prdt_sum_no_red(tmp, chi, out + length - remain, remain);
+-      q[0] = q[0] ^ tmp[0];
+-      q[1] = q[1] ^ tmp[1];
+-    }
+-    {
+-      chiPRG.random_block(chi, 256);
+-      vector_inn_prdt_sum_no_red<256>(tmp, chi, local_out);
+-      q[0] = q[0] ^ tmp[0];
+-      q[1] = q[1] ^ tmp[1];
+-    }
++    const size_t groups = check_columns.size() / 128;
++    std::array<block, 128> expected;
++    for (size_t i = 0; i < 128; ++i)
++      expected[i] = check_columns[(groups - 1) * 128 + i];
+ 
+-    io->recv_block(&x, 1);
+-    io->recv_block(t, 2);
+-    mul128(x, Delta, tmp, tmp + 1);
+-    q[0] = q[0] ^ tmp[0];
+-    q[1] = q[1] ^ tmp[1];
++    PRG challenges(&seed);
++    for (size_t group = 0; group + 1 < groups; ++group) {
++      block chi, product;
++      challenges.random_block(&chi, 1);
++      for (size_t i = 0; i < 128; ++i) {
++        gfmul(check_columns[group * 128 + i], chi, &product);
++        expected[i] = expected[i] ^ product;
++      }
++    }
+ 
+-    return cmpBlock(q, t, 2);
++    std::array<block, 129> proof;
++    io->recv_block(proof.data(), proof.size());
++    bool valid = true;
++    for (size_t i = 0; i < 128; ++i) {
++      const block column = expected[i] ^ (s[i] ? proof[128] : zero_block);
++      valid &= cmpBlock(&column, &proof[i], 1);
++    }
++    check_columns.clear();
++    return valid;
+   }
+-  void recv_check(block *out, const bool *r, int64_t length) {
+-    block select[2] = {zero_block, all_one_block};
+-    block seed2, x = makeBlock(0, 0), t[2], tmp[2];
+-    prg.random_block(&seed2, 1);
+-    io->send_block(&seed2, 1);
++
++  void recv_check() {
++    block seed;
+     io->flush();
+-    block chi[block_size];
+-    t[0] = t[1] = makeBlock(0, 0);
+-    PRG chiPRG(&seed2);
+-
+-    for (int64_t i = 0; i < length / block_size; ++i) {
+-      chiPRG.random_block(chi, block_size);
+-      vector_inn_prdt_sum_no_red<block_size>(tmp, chi, out + i * block_size);
+-      t[0] = t[0] ^ tmp[0];
+-      t[1] = t[1] ^ tmp[1];
+-      for (int64_t j = 0; j < block_size; ++j)
+-        x = x ^ (chi[j] & select[r[i * block_size + j]]);
+-    }
+-    int64_t remain = length % block_size;
+-    if (remain != 0) {
+-      chiPRG.random_block(chi, block_size);
+-      vector_inn_prdt_sum_no_red(tmp, chi, out + length - remain, remain);
+-      t[0] = t[0] ^ tmp[0];
+-      t[1] = t[1] ^ tmp[1];
+-      for (int64_t j = 0; j < remain; ++j)
+-        x = x ^ (chi[j] & select[r[length - remain + j]]);
+-    }
++    io->recv_block(&seed, 1);
++    const size_t groups = check_choices.size();
++    std::array<block, 129> proof;
++    for (size_t i = 0; i < 128; ++i)
++      proof[i] = check_columns[(groups - 1) * 128 + i];
++    proof[128] = check_choices.back();
+ 
+-    {
+-      chiPRG.random_block(chi, 256);
+-      vector_inn_prdt_sum_no_red<256>(tmp, chi, local_out);
+-      t[0] = t[0] ^ tmp[0];
+-      t[1] = t[1] ^ tmp[1];
+-      for (int64_t j = 0; j < 256; ++j)
+-        x = x ^ (chi[j] & select[local_r[j]]);
++    PRG challenges(&seed);
++    for (size_t group = 0; group + 1 < groups; ++group) {
++      block chi, product;
++      challenges.random_block(&chi, 1);
++      gfmul(check_choices[group], chi, &product);
++      proof[128] = proof[128] ^ product;
++      for (size_t i = 0; i < 128; ++i) {
++        gfmul(check_columns[group * 128 + i], chi, &product);
++        proof[i] = proof[i] ^ product;
++      }
+     }
+ 
+-    io->send_block(&x, 1);
+-    io->send_block(t, 2);
++    io->send_block(proof.data(), proof.size());
+     io->flush();
++    check_columns.clear();
++    check_choices.clear();
+   }
+ };
+ 
+diff --git a/src/mta/F2128MtA.inl b/src/mta/F2128MtA.inl
+index e2195eb..683f9fb 100644
+--- a/src/mta/F2128MtA.inl
++++ b/src/mta/F2128MtA.inl
+@@ -445,7 +445,7 @@ F2128_MTA::play_receiver(OTSocket &socket, const EncodeType &omega) noexcept {
+   return play_receiver(socket, choice_bits);
+ }
+ 
+-F2128_MTA::ChiType
++inline F2128_MTA::ChiType
+ F2128_MTA::generate_batched_randomness(SSL &ssl, const bool sender) noexcept {
+   ChiType val;
+   emp::block randomness[l];
+@@ -820,7 +820,7 @@ F2128_MTA::generate_shares_prover_repeated(SSL &ssl,
+   return generate_shares_prover_repeated(ot, ssl, in);
+ }
+ 
+-F2128_MTA::ReceiverType::ReceiverType(const GadgetType &gadget) noexcept
++inline F2128_MTA::ReceiverType::ReceiverType(const GadgetType &gadget) noexcept
+     : beta{generate_beta()}, b{produce_b(gadget, beta)},
+       omega{get_batched_choice_bits(beta)}, t_b{}, chi{} {}
+ 
+@@ -829,7 +829,7 @@ void F2128_MTA::ReceiverType::do_ot(OTType &ot) noexcept {
+   t_b = play_batched_receiver(ot, *omega);
+ }
+ 
+-F2128_MTA::SenderType::SenderType(const GadgetType &) noexcept
++inline F2128_MTA::SenderType::SenderType(const GadgetType &) noexcept
+     : a_tilde{generate_a()}, a_hat{generate_a()}, alpha{produce_alpha(*a_tilde,
+                                                                       *a_hat)},
+       pads{generate_batched_pads()}, pairs{prepare_batched_pairs(*alpha,
+@@ -841,19 +841,19 @@ void F2128_MTA::SenderType::do_ot(OTType &ot) noexcept {
+   F2128_MTA::play_batched_sender(ot, *pairs);
+ }
+ 
+-void F2128_MTA::ReceiverType::generate_batched_randomness(SSL &ssl) noexcept {
++inline void F2128_MTA::ReceiverType::generate_batched_randomness(SSL &ssl) noexcept {
+   chi = F2128_MTA::generate_batched_randomness(ssl, false);
+ }
+ 
+-void F2128_MTA::SenderType::generate_batched_randomness(SSL &ssl) noexcept {
++inline void F2128_MTA::SenderType::generate_batched_randomness(SSL &ssl) noexcept {
+   chi = F2128_MTA::generate_batched_randomness(ssl, true);
+ }
+ 
+-bool F2128_MTA::SenderType::is_consistent(SSL &ssl) noexcept {
++inline bool F2128_MTA::SenderType::is_consistent(SSL &ssl) noexcept {
+   return F2128_MTA::prove_consistency_batched(ssl, *a_tilde, *a_hat, *t_a, chi);
+ }
+ 
+-bool F2128_MTA::ReceiverType::is_consistent(SSL &ssl) noexcept {
++inline bool F2128_MTA::ReceiverType::is_consistent(SSL &ssl) noexcept {
+   return F2128_MTA::check_consistency_batched(ssl, *t_b, chi, beta);
+ }
+ 
+diff --git a/src/ssl/EmpWrapperAG2PC.t.cpp b/src/ssl/EmpWrapperAG2PC.t.cpp
+index 3ea9c3f..464d46c 100644
+--- a/src/ssl/EmpWrapperAG2PC.t.cpp
++++ b/src/ssl/EmpWrapperAG2PC.t.cpp
+@@ -1,5 +1,6 @@
+ #include "../doctest.h"
+ #include "EmpWrapperAG2PC.hpp"
++#include "../2pc/HandoffHandshake.hpp"
+ #include "TLSSocket.hpp"
+ #define SOCKET_SETUP
+ #include "../mta/F2128MtA.hpp"
+@@ -823,3 +824,168 @@ TEST_CASE("derive_combined_traffic") {
+     }
+   }
+ }
++
++// Exercise the real handshake wrapper and compare its private shares with native HKDF.
++TEST_CASE("handoff_private_output_masks") {
++  auto context = CreateContextWithTestCertificate(TLS_method());
++  REQUIRE(context);
++  std::unique_ptr<TLSSocket> client, server;
++  REQUIRE(setup_sockets(context, server, client));
++  using namespace EmpWrapperAG2PCConstants;
++  HandshakeCircuitIn client_in{}, server_in{};
++  HandshakeCircuitOut client_out{}, server_out{};
++  REQUIRE(client_in.key_share.Init(32));
++  REQUIRE(server_in.key_share.Init(32));
++  std::fill(client_in.key_share.begin(), client_in.key_share.end(), 0);
++  std::fill(server_in.key_share.begin(), server_in.key_share.end(), 0);
++  client_in.key_share[31] = 1;
++  server_in.key_share[31] = 2;
++  client_in.hash.fill(0x42);
++  bool client_ok = false, server_ok = false;
++  auto evaluate = [&](bool verifier) {
++    auto *ssl = verifier ? server->get_ssl_object() : client->get_ssl_object();
++    std::unique_ptr<EmpWrapperAG2PC> circuit(
++        EmpWrapperAG2PC::build_derive_hs_256(ssl, verifier ? emp::BOB : emp::ALICE, 0));
++    circuit->do_preproc();
++    if (verifier) {
++      server_ok = ThreePartyHandshake::run_handshake_circuit(server_in, server_out, circuit.get(), true);
++    } else {
++      client_ok = ThreePartyHandshake::run_handshake_circuit(client_in, client_out, circuit.get(), false);
++    }
++  };
++  std::thread peer(evaluate, true);
++  evaluate(false);
++  peer.join();
++  REQUIRE(client_ok);
++  REQUIRE(server_ok);
++  std::array<uint8_t, 32> zero{}, early{}, hs{}, sum{}, ms{};
++  sum[31] = 3;
++  size_t len = 0;
++  const auto *md = EVP_sha256();
++  REQUIRE(HKDF_extract(early.data(), &len, md, zero.data(), zero.size(), zero.data(), zero.size()));
++  const auto des = produce_sublabel("derived", early, client_in.hash);
++  REQUIRE(HKDF_extract(hs.data(), &len, md, sum.data(), sum.size(), des.data(), des.size()));
++  const auto dhs = produce_sublabel("derived", hs, client_in.hash);
++  REQUIRE(HKDF_extract(ms.data(), &len, md, zero.data(), zero.size(), dhs.data(), dhs.size()));
++  std::array<uint8_t, 32> reconstructed{}, public_masked{};
++  for (size_t i = 0; i < 16; ++i) {
++    reconstructed[i] = client_out.MS_share[i];
++    reconstructed[16+i] = server_out.MS_share[i];
++    public_masked[i] = client_out.MS_share[i] ^ client_out.xor_mask[64+i];
++    public_masked[16+i] = server_out.MS_share[i] ^ server_out.xor_mask[64+i];
++  }
++  CHECK(reconstructed == ms);
++  CHECK(public_masked != ms);
++  CHECK(std::any_of(client_out.xor_mask.begin(), client_out.xor_mask.end(), [](auto x) { return x != 0; }));
++  CHECK(std::any_of(server_out.xor_mask.begin(), server_out.xor_mask.end(), [](auto x) { return x != 0; }));
++  const auto shts = produce_sublabel("s hs traffic", hs, client_in.hash);
++  const auto key = produce_sublabel("key", shts, client_in.hash);
++  for (size_t i = 0; i < 16; ++i) {
++    CHECK((client_out.server_key_share[i] ^ server_out.server_key_share[i]) == key[i]);
++  }
++  std::cout << "HANDOFF_AUDIT public_master_equals_secret=" << (public_masked == ms) << std::endl;
++}
++
++// Check protected point addition/key derivation against native P-256 and HKDF.
++TEST_CASE("handoff_protected_handshake_oracle") {
++  HandoffHandshake::Input alice{}, bob{};
++  std::fill(alice.begin() + 64, alice.begin() + 96, 0x42);
++  std::copy(alice.begin() + 64, alice.begin() + 96, bob.begin() + 64);
++  std::fill(alice.begin() + 96, alice.end(), 0x11);
++  std::fill(bob.begin() + 96, bob.end(), 0x22);
++  std::fill(bob.begin() + 128, bob.begin() + 160, 0x33);
++  std::fill(bob.begin() + 160, bob.end(), 0x44);
++  bssl::UniquePtr<BN_CTX> ctx(BN_CTX_new());
++  bssl::BN_CTXScope scope(ctx.get());
++  bssl::UniquePtr<EC_GROUP> group(EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1));
++  bssl::UniquePtr<EC_POINT> ap(EC_POINT_new(group.get())), bp(EC_POINT_new(group.get())), sum(EC_POINT_new(group.get()));
++  auto scalar = BN_CTX_get(ctx.get()), x = BN_CTX_get(ctx.get()), y = BN_CTX_get(ctx.get()), p = BN_CTX_get(ctx.get());
++  REQUIRE(p);
++  REQUIRE(BN_set_word(scalar, 3));
++  REQUIRE(EC_POINT_mul(group.get(), ap.get(), scalar, nullptr, nullptr, ctx.get()));
++  REQUIRE(BN_set_word(scalar, 5));
++  REQUIRE(EC_POINT_mul(group.get(), bp.get(), scalar, nullptr, nullptr, ctx.get()));
++  bool should_accept = true;
++  SUBCASE("valid") {}
++  SUBCASE("changed masks") { alice[96] ^= 0xf5; bob[127] ^= 0x19; }
++  bool changed_handshake_masks = false;
++  SUBCASE("changed Bob handshake masks") {
++    bob[128] ^= 0xf5;
++    bob[191] ^= 0x19;
++    changed_handshake_masks = true;
++  }
++  SUBCASE("mismatched transcript") { bob[64] ^= 1; should_accept = false; }
++  SUBCASE("point at infinity") {
++    REQUIRE(EC_POINT_copy(bp.get(), ap.get()));
++    REQUIRE(EC_POINT_invert(group.get(), bp.get(), ctx.get()));
++    should_accept = false;
++  }
++  for (auto pair : {std::make_pair(ap.get(), &alice), std::make_pair(bp.get(), &bob)}) {
++    REQUIRE(EC_POINT_get_affine_coordinates_GFp(group.get(), pair.first, x, y, ctx.get()));
++    REQUIRE(BN_bn2bin_padded(pair.second->data(), 32, x));
++    REQUIRE(BN_bn2bin_padded(pair.second->data() + 32, 32, y));
++  }
++  SUBCASE("noncanonical coordinate") {
++    REQUIRE(EC_GROUP_get_curve_GFp(group.get(), p, nullptr, nullptr, ctx.get()));
++    REQUIRE(BN_bn2bin_padded(alice.data(), 32, p));
++    should_accept = false;
++  }
++  emp::setup_plain_prot(false, "");
++  const auto output = HandoffHandshake::evaluate(alice, bob);
++  emp::finalize_plain_prot();
++  if (!should_accept) {
++    CHECK(std::all_of(output.begin(), output.end(), [](auto v) { return v == 0; }));
++    return;
++  }
++  REQUIRE(output[0] == 1);
++  REQUIRE(EC_POINT_add(group.get(), sum.get(), ap.get(), bp.get(), ctx.get()));
++  REQUIRE(EC_POINT_get_affine_coordinates_GFp(group.get(), sum.get(), x, nullptr, ctx.get()));
++  std::array<uint8_t, 32> dhe{}, zero{}, early{}, hs{}, ms{}, h2{}, bob_share{}, exposed{};
++  h2.fill(0x42);
++  REQUIRE(BN_bn2bin_padded(dhe.data(), dhe.size(), x));
++  size_t len = 0;
++  REQUIRE(HKDF_extract(early.data(), &len, EVP_sha256(), zero.data(), zero.size(), zero.data(), zero.size()));
++  const auto des = produce_sublabel("derived", early, h2);
++  REQUIRE(HKDF_extract(hs.data(), &len, EVP_sha256(), dhe.data(), dhe.size(), des.data(), des.size()));
++  const auto dhs = produce_sublabel("derived", hs, h2);
++  REQUIRE(HKDF_extract(ms.data(), &len, EVP_sha256(), zero.data(), zero.size(), dhs.data(), dhs.size()));
++  const auto chts = produce_sublabel("c hs traffic", hs, h2);
++  const auto shts = produce_sublabel("s hs traffic", hs, h2);
++  if (changed_handshake_masks) {
++    auto original_bob = bob;
++    original_bob[128] ^= 0xf5;
++    original_bob[191] ^= 0x19;
++    emp::setup_plain_prot(false, "");
++    const auto baseline = HandoffHandshake::evaluate(alice, original_bob);
++    emp::finalize_plain_prot();
++    CHECK(output[1] == (baseline[1] ^ 0xf5));
++    CHECK(output[64] == (baseline[64] ^ 0x19));
++    CHECK(std::equal(output.begin() + 2, output.begin() + 64, baseline.begin() + 2));
++    CHECK(std::equal(output.begin() + 65, output.end(), baseline.begin() + 65));
++  }
++  for (size_t i = 0; i < 32; ++i) {
++    CHECK((output[1+i] ^ bob[128+i]) == chts[i]);
++    CHECK((output[33+i] ^ bob[160+i]) == shts[i]);
++  }
++  std::string handshake_message = "Concurro/Handoff/v2/handshake-keys";
++  handshake_message.append(reinterpret_cast<const char *>(h2.data()), h2.size());
++  handshake_message.append(reinterpret_cast<const char *>(chts.data()), chts.size());
++  handshake_message.append(reinterpret_cast<const char *>(shts.data()), shts.size());
++  std::array<uint8_t, 32> handshake_commitment{};
++  SHA256(reinterpret_cast<const uint8_t *>(handshake_message.data()), handshake_message.size(), handshake_commitment.data());
++  CHECK(std::equal(handshake_commitment.begin(), handshake_commitment.end(), output.begin()+161));
++  for (size_t i = 0; i < 32; ++i) {
++    exposed[i] = output[65 + i];
++    bob_share[i] = exposed[i] ^ bob[96 + i];
++    CHECK((bob_share[i] ^ alice[96 + i]) == ms[i]);
++  }
++  CHECK(exposed != ms);
++  for (const bool side_b : {false, true}) {
++    std::string message = side_b ? "Concurro/Handoff/v1/MS/B" : "Concurro/Handoff/v1/MS/A";
++    message.append(reinterpret_cast<const char *>(h2.data()), h2.size());
++    message.append(reinterpret_cast<const char *>(side_b ? bob_share.data() : alice.data() + 96), 32);
++    std::array<uint8_t, 32> expected{};
++    SHA256(reinterpret_cast<const uint8_t *>(message.data()), message.size(), expected.data());
++    CHECK(std::equal(expected.begin(), expected.end(), output.begin() + (side_b ? 129 : 97)));
++  }
++}
+diff --git a/src/ssl/ThreePartyHandshake.cpp b/src/ssl/ThreePartyHandshake.cpp
+index e58e427..9598b46 100644
+--- a/src/ssl/ThreePartyHandshake.cpp
++++ b/src/ssl/ThreePartyHandshake.cpp
+@@ -203,32 +203,42 @@ bool ThreePartyHandshake::three_party_handshake_comm(SSL *ssl,
+         verifier, group[0], emp::ALICE,
+         EmpWrapperAG2PCConstants::HANDSHAKE_CIRCUIT_TAG_A);
+     if (ssl->handshake_circuit_a) {
++      std::cerr << "HANDOFF_PREPROC begin handshake_circuit_a" << std::endl;
+       ssl->handshake_circuit_a->do_preproc();
++      std::cerr << "HANDOFF_PREPROC end handshake_circuit_a" << std::endl;
+     }
+ 
+     ssl->handshake_circuit_b = EmpWrapperAG2PC::build_derive_hs_circuit(
+         verifier, group[1], emp::ALICE,
+         EmpWrapperAG2PCConstants::HANDSHAKE_CIRCUIT_TAG_B);
+     if (ssl->handshake_circuit_b) {
++      std::cerr << "HANDOFF_PREPROC begin handshake_circuit_b" << std::endl;
+       ssl->handshake_circuit_b->do_preproc();
++      std::cerr << "HANDOFF_PREPROC end handshake_circuit_b" << std::endl;
+     }
+ 
+     ssl->traffic_circuit = EmpWrapperAG2PC::build_derive_ts_circuit(
+         verifier, emp::ALICE, EmpWrapperAG2PCConstants::TRAFFIC_CIRCUIT_TAG);
+     if (ssl->traffic_circuit) {
++      std::cerr << "HANDOFF_PREPROC begin traffic_circuit" << std::endl;
+       ssl->traffic_circuit->do_preproc();
++      std::cerr << "HANDOFF_PREPROC end traffic_circuit" << std::endl;
+     }
+ 
+     ssl->aes_joint_circuit = EmpWrapperAG2PC::build_joint_aes_circuit(
+         verifier, emp::ALICE, EmpWrapperAG2PCConstants::AES_JOINT_CIRCUIT_TAG);
+     if (ssl->aes_joint_circuit) {
++      std::cerr << "HANDOFF_PREPROC begin aes_joint_circuit" << std::endl;
+       ssl->aes_joint_circuit->do_preproc();
++      std::cerr << "HANDOFF_PREPROC end aes_joint_circuit" << std::endl;
+     }
+ 
+     ssl->gcm_circuit = EmpWrapperAG2PC::build_gcm_circuit(
+         verifier, emp::ALICE, EmpWrapperAG2PCConstants::GCM_CIRCUIT_TAG);
+     if (ssl->gcm_circuit) {
++      std::cerr << "HANDOFF_PREPROC begin gcm_circuit" << std::endl;
+       ssl->gcm_circuit->do_preproc();
++      std::cerr << "HANDOFF_PREPROC end gcm_circuit" << std::endl;
+     }
+   }
+ 
+@@ -605,7 +615,6 @@ static bool run_handshake_circuit_internal(
+   Util::generate_random_bytes<EmpWrapperAG2PCConstants::HANDSHAKE_MASK_SIZE>(
+       out.xor_mask);
+ 
+-  std::fill(out.xor_mask.begin(), out.xor_mask.end(), 0);
+   std::copy(out.xor_mask.cbegin(), out.xor_mask.cend(), in_arr.begin() + pos);
+   pos += static_cast<unsigned>(EmpWrapperAG2PCConstants::HANDSHAKE_MASK_SIZE);
+ 
+@@ -668,6 +677,10 @@ static bool run_handshake_circuit_internal(
+   // If the caller is the prover, then their output is just the
+   // mask they fed in.
+   copy_func(out.server_key_share, 16);
++  if constexpr (!verifier) {
++    std::copy(out.xor_mask.cend() - out.server_key_share.size(),
++              out.xor_mask.cend(), out.server_key_share.begin());
++  }
+ 
+   // Now we need to copy over the IV, and then we should be done.
+   copy_func(out.iv, 12);
+diff --git a/src/ssl/Util.inl b/src/ssl/Util.inl
+index 0618a70..776a286 100644
+--- a/src/ssl/Util.inl
++++ b/src/ssl/Util.inl
+@@ -1,3 +1,6 @@
++#include <openssl/err.h>
++#include <cstdio>
++#include <cstdlib>
+ #ifndef INCLUDED_UTIL_HPP
+ #error Do not include Util.inl without Util.hpp
+ #endif
+@@ -115,9 +118,13 @@ void Util::process_data(SSL *const ssl, RT *const data, const std::size_t nbyte,
+     // file. It isn't always guaranteed in general.
+     const int amount_processed =
+         func(ssl, data + data_processed, amount_to_process);
+-    // Both of the functions here return < 0 on error.
+-    if (amount_processed < 0) {
+-      return;
++    // Blocking channel EOF or failure must not leave authentication buffers incomplete.
++    if (amount_processed <= 0) {
++      const int ssl_error = SSL_get_error(ssl, amount_processed);
++      const unsigned long error = ERR_peek_error();
++      std::fprintf(stderr, "MPC TLS channel failed: result=%d ssl_error=%d reason=%s\n",
++                   amount_processed, ssl_error, ERR_reason_error_string(error));
++      std::exit(1);
+     }
+ 
+     // This should always be the case, because we either processed all of the

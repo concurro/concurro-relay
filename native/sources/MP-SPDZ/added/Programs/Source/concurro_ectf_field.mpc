@@ -1,0 +1,55 @@
+"""Share the sum of two checked P-256 points with native field inputs."""
+
+P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
+B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
+program.set_security(128)
+assert program.security == 128
+
+# The private domain is Fp² per party. The input layer maps integer
+# representatives to Fp; canonical 32-byte shares are checked at the bridge.
+xa = sint.get_input_from(0)
+ya = sint.get_input_from(0)
+xb = sint.get_input_from(1)
+yb = sint.get_input_from(1)
+
+# The public challenge follows the four private inputs. One equation per
+# party is checked without disclosing which party supplied an invalid point.
+challenge = sint.get_random().reveal()
+error_a = ya * ya - (xa * xa * xa - 3 * xa + B)
+error_b = yb * yb - (xb * xb * xb - 3 * xb + B)
+opened_check = ((error_a + challenge * error_b) * sint.get_random()).reveal()
+valid_input = opened_check == 0
+
+# Renes-Costello-Batina complete projective addition, EFD add-2015-rcb.
+# Both inputs are affine, so Z1 = Z2 = 1; X3/Z3 is the sum's x.
+t0 = xa * xb
+t1 = ya * yb
+t2 = sint(1)
+t3 = (xa + ya) * (xb + yb) - t0 - t1
+t4 = (xa + 1) * (xb + 1) - t0 - t2
+t5 = (ya + 1) * (yb + 1) - t1 - t2
+Z3 = -3 * t4 + 3 * B * t2
+X3 = t1 - Z3
+Z3 = t1 + Z3
+Y3 = X3 * Z3
+t1 = 3 * t0 - 3 * t2
+t2 = -3 * t2
+t4 = 3 * B * t4
+t2 = -3 * (t0 - t2)
+t4 += t2
+Y3 += t1 * t4
+X3 = t3 * X3 - t5 * t4
+Z3 = t5 * Z3 + t3 * t1
+
+# An invalid input opens unrelated randomness instead of a point oracle.
+inversion_mask = sint.get_random()
+opened_z = (Z3 * inversion_mask * valid_input +
+            sint.get_random() * (1 - valid_input)).reveal()
+valid = valid_input * (opened_z != 0)
+sum_x = X3 * inversion_mask * (opened_z ** (P - 2))
+
+# Private outputs are MAC-checked at process exit before the bridge uses them.
+mask = sint.get_random()
+print_ln('valid %s', valid)
+print_ln_to(0, 'share %s', (mask * valid).reveal_to(0))
+print_ln_to(1, 'share %s', ((sum_x - mask) * valid).reveal_to(1))

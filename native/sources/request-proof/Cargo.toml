@@ -1,0 +1,20 @@
+[package]
+name = "handoff-request-proof"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mpz-circuits = { path = "../mpz2/crates/circuits", features = ["aes"] }
+mpz-common = { path = "../mpz2/crates/common" }
+mpz-core = { path = "../mpz2/crates/core" }
+mpz-hash = { path = "../mpz2/crates/hash", default-features = false, features = ["sha256"] }
+mpz-ot = { path = "../mpz2/crates/ot" }
+mpz-vm-core = { path = "../mpz2/crates/vm-core" }
+mpz-zk = { path = "../mpz2/crates/zk", features = ["rayon"] }
+anyhow = "1"
+hex = "0.4"
+rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread"] }
+tokio-util = { version = "0.7", features = ["compat"] }
