@@ -2,10 +2,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use tokio::io::{AsyncBufRead, Lines};
 
-use crate::{NativeAudit, NativeRole};
+use crate::{NativeAudit, NativeRequest, NativeRole, NativeVerdict, session::Gate};
 
 /// Provider protocol selected for this session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -58,6 +59,8 @@ pub enum WorkerEvent {
     Ready(String),
     /// Sponsor audit projection.
     Audit(NativeAudit),
+    /// A request awaiting the parent's verdict on standard input.
+    Review(NativeRequest),
     /// Native worker cancellation reason.
     Cancel(String),
 }
@@ -68,8 +71,27 @@ impl WorkerEvent {
         Ok(match self {
             Self::Ready(address) => format!("NATIVE_READY {address}"),
             Self::Audit(audit) => format!("NATIVE_AUDIT {}", serde_json::to_string(audit)?),
+            Self::Review(request) => format!("NATIVE_REVIEW {}", serde_json::to_string(request)?),
             Self::Cancel(reason) => format!("NATIVE_CANCEL {reason}"),
         })
+    }
+}
+
+/// Asks the parent bridge for each verdict: the request goes out on
+/// standard output and the verdict comes back as a line on `answers`.
+pub struct ParentGate<R> {
+    pub answers: Lines<R>,
+}
+
+impl<R: AsyncBufRead + Unpin> Gate for ParentGate<R> {
+    async fn decide(&mut self, request: &NativeRequest) -> Result<NativeVerdict> {
+        println!("{}", WorkerEvent::Review(request.clone()).line()?);
+        let answer = self
+            .answers
+            .next_line()
+            .await?
+            .context("parent closed the verdict pipe")?;
+        Ok(serde_json::from_str(&answer)?)
     }
 }
 
@@ -77,8 +99,10 @@ impl WorkerEvent {
 mod tests {
     use clap::Parser;
 
-    use super::{WorkerConfig, WorkerEvent, WorkerRoute};
-    use crate::{NativeAudit, NativeRole};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    use super::{ParentGate, WorkerConfig, WorkerEvent, WorkerRoute};
+    use crate::{NativeAudit, NativeRequest, NativeRole, session::Gate};
 
     /// Keep the Python command-line shape and parent event prefixes stable.
     #[test]
@@ -111,10 +135,8 @@ mod tests {
             "NATIVE_CANCEL cli_disconnect"
         );
         let audit = NativeAudit {
-            turn: 2,
-            prompt: "fixture".into(),
+            request: 2,
             sha256: "abc".into(),
-            proof: "quicksilver".into(),
             usage: None,
             session_id: "fixture-session".into(),
         };
@@ -122,5 +144,35 @@ mod tests {
         let decoded: NativeAudit =
             serde_json::from_str(line.strip_prefix("NATIVE_AUDIT ").unwrap()).unwrap();
         assert_eq!(decoded, audit);
+        let request = request();
+        let line = WorkerEvent::Review(request.clone()).line().unwrap();
+        let decoded: NativeRequest =
+            serde_json::from_str(line.strip_prefix("NATIVE_REVIEW ").unwrap()).unwrap();
+        assert_eq!(decoded, request);
+    }
+
+    fn request() -> NativeRequest {
+        NativeRequest {
+            request: 3,
+            prompt: "fixture prompt".into(),
+            sha256: "abc".into(),
+            path: Some("/v1/messages".into()),
+            headers: vec![("anthropic-version".into(), "2023-06-01".into())],
+            session_id: "fixture-session".into(),
+        }
+    }
+
+    /// Each verdict is read from its own line of the parent's answers.
+    #[tokio::test]
+    async fn verdicts_come_from_the_parent() {
+        let answers = b"{\"request\":3,\"accept\":true,\"reason\":null}\n{\"request\":3,\"accept\":false,\"reason\":\"no\"}\n";
+        let mut gate = ParentGate {
+            answers: BufReader::new(&answers[..]).lines(),
+        };
+        let accepted = gate.decide(&request()).await.unwrap();
+        assert!(accepted.accept);
+        let rejected = gate.decide(&request()).await.unwrap();
+        assert_eq!(rejected.reason.as_deref(), Some("no"));
+        assert!(gate.decide(&request()).await.is_err());
     }
 }

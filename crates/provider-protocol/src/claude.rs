@@ -311,10 +311,10 @@ impl IndexedConnection {
 pub enum AuditFrame {
     /// Permitted H2 control frame.
     Control,
-    /// Partial JSON body awaiting another DATA frame.
-    Partial,
-    /// An approved indexed header block for a later stream.
-    Headers,
+    /// Partial JSON body on this stream awaiting another DATA frame.
+    Partial(u32),
+    /// An approved indexed header block for this later stream.
+    Headers(u32),
     /// Completed JSON prompt for this request stream.
     Prompt(u32, Vec<u8>),
 }
@@ -345,9 +345,25 @@ impl SponsorAudit {
         })
     }
 
-    /// Append the next public request template before its HEADERS proof.
-    pub fn template(&mut self, template: Template) {
+    /// Append the template of the next stream before its HEADERS proof;
+    /// each stream has one.
+    pub fn template(&mut self, template: Template) -> Result<()> {
+        ensure!(
+            self.templates.len() == ((self.next_stream - 1) / 2) as usize,
+            "unexpected Claude request template"
+        );
         self.templates.push(template);
+        Ok(())
+    }
+
+    /// The public template of client stream `stream`.
+    pub fn template_for(&self, stream: u32) -> Option<&Template> {
+        self.templates.get((stream.checked_sub(1)? / 2) as usize)
+    }
+
+    /// The body proved so far on the stream being uploaded.
+    pub fn body(&self) -> &[u8] {
+        &self.body
     }
 
     /// Validate one proved exact H2 frame and return its audit effect.
@@ -381,7 +397,7 @@ impl SponsorAudit {
             );
             self.body.extend_from_slice(parsed.payload);
             if parsed.flags == 0 {
-                return Ok(AuditFrame::Partial);
+                return Ok(AuditFrame::Partial(self.next_stream));
             }
             serde_json::from_slice::<Value>(&self.body)
                 .context("proved Claude prompt is not JSON")?;
@@ -402,7 +418,7 @@ impl SponsorAudit {
                 "unapproved indexed HEADERS"
             );
             self.waiting_data = true;
-            Ok(AuditFrame::Headers)
+            Ok(AuditFrame::Headers(stream))
         }
     }
 }
@@ -768,8 +784,10 @@ mod tests {
         let body = br#"{"messages":[{"content":"fixture prompt"}]}"#;
         std::assert_matches!(
             audit.accept(&frame(0, 0, 1, &body[..9]).unwrap()).unwrap(),
-            AuditFrame::Partial
+            AuditFrame::Partial(1)
         );
+        assert_eq!(audit.body(), &body[..9]);
+        assert_eq!(audit.template_for(1), Some(&template));
         std::assert_matches!(
             audit.accept(&frame(0, 1, 1, &body[9..]).unwrap()).unwrap(),
             AuditFrame::Prompt(1, value) if value == body
@@ -777,8 +795,10 @@ mod tests {
         let mut state = IndexedConnection::new(18).unwrap();
         state.active_stream = None;
         let (_, headers) = state.later_headers(0, &template).unwrap();
-        audit.template(template);
-        std::assert_matches!(audit.accept(&headers).unwrap(), AuditFrame::Headers);
+        audit.template(template.clone()).unwrap();
+        assert!(audit.template(template.clone()).is_err());
+        assert_eq!(audit.template_for(3), Some(&template));
+        std::assert_matches!(audit.accept(&headers).unwrap(), AuditFrame::Headers(3));
         assert!(audit.accept(&frame(0, 1, 5, body).unwrap()).is_err());
     }
 

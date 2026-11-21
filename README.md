@@ -92,6 +92,40 @@ CONCURRO_NATIVE_AUDIT_TEXT=1 concurro-relay run
 
 `status` reads your saved settings and credentials; it doesn't check a running relay. Use Concurro's Sponsor view to see connection and task status.
 
+## Reviewing requests
+
+Concurro shows the relay each request, with its path and public headers, before any of it reaches the provider. The relay records the request and its decision first. Then it checks that every byte it forwards matches the request that was approved.
+
+By default, the relay accepts each request. In the activity view:
+
+| Key | Action |
+| ---- | ---- |
+| `a` | Switch between accepting each request and asking you about each one |
+| `y` | Accept the waiting request you moved the cursor to |
+| `n` | Reject the waiting request you moved the cursor to |
+
+The cursor never moves onto a waiting request by itself, so you always answer the request you chose. The relay rejects a request that nobody answers within 5 minutes. `run` accepts each request unless a review hook rejects it.
+
+A review hook is a command the relay runs, with `/bin/sh -c`, for each request. It can, for example, ask a local classifier model:
+
+```bash
+concurro-relay run --review-command ./review.sh
+```
+
+You can also set `CONCURRO_RELAY_REVIEW_COMMAND`. The hook gets the request as JSON on standard input, with the fields `route`, `link`, `request`, `session_id`, `sha256`, `path`, `headers` and `prompt`.
+
+| Hook result | Effect |
+| ---- | ---- |
+| Exit 0 | Accept |
+| Exit 1 | Reject |
+| Any other exit, a crash, or more than 60 seconds | Ask you, or accept in `run` and when the view accepts each request |
+
+A hook that fails or times out doesn't block requests, unless you've switched the view to asking about each one.
+
+The first line the hook prints is shown as the reason. It's also sent to Concurro when the request is rejected.
+
+A rejected request never reaches the provider. Claude Code gets an HTTP 403 error, and Codex gets an error event. Later requests continue on the same connection. A Claude session's first request is reviewed before the relay connects to the provider, and rejecting it ends that session.
+
 ## How it works
 
 ```text

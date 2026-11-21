@@ -338,7 +338,7 @@ async fn main() -> Result<()> {
                         let bridge = native::bridge(link.control, link.proofs, NativeOptions {
                             role: NativeRole::Concurro, route, provider_host, provider_port,
                             provider_ca, listen: Some("127.0.0.1:0".to_owned()),
-                            token: None, account: None, audit: None, ready: Some(ready),
+                            token: None, account: None, audit: None, review: None, ready: Some(ready),
                         });
                         tokio::pin!(bridge);
                         tokio::select! {

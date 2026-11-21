@@ -14,6 +14,7 @@ use concurro_relay::{
     link::{self, Relay},
     login,
     policy::Policy,
+    review::{Decision, Reviewer},
     routes::Served,
     serve::RelayConfig,
     state::Store,
@@ -114,6 +115,12 @@ impl Verifier {
     /// Registers a relay and starts it with one link, returning what it
     /// reports.
     async fn relay(&self) -> UnboundedReceiver<Event> {
+        self.relay_with(config()).await
+    }
+
+    /// Registers a relay and starts it with one link and `config`,
+    /// returning what it reports.
+    async fn relay_with(&self, config: RelayConfig) -> UnboundedReceiver<Event> {
         let pending = login::begin(
             self.server.clone(),
             "test relay".into(),
@@ -132,7 +139,7 @@ impl Verifier {
             Arc::new(Relay {
                 registration,
                 identity,
-                config: config(),
+                config,
             }),
             1,
             events,
@@ -168,6 +175,7 @@ fn config() -> RelayConfig {
         credentials: Source::Fixed(Credential::token(TOKEN)),
         roots: Roots::Fixture,
         parents: Default::default(),
+        reviewer: Default::default(),
     }
 }
 
@@ -258,6 +266,17 @@ fn job(fields: serde_json::Value) -> Job {
     }
 }
 
+/// Asserts the next event reports a request the reviewer accepted.
+async fn accepted(reported: &mut UnboundedReceiver<Event>) {
+    assert_matches!(
+        next(reported).await,
+        Event::Reviewed {
+            decision: Decision { accept: true, .. },
+            ..
+        }
+    );
+}
+
 async fn next(reported: &mut UnboundedReceiver<Event>) -> Event {
     time::timeout(STEP_LIMIT, reported.recv())
         .await
@@ -296,6 +315,7 @@ async fn registered_relay_performs_and_proves_exchanges() {
         };
         assert_eq!(response.status, 200);
         assert!(performed.upload > 0);
+        accepted(&mut reported).await;
         let Event::Proved { link: 1, exchange } = next(&mut reported).await else {
             panic!("exchange was not reported")
         };
@@ -475,6 +495,7 @@ async fn relay_carries_websocket_turns_and_reports_refusals() {
     let mut carried = verifier.carry(None).await;
     let first = carried.ask(json!({"input": "first question"})).await;
     assert_eq!(first["type"], "response.completed");
+    accepted(&mut reported).await;
     let Event::Proved { exchange, .. } = next(&mut reported).await else {
         panic!("turn was not reported")
     };
@@ -505,6 +526,7 @@ async fn relay_carries_websocket_turns_and_reports_refusals() {
         second["response"]["previous_response_id"],
         first["response"]["id"]
     );
+    accepted(&mut reported).await;
     assert_matches!(next(&mut reported).await, Event::Proved { .. });
     carried.close().await.unwrap();
 
@@ -625,4 +647,47 @@ async fn gateway_listener_accepts_a_websocket_upgrade() {
         .await
         .expect("the gateway closes the connection");
     assert_matches!(closed, Some(Ok(Message::Close(_))));
+}
+
+/// A review hook which rejects keeps single requests and WebSocket turns
+/// from the provider, and the link serves on.
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_requests_are_not_performed() {
+    let verifier = Verifier::new("reviews").await;
+    let mut reported = verifier
+        .relay_with(RelayConfig {
+            reviewer: Arc::new(Reviewer::new(Some("echo not today; exit 1".into()))),
+            ..config()
+        })
+        .await;
+    next(&mut reported).await;
+    next(&mut reported).await;
+
+    let performed = time::timeout(STEP_LIMIT, verifier.gateway.perform(&job(json!({}))))
+        .await
+        .unwrap()
+        .unwrap();
+    let Verdict::Refused(reason) = performed.verdict else {
+        panic!("rejected job was performed")
+    };
+    assert_eq!(reason, "rejected by the review hook: not today");
+    let Event::Reviewed {
+        request, decision, ..
+    } = next(&mut reported).await
+    else {
+        panic!("the rejection was not reported")
+    };
+    assert!(!decision.accept && request.path.as_deref() == Some(PATH));
+
+    let mut carried = verifier.carry(None).await;
+    let refused = carried.ask(json!({"input": "a question"})).await;
+    assert_eq!(refused["type"], "error");
+    let Event::Reviewed {
+        request, decision, ..
+    } = next(&mut reported).await
+    else {
+        panic!("the rejection was not reported")
+    };
+    assert!(!decision.accept && request.prompt.contains("a question"));
+    carried.close().await.unwrap();
 }

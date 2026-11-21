@@ -29,6 +29,29 @@ impl Request {
     pub async fn watch_disconnect(&self) {
         watch_disconnect(&self.stream).await;
     }
+
+    /// Answers this request with the Sponsor's rejection, `reason`, when no
+    /// session was started for it.
+    pub async fn refuse(mut self, reason: &str) -> Result<()> {
+        let body = rejection(reason)?;
+        self.stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await?;
+        self.stream.write_all(&body).await?;
+        Ok(self.stream.shutdown().await?)
+    }
+}
+
+/// The error body which tells a CLI the Sponsor rejected its request.
+pub fn rejection(reason: &str) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&serde_json::json!({"type": "error",
+        "error": {"type": "permission_error", "message": reason}}))?)
 }
 
 /// Accept one complete local Claude POST, including its JSON body.
@@ -261,5 +284,34 @@ mod tests {
                 .starts_with("NATIVE_CANCEL cli_disconnect")
         );
         provider.abort();
+    }
+
+    /// A request rejected before any session gets a complete 403 answer.
+    #[tokio::test]
+    async fn a_refused_request_gets_a_403() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            accept(&listener)
+                .await
+                .unwrap()
+                .refuse("the Sponsor rejected this request: off topic")
+                .await
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(b"POST /v1/messages HTTP/1.1\r\nAuthorization: Bearer local-relay-placeholder\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}").await.unwrap();
+        let mut answer = String::new();
+        client.read_to_string(&mut answer).await.unwrap();
+        server.await.unwrap().unwrap();
+        assert!(answer.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+        let body = answer.split("\r\n\r\n").nth(1).unwrap();
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["error"]["type"], "permission_error");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .ends_with("off topic")
+        );
     }
 }

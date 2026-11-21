@@ -16,9 +16,10 @@ use tokio::{signal, sync::mpsc};
 use crate::{
     codex::DeviceLogin,
     credentials::{self, Credential, Source},
-    events::Event,
+    events::{self, Event},
     link::{self, Relay},
     login,
+    review::Reviewer,
     routes::Served,
     serve::RelayConfig,
     state::{Registration, Store},
@@ -49,7 +50,7 @@ pub fn logins(credentials: &Source, routes: &[Route]) -> Vec<(Route, Result<Stri
 }
 
 /// The relay registered in `store`, using fixture trust only when requested.
-pub fn relay(store: &Store) -> Result<Relay> {
+pub fn relay(store: &Store, reviewer: Arc<Reviewer>) -> Result<Relay> {
     let (registration, identity) = store
         .load()?
         .context("this relay is not registered; run `concurro-relay login`")?;
@@ -77,6 +78,7 @@ pub fn relay(store: &Store) -> Result<Relay> {
             Roots::Mozilla
         },
         parents: Default::default(),
+        reviewer,
     };
     Ok(Relay {
         registration,
@@ -205,20 +207,11 @@ pub async fn run(relay: Relay, links: usize) -> Result<()> {
     }
     let (events, mut reported) = mpsc::unbounded_channel();
     let running = tokio::spawn(link::run(Arc::new(relay), links, events));
+    let text = env::var("CONCURRO_NATIVE_AUDIT_TEXT").as_deref() == Ok("1");
     while let Some(event) = reported.recv().await {
-        println!("{event}");
-        if env::var("CONCURRO_NATIVE_AUDIT_TEXT").as_deref() == Ok("1") {
-            if let Event::NativeAudit { audit, .. } = &event {
-                println!(
-                    "Proved request body:\n{}\nConcurro-reported provider usage: {}",
-                    audit.prompt,
-                    audit
-                        .usage
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "unavailable".into())
-                );
-            }
+        println!("{}", events::one_line(&event.to_string()));
+        if let (true, Event::Reviewed { request, .. }) = (text, &event) {
+            println!("Request:\n{}", events::request_text(request));
         }
     }
     running.await?;

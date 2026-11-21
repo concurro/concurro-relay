@@ -3,12 +3,25 @@
 //! turns are proven while they stay open. Every exchange is proven with
 //! the credential hidden.
 
-use std::{env, future::IntoFuture, ops::Range, path::PathBuf, pin::pin, time::Instant};
+use std::{
+    env,
+    future::IntoFuture,
+    ops::Range,
+    path::PathBuf,
+    pin::pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
+};
 
 use anyhow::{Context, Result, bail};
-use concurro_relay_native::{self as native, NativeOptions, NativeRole};
+use concurro_relay_native::{
+    self as native, NativeOptions, NativeRequest, NativeRole, NativeVerdict, Review,
+};
 use concurro_relay_protocol::{
-    Roots,
+    Roots, identity,
     link::{self, Notice, Order},
     meter::Counters,
     route::Route,
@@ -37,6 +50,7 @@ use crate::{
     credentials::{Credential, Source},
     events::{Event, Exchange},
     policy::{Policy, ThreadParents},
+    review::{Decision, Reviewer},
     routes::Served,
     ws::WsRelay,
 };
@@ -50,6 +64,8 @@ pub struct RelayConfig {
     pub roots: Roots,
     /// Shared by every exchange this relay serves.
     pub parents: ThreadParents,
+    /// Decides whether each native request may reach the provider.
+    pub reviewer: Arc<Reviewer>,
 }
 
 impl RelayConfig {
@@ -64,6 +80,67 @@ impl RelayConfig {
             .map_err(|error| format!("{error:#}"))?;
         Ok((served, credential))
     }
+}
+
+/// Has `reviewer` decide `request` on `link`, and reports the decision
+/// before anything of the request is sent.
+async fn decide(
+    reviewer: &Reviewer,
+    events: &UnboundedSender<Event>,
+    link: usize,
+    route: Route,
+    request: NativeRequest,
+) -> Decision {
+    let decision = reviewer.review(link, route, &request, events).await;
+    let _ = events.send(Event::Reviewed {
+        link,
+        route,
+        request,
+        decision: decision.clone(),
+    });
+    decision
+}
+
+/// Numbers the requests a link reviews outside a native session, under an
+/// identifier of their own.
+struct Reviews {
+    session_id: String,
+    next: AtomicU64,
+}
+
+impl Reviews {
+    fn new() -> Self {
+        Self {
+            session_id: format!("{:016x}", u64::from_be_bytes(identity::random())),
+            next: AtomicU64::new(0),
+        }
+    }
+
+    /// The next request to review: `prompt`, sent to `path` with `headers`.
+    fn request(
+        &self,
+        prompt: String,
+        path: Option<String>,
+        headers: Vec<(String, String)>,
+    ) -> NativeRequest {
+        let number = self.next.fetch_add(1, Ordering::Relaxed);
+        NativeRequest {
+            request: number,
+            sha256: hex_digest(prompt.as_bytes()),
+            prompt,
+            path,
+            headers,
+            session_id: self.session_id.clone(),
+        }
+    }
+}
+
+/// The SHA-256 digest of `bytes` in hexadecimal.
+fn hex_digest(bytes: &[u8]) -> String {
+    native::helpers::sha256(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// What the relay adds to a request on `served` to carry `credential`.
@@ -88,6 +165,7 @@ struct Reporter<'a> {
     link: usize,
     traffic: &'a Counters,
     events: &'a UnboundedSender<Event>,
+    reviews: Reviews,
 }
 
 /// An exchange under way, as a [`Reporter`] measures it.
@@ -98,6 +176,29 @@ struct Timed {
 }
 
 impl Reporter<'_> {
+    /// Has `reviewer` decide `prompt`, sent to `path` with `headers` on
+    /// `route`, reporting the decision. Concurro orders nothing while it
+    /// waits for the decision, so an order, or the end of `orders`, abandons
+    /// the review.
+    async fn review(
+        &self,
+        reviewer: &Reviewer,
+        route: Route,
+        prompt: String,
+        path: Option<String>,
+        headers: Vec<(String, String)>,
+        orders: &mut (impl Stream<Item = Result<Order>> + Unpin),
+    ) -> Result<Decision> {
+        let request = self.reviews.request(prompt, path, headers);
+        tokio::select! {
+            decision = decide(reviewer, self.events, self.link, route, request) => Ok(decision),
+            order = orders.next() => match order {
+                Some(Ok(order)) => bail!("Concurro gave an order during a review: {order:?}"),
+                _ => bail!("Concurro ended the link during a review"),
+            },
+        }
+    }
+
     fn start(&self) -> Timed {
         Timed {
             started: Instant::now(),
@@ -223,12 +324,27 @@ async fn prove(
 async fn perform(
     job: &Job,
     handle: &mut SessionHandle,
+    orders: &mut (impl Stream<Item = Result<Order>> + Unpin),
     notices: &mut (impl AsyncWrite + Unpin),
     config: &RelayConfig,
     reporter: &Reporter<'_>,
 ) -> Result<bool> {
     let admitted = match admit(job, config) {
         Ok((admitted, offer)) => {
+            let decision = reporter
+                .review(
+                    &config.reviewer,
+                    admitted.route,
+                    admitted.body.clone(),
+                    Some(job.path.clone()),
+                    job.headers.clone(),
+                    orders,
+                )
+                .await?;
+            if !decision.accept {
+                wire::send(notices, &Notice::Refused(decision.to_string())).await?;
+                return Ok(false);
+            }
             wire::send(notices, &Notice::Offer(offer)).await?;
             admitted
         }
@@ -332,6 +448,26 @@ async fn carry(
         let admitted = match order {
             Order::Request { text, mask } => {
                 let frame = ws::text_frame(&text, mask);
+                // What the relay refuses anyway is not put to the reviewer.
+                if let Err(reason) = relay.admit_request(&frame) {
+                    wire::send(notices, &Notice::Refused(reason.clone())).await?;
+                    reporter.refused(reason);
+                    continue;
+                }
+                let decision = reporter
+                    .review(
+                        &config.reviewer,
+                        served.route,
+                        text.clone(),
+                        None,
+                        Vec::new(),
+                        orders,
+                    )
+                    .await?;
+                if !decision.accept {
+                    wire::send(notices, &Notice::Refused(decision.to_string())).await?;
+                    continue;
+                }
                 let sent = relay.send_request(&frame).await?;
                 if sent.is_ok() {
                     asked = Some((reporter.start(), text, frame.len()));
@@ -408,11 +544,33 @@ where
             .map(|(_, value)| value.clone());
         wire::send(&mut control, &Notice::NativeReady).await?;
         let (audit, mut reported) = mpsc::unbounded_channel();
-        let events = events.clone();
+        let (review, mut reviews) = mpsc::unbounded_channel::<Review>();
         let route = *route;
-        let forward = tokio::spawn(async move {
-            while let Some(audit) = reported.recv().await {
-                let _ = events.send(Event::NativeAudit { link, route, audit });
+        let forward = tokio::spawn({
+            let events = events.clone();
+            async move {
+                while let Some(audit) = reported.recv().await {
+                    let _ = events.send(Event::NativeAudit { link, route, audit });
+                }
+            }
+        });
+        // Each request is decided on, and reported, before it is sent.
+        let reviewing = tokio::spawn({
+            let (events, reviewer) = (events.clone(), config.reviewer.clone());
+            async move {
+                while let Some(Review { request, mut reply }) = reviews.recv().await {
+                    let number = request.request;
+                    // A review the worker gave up on is withdrawn undecided.
+                    let decision = tokio::select! {
+                        decision = decide(&reviewer, &events, link, route, request) => decision,
+                        () = reply.closed() => continue,
+                    };
+                    let _ = reply.send(NativeVerdict {
+                        request: number,
+                        accept: decision.accept,
+                        reason: decision.told(),
+                    });
+                }
             }
         });
         let result = native::bridge(
@@ -430,10 +588,13 @@ where
                 token: Some(credential.token),
                 account,
                 audit: Some(audit),
+                review: Some(review),
                 ready: None,
             },
         )
         .await;
+        // A review still waiting has nothing left to decide.
+        reviewing.abort();
         forward.await?;
         result?;
         return Ok(1);
@@ -446,6 +607,7 @@ where
         link,
         traffic,
         events,
+        reviews: Reviews::new(),
     };
     let mut served = 0;
     let mut first = Some(first);
@@ -455,9 +617,17 @@ where
         None => orders.next().await,
     } {
         served += match order {
-            Order::Job(job) => {
-                usize::from(perform(&job, &mut handle, &mut notices, config, &reporter).await?)
-            }
+            Order::Job(job) => usize::from(
+                perform(
+                    &job,
+                    &mut handle,
+                    &mut orders,
+                    &mut notices,
+                    config,
+                    &reporter,
+                )
+                .await?,
+            ),
             Order::Open { job, key } => {
                 carry(
                     &job,
@@ -476,4 +646,55 @@ where
     handle.close();
     let _ = driver.await;
     Ok(served)
+}
+
+#[cfg(test)]
+mod tests {
+    use concurro_relay_protocol::{link::Order, meter::Counters, route::Route};
+    use futures::stream;
+    use tokio::sync::mpsc;
+
+    use super::{Reporter, Reviews};
+    use crate::{events::Event, review::Reviewer};
+
+    /// A review waiting for the Sponsor ends with the link, and its question
+    /// is withdrawn.
+    #[tokio::test]
+    async fn a_review_ends_with_the_link() {
+        let reviewer = Reviewer::new(None);
+        reviewer.set_asking(true);
+        let (events, mut reported) = mpsc::unbounded_channel();
+        let traffic = Counters::default();
+        let reporter = Reporter {
+            link: 1,
+            traffic: &traffic,
+            events: &events,
+            reviews: Reviews::new(),
+        };
+        let (closing, closed) = tokio::sync::oneshot::channel::<()>();
+        let mut orders = Box::pin(stream::once(async move {
+            let _ = closed.await;
+            Err::<Order, _>(anyhow::anyhow!("link closed"))
+        }));
+        let reviewing = reporter.review(
+            &reviewer,
+            Route::ClaudeSubscription,
+            "{}".into(),
+            Some("/v1/messages".into()),
+            Vec::new(),
+            &mut orders,
+        );
+        tokio::pin!(reviewing);
+        let ticket = tokio::select! {
+            _ = &mut reviewing => panic!("the review ended early"),
+            asked = reported.recv() => match asked {
+                Some(Event::Asked { ticket, .. }) => ticket,
+                other => panic!("the Sponsor was not asked: {other:?}"),
+            },
+        };
+        assert!(reviewer.is_waiting(ticket));
+        drop(closing);
+        assert!(reviewing.await.is_err());
+        assert!(!reviewer.is_waiting(ticket));
+    }
 }

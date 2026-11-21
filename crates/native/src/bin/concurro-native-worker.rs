@@ -9,18 +9,20 @@ use concurro_relay_native::{
     bootstrap::{self, BootstrapOptions},
     helpers::{self, Peer, Runtime},
     ingress, session,
-    worker::{WorkerConfig, WorkerRoute},
+    worker::{ParentGate, WorkerConfig, WorkerRoute},
 };
 use concurro_relay_native_transport::{
     control::{self, Message},
     tunnel::{Role, Tunnel},
 };
+use concurro_relay_protocol::identity;
 use concurro_relay_tls13::handshake::Profile;
 use serde_json::{Value, json};
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncBufReadExt, BufReader},
     net::UnixStream,
     sync::{mpsc, oneshot},
+    time,
 };
 
 /// Connect one role, retain its bootstrap and process provider continuations.
@@ -68,10 +70,13 @@ async fn main() -> Result<()> {
     helpers::exchange_mascot_identity(&mut identity_peer, config.role, &runtime).await?;
     let mut control = identity_peer.stream;
     if config.role == NativeRole::Sponsor {
-        let mut input = Vec::new();
-        tokio::io::stdin().read_to_end(&mut input).await?;
-        let credential: Value =
-            serde_json::from_slice(&input).context("Sponsor credential JSON")?;
+        // The credential comes first; verdicts on requests follow, a line each.
+        let mut answers = BufReader::new(tokio::io::stdin()).lines();
+        let input = answers
+            .next_line()
+            .await?
+            .context("Sponsor credential missing")?;
+        let credential: Value = serde_json::from_str(&input).context("Sponsor credential JSON")?;
         let token = credential["token"]
             .as_str()
             .context("Sponsor token missing")?
@@ -94,6 +99,27 @@ async fn main() -> Result<()> {
             bail!("expected native_template")
         }
         let completion_ack = template.metadata.get("completion_ack") == Some(&json!(true));
+        let mut gate = ParentGate { answers };
+        let session_id = hex::encode(identity::random::<16>());
+        let mut peer = Peer {
+            stream: control,
+            events: Vec::new(),
+        };
+        let first = if profile == Profile::ClaudeH2 {
+            match session::sponsor_first(&mut peer, &mut gate, &runtime, &session_id).await? {
+                Some(first) => Some(first),
+                // Nothing of the session reached the provider. Concurro ends
+                // the link once it has the rejection.
+                None => {
+                    let _ =
+                        time::timeout(Duration::from_secs(30), control::receive(&mut peer.stream))
+                            .await;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
         let options = BootstrapOptions {
             role: config.role,
             profile,
@@ -104,11 +130,20 @@ async fn main() -> Result<()> {
             credential: Some(token),
             account,
             codex_headers: Vec::new(),
-            claude_template: None,
+            claude_template: first.as_ref().and_then(|first| first.template().cloned()),
         };
         let session =
-            bootstrap::start_after_identity(control, Some(tunnel.clone()), options).await?;
-        session::sponsor(session, tunnel, runtime, completion_ack).await
+            bootstrap::start_after_identity(peer.stream, Some(tunnel.clone()), options).await?;
+        session::sponsor(
+            session,
+            tunnel,
+            runtime,
+            completion_ack,
+            &mut gate,
+            &session_id,
+            first,
+        )
+        .await
     } else {
         let shape = control::receive(&mut control).await?;
         if shape.kind != "native_shape" {
@@ -141,6 +176,25 @@ async fn main() -> Result<()> {
                 },
             )
             .await?;
+            let mut peer = Peer {
+                stream: control,
+                events: Vec::new(),
+            };
+            let reviewed = tokio::select! {
+                reviewed = session::claude_review_first(&mut peer, &first.body, &first.template, compact) => reviewed,
+                () = first.watch_disconnect() => {
+                    println!("NATIVE_CANCEL cli_disconnect");
+                    bail!("NATIVE_CANCEL cli_disconnect");
+                }
+            };
+            match reviewed {
+                Ok(()) => {}
+                // Nothing of the session reached the provider.
+                Err(error) if error.is::<session::Rejected>() => {
+                    return first.refuse(&error.to_string()).await;
+                }
+                Err(error) => return Err(error),
+            }
             let options = BootstrapOptions {
                 role: config.role,
                 profile,
@@ -154,7 +208,7 @@ async fn main() -> Result<()> {
                 claude_template: Some(first.template.clone()),
             };
             let session = tokio::select! {
-                result = bootstrap::start_after_identity(control, Some(tunnel.clone()), options) => result?,
+                result = bootstrap::start_after_identity(peer.stream, Some(tunnel.clone()), options) => result?,
                 () = first.watch_disconnect() => {
                     println!("NATIVE_CANCEL cli_disconnect");
                     bail!("NATIVE_CANCEL cli_disconnect");

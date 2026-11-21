@@ -17,7 +17,7 @@ use tokio::{
     net::UnixListener,
     process::Command,
     signal::unix::{SignalKind, signal},
-    sync::mpsc::UnboundedSender,
+    sync::{mpsc::UnboundedSender, oneshot, watch},
     time::{self, Duration},
 };
 
@@ -134,20 +134,51 @@ pub enum NativeRole {
     Concurro,
 }
 
-/// One Sponsor-observed proved prompt and its Concurro-reported provider usage.
+/// A request Concurro asks the Sponsor to approve before any of it reaches
+/// the provider. Every byte later released must match `prompt`.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct NativeRequest {
+    /// Review number on this TLS connection.
+    pub request: u64,
+    /// Request body or WebSocket message text.
+    pub prompt: String,
+    /// Digest of the prompt bytes.
+    pub sha256: String,
+    /// Provider path, for HTTP routes.
+    pub path: Option<String>,
+    /// Public request headers, for HTTP routes; never the credential.
+    pub headers: Vec<(String, String)>,
+    /// Identifier of the Sponsor's native session.
+    pub session_id: String,
+}
+
+/// The Sponsor's answer to a [`NativeRequest`].
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct NativeVerdict {
+    /// The review number answered.
+    pub request: u64,
+    pub accept: bool,
+    /// Why, as told to Concurro.
+    pub reason: Option<String>,
+}
+
+/// A request awaiting the Sponsor's verdict.
+#[derive(Debug)]
+pub struct Review {
+    pub request: NativeRequest,
+    pub reply: oneshot::Sender<NativeVerdict>,
+}
+
+/// Concurro-reported provider usage for an approved request.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct NativeAudit {
-    /// Final request record number on this TLS connection.
-    pub turn: usize,
-    /// Proved request body or WebSocket message.
-    pub prompt: String,
-    /// Digest of the proved prompt bytes.
+    /// The review number of the request the usage belongs to.
+    pub request: u64,
+    /// Digest of the request's prompt bytes.
     pub sha256: String,
-    /// Proof implementation used for the request.
-    pub proof: String,
     /// Provider usage relayed by Concurro; Sponsor cannot verify this field.
     pub usage: Option<Value>,
-    /// TLS-MPC session identifier shared by the two parties.
+    /// Identifier of the Sponsor's native session.
     pub session_id: String,
 }
 
@@ -181,6 +212,9 @@ pub struct NativeOptions {
     pub account: Option<String>,
     /// Sponsor-side stream of per-request native audit events.
     pub audit: Option<UnboundedSender<NativeAudit>>,
+    /// Sponsor-side requests awaiting approval; without it every request is
+    /// rejected.
+    pub review: Option<UnboundedSender<Review>>,
     /// Concurro-side stream of bound local CLI ingress addresses.
     pub ready: Option<UnboundedSender<String>>,
 }
@@ -254,13 +288,22 @@ where
     command.kill_on_drop(true);
     let mut worker = command.spawn().context("start bundled native TLS worker")?;
     native_session.worker(worker.id().context("native worker has no pid")? as i32);
-    let stdout_task = {
+    let mut stdin = worker.stdin.take();
+    if let (Some(token), Some(stdin)) = (options.token, &mut stdin) {
+        let mut line = serde_json::to_vec(&json!({"token": token, "account": options.account}))?;
+        line.push(b'\n');
+        stdin.write_all(&line).await?;
+    }
+    // Set once the worker is gone, when a pending review has nothing left to
+    // decide.
+    let (stop, stopped) = watch::channel(false);
+    let mut stdout_task = {
         let stdout = worker
             .stdout
             .take()
             .expect("native worker has piped stdout");
-        let audit = options.audit;
-        let ready = options.ready;
+        let (audit, review, ready) = (options.audit, options.review, options.ready);
+        let mut stopped = stopped;
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Some(line) = lines.next_line().await? {
@@ -271,6 +314,18 @@ where
                     }
                 } else if line.starts_with("NATIVE_CANCEL ") {
                     eprintln!("{line}");
+                } else if let Some(value) = line.strip_prefix("NATIVE_REVIEW ") {
+                    let request: NativeRequest = serde_json::from_str(value)?;
+                    let Some(verdict) = decide(review.as_ref(), request, &mut stopped).await else {
+                        break;
+                    };
+                    let mut answer = serde_json::to_vec(&verdict)?;
+                    answer.push(b'\n');
+                    stdin
+                        .as_mut()
+                        .context("native worker has no decision pipe")?
+                        .write_all(&answer)
+                        .await?;
                 } else if let Some(value) = line.strip_prefix("NATIVE_AUDIT ")
                     && let Some(sender) = &audit
                 {
@@ -282,18 +337,6 @@ where
         })
     };
     let result: Result<()> = async {
-        if let Some(token) = options.token {
-            let mut stdin = worker
-                .stdin
-                .take()
-                .context("native worker has no credential pipe")?;
-            stdin
-                .write_all(&serde_json::to_vec(
-                    &json!({"token": token, "account": options.account}),
-                )?)
-                .await?;
-            drop(stdin);
-        }
         let (worker_control, _) = time::timeout(Duration::from_secs(30), control_listener.accept())
             .await
             .context("native worker did not connect its control socket")??;
@@ -301,20 +344,7 @@ where
             time::timeout(Duration::from_secs(30), auxiliary_listener.accept())
                 .await
                 .context("native worker did not connect its auxiliary socket")??;
-        let copied = async {
-            let (mut control_read, mut control_write) = io::split(control);
-            let (mut auxiliary_read, mut auxiliary_write) = io::split(auxiliary);
-            let (mut worker_control_read, mut worker_control_write) = io::split(worker_control);
-            let (mut worker_auxiliary_read, mut worker_auxiliary_write) =
-                io::split(worker_auxiliary);
-            tokio::select! {
-                result = io::copy(&mut control_read, &mut worker_control_write) => result?,
-                result = io::copy(&mut worker_control_read, &mut control_write) => result?,
-                result = io::copy(&mut auxiliary_read, &mut worker_auxiliary_write) => result?,
-                result = io::copy(&mut worker_auxiliary_read, &mut auxiliary_write) => result?,
-            };
-            Ok::<(), std::io::Error>(())
-        };
+        let copied = forward(control, auxiliary, worker_control, worker_auxiliary);
         tokio::pin!(copied);
         tokio::select! {
             copied = &mut copied => {
@@ -335,9 +365,78 @@ where
     .await;
     native_session.stop();
     let _ = time::timeout(Duration::from_secs(5), worker.wait()).await;
-    let audit_result = stdout_task.await?;
+    let _ = stop.send(true);
+    // A worker which ended while its request was reviewed leaves the review
+    // waiting; nothing is left to decide.
+    let audit_result = match time::timeout(Duration::from_secs(5), &mut stdout_task).await {
+        Ok(finished) => finished?,
+        Err(_) => {
+            stdout_task.abort();
+            Ok(())
+        }
+    };
     result?;
     audit_result
+}
+
+/// Copies between the link's two streams and the worker's until the link
+/// closes, or until the worker has closed both of its streams and all it
+/// wrote was delivered.
+async fn forward<C, A, W, X>(
+    control: C,
+    auxiliary: A,
+    worker_control: W,
+    worker_auxiliary: X,
+) -> io::Result<()>
+where
+    C: AsyncRead + AsyncWrite,
+    A: AsyncRead + AsyncWrite,
+    W: AsyncRead + AsyncWrite,
+    X: AsyncRead + AsyncWrite,
+{
+    let (mut control_read, mut control_write) = io::split(control);
+    let (mut auxiliary_read, mut auxiliary_write) = io::split(auxiliary);
+    let (mut worker_control_read, mut worker_control_write) = io::split(worker_control);
+    let (mut worker_auxiliary_read, mut worker_auxiliary_write) = io::split(worker_auxiliary);
+    let to_worker = async {
+        tokio::select! {
+            result = io::copy(&mut control_read, &mut worker_control_write) => result,
+            result = io::copy(&mut auxiliary_read, &mut worker_auxiliary_write) => result,
+        }
+    };
+    let from_worker = async {
+        tokio::try_join!(
+            io::copy(&mut worker_control_read, &mut control_write),
+            io::copy(&mut worker_auxiliary_read, &mut auxiliary_write),
+        )
+    };
+    tokio::select! {
+        result = to_worker => result.map(drop),
+        result = from_worker => result.map(drop),
+    }
+}
+
+/// Asks `review` for a verdict on `request`, rejecting it when nobody
+/// answers, or gives up on it, withdrawing the question, once `stopped`.
+async fn decide(
+    review: Option<&UnboundedSender<Review>>,
+    request: NativeRequest,
+    stopped: &mut watch::Receiver<bool>,
+) -> Option<NativeVerdict> {
+    let number = request.request;
+    let (reply, verdict) = oneshot::channel();
+    let asked = review.is_some_and(|review| review.send(Review { request, reply }).is_ok());
+    tokio::select! {
+        verdict = verdict => Some(match verdict {
+            Ok(verdict) if asked => verdict,
+            _ => NativeVerdict {
+                request: number,
+                accept: false,
+                reason: Some("the Sponsor has no reviewer".into()),
+            },
+        }),
+        _ = stopped.wait_for(|stopped| *stopped) => None,
+    }
 }
 
 #[cfg(test)]
@@ -412,5 +511,66 @@ mod tests {
         assert!(!status.success());
         drop(session);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Without a reviewer to answer, a request is rejected.
+    #[tokio::test]
+    async fn unanswered_requests_are_rejected() {
+        let request = crate::NativeRequest {
+            request: 2,
+            prompt: "{}".into(),
+            sha256: "abc".into(),
+            path: None,
+            headers: Vec::new(),
+            session_id: "session".into(),
+        };
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let verdict = super::decide(None, request.clone(), &mut stopped).await;
+        assert!(verdict.is_some_and(|verdict| !verdict.accept && verdict.request == 2));
+        let (review, reviews) = tokio::sync::mpsc::unbounded_channel();
+        drop(reviews);
+        let verdict = super::decide(Some(&review), request.clone(), &mut stopped).await;
+        assert!(!verdict.unwrap().accept);
+
+        // A review still waiting when the worker stops is withdrawn.
+        let (review, mut reviews) = tokio::sync::mpsc::unbounded_channel();
+        let deciding =
+            tokio::spawn(async move { super::decide(Some(&review), request, &mut stopped).await });
+        let pending: crate::Review = reviews.recv().await.unwrap();
+        stop.send(true).unwrap();
+        assert!(deciding.await.unwrap().is_none());
+        assert!(pending.reply.is_closed());
+    }
+
+    /// What a worker wrote before it closed both streams reaches the link,
+    /// whichever of its streams closes first and however slowly the link
+    /// reads.
+    #[tokio::test]
+    async fn a_closing_worker_delivers_what_it_wrote() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (control, mut link_control) = tokio::io::duplex(64);
+        let (auxiliary, _link_auxiliary) = tokio::io::duplex(64);
+        let (worker_control, mut worker_control_end) = tokio::io::duplex(64);
+        let (worker_auxiliary, worker_auxiliary_end) = tokio::io::duplex(64);
+        let forwarding = tokio::spawn(super::forward(
+            control,
+            auxiliary,
+            worker_control,
+            worker_auxiliary,
+        ));
+        let written = vec![7; 10_000];
+        let worker = {
+            let written = written.clone();
+            tokio::spawn(async move {
+                drop(worker_auxiliary_end);
+                worker_control_end.write_all(&written).await.unwrap();
+            })
+        };
+        let mut delivered = vec![0; written.len()];
+        link_control.read_exact(&mut delivered).await.unwrap();
+        worker.await.unwrap();
+        forwarding.await.unwrap().unwrap();
+        assert!(delivered == written);
     }
 }

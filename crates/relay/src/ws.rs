@@ -100,6 +100,17 @@ impl WsRelay {
             .map(Ok)
     }
 
+    /// The text of the request `frame` if it may be sent now, or the reason
+    /// it may not.
+    pub fn admit_request(&self, frame: &[u8]) -> Result<String, String> {
+        let text = ws::client_text(frame)?;
+        if self.in_flight.is_some() {
+            return Err("a response is still in flight".into());
+        }
+        self.policy.check_message(&text, &self.responses)?;
+        Ok(text)
+    }
+
     /// Sends the pong `frame` if it answers a ping this connection received
     /// and has not answered. If a response is in flight, waits for it to
     /// end or for another ping. Proves everything sent and received up to
@@ -118,16 +129,10 @@ impl WsRelay {
     /// Sends the client frame `frame` if the policy allows its message. A
     /// refusal sends nothing.
     pub async fn send_request(&mut self, frame: &[u8]) -> Result<Result<(), String>> {
-        let text = match ws::client_text(frame) {
+        let text = match self.admit_request(frame) {
             Ok(text) => text,
             Err(reason) => return Ok(Err(reason)),
         };
-        if self.in_flight.is_some() {
-            return Ok(Err("a response is still in flight".into()));
-        }
-        if let Err(reason) = self.policy.check_message(&text, &self.responses) {
-            return Ok(Err(reason));
-        }
         // What has been read so far can not answer a request not yet sent.
         let asked = self.inbox.asking(ws::continued_response(&text));
         self.live.send(frame).await?;

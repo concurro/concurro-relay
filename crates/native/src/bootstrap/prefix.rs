@@ -111,6 +111,14 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
     } else {
         let template = peer.receive("h2_template").await?;
         let template = claude::Template::from_metadata(&template.metadata)?;
+        // The prefix carries the first request's HEADERS, which the Sponsor
+        // approved with that request.
+        if let Some(approved) = &context.options.claude_template {
+            ensure!(
+                template == *approved,
+                "first request template differs from the approved one"
+            );
+        }
         let result = claude::bootstrap(credential, &template)?;
         claude_template = Some(template);
         result

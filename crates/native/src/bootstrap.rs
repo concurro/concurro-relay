@@ -42,7 +42,8 @@ pub struct BootstrapOptions {
     pub account: Option<String>,
     /// Public headers admitted from the local Codex upgrade.
     pub codex_headers: Vec<(String, String)>,
-    /// First Claude path and public headers captured before bootstrap.
+    /// First Claude path and public headers captured before bootstrap: the
+    /// ones Concurro sends, and the ones the Sponsor approved and requires.
     pub claude_template: Option<claude::Template>,
 }
 

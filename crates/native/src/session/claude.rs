@@ -16,10 +16,11 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 
-use super::{ClaudeEvent, ClaudeTurn, Forwarded};
+use super::{ClaudeEvent, ClaudeTurn, Forwarded, Rejected};
 use crate::{
     bootstrap::{Application, Session},
-    helpers::{self, Runtime},
+    helpers::{self, Peer, Runtime},
+    ingress,
 };
 
 mod threads;
@@ -123,7 +124,13 @@ async fn exchange<C: AsyncRead + AsyncWrite + Unpin>(
     body: &[u8],
     first: bool,
     started: Instant,
-) -> Result<(u32, ResponseState)> {
+) -> Result<(u64, u32, ResponseState)> {
+    // The first request was approved before the bootstrap.
+    let request = if first {
+        0
+    } else {
+        link.review(body, Some(template)).await?
+    };
     let stream = if first {
         1
     } else {
@@ -171,7 +178,58 @@ async fn exchange<C: AsyncRead + AsyncWrite + Unpin>(
         let events = reader.push(&bytes, state)?;
         deliver(events, link, &turn.reply, &mut response, started).await?;
     }
-    Ok((stream, response))
+    Ok((request, stream, response))
+}
+
+/// Answers the local CLI's request with the Sponsor's rejection.
+async fn reject(turn: &ClaudeTurn, error: &anyhow::Error) -> Result<()> {
+    let body = ingress::claude::rejection(&error.to_string())?;
+    turn.reply
+        .send(Ok(ClaudeEvent::Start(403, "application/json".into())))
+        .await
+        .context("local Claude listener closed")?;
+    turn.reply
+        .send(Ok(ClaudeEvent::Data(body)))
+        .await
+        .context("local Claude listener closed")?;
+    turn.reply
+        .send(Ok(ClaudeEvent::Done))
+        .await
+        .context("local Claude listener closed")
+}
+
+/// The provider request made of a CLI `body` sent with `template`, as a
+/// Message Thread when `threads` keeps them.
+fn prepare(
+    threads: Option<&ThreadState>,
+    body: &[u8],
+    template: &Template,
+) -> Result<threads::Prepared> {
+    match threads {
+        Some(threads) => threads.prepare(body, template),
+        None => Ok(threads::Prepared {
+            original: serde_json::from_slice(body).context("Claude request body is not JSON")?,
+            body: body.to_vec(),
+            mode: "full",
+            parent: None,
+            decision: "disabled",
+            mismatch: None,
+        }),
+    }
+}
+
+/// Has the Sponsor approve a session's first request, `body` sent with
+/// `template`, before the TLS bootstrap: its HEADERS go out with the
+/// bootstrap prefix. Fails with [`Rejected`] when the Sponsor rejects it.
+pub async fn review_first<C: AsyncRead + AsyncWrite + Unpin>(
+    peer: &mut Peer<C>,
+    body: &[u8],
+    template: &Template,
+    compact: bool,
+) -> Result<()> {
+    let threads = compact.then(ThreadState::default);
+    let prepared = prepare(threads.as_ref(), body, template)?;
+    super::ask_review(peer, 0, &prepared.body, Some(template)).await
 }
 
 /// Complete successive Claude HTTP/2 streams without another TLS bootstrap.
@@ -211,6 +269,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
         turn: 0,
         proof_time: Duration::ZERO,
         buffer: Vec::new(),
+        reviews: 1,
     };
     let mut state = IndexedConnection::new(credential_length)?;
     let mut reader = ResponseReader::new();
@@ -225,18 +284,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                 beta_template(&mut template);
             }
             let source_bytes = turn.body.len();
-            let mut prepared = match &threads {
-                Some(threads) => threads.prepare(&turn.body, &template)?,
-                None => threads::Prepared {
-                    original: serde_json::from_slice(&turn.body)
-                        .context("Claude request body is not JSON")?,
-                    body: turn.body.clone(),
-                    mode: "full",
-                    parent: None,
-                    decision: "disabled",
-                    mismatch: None,
-                },
-            };
+            let mut prepared = prepare(threads.as_ref(), &turn.body, &template)?;
             loop {
                 let started = Instant::now();
                 let proofs_before = link.turn;
@@ -261,7 +309,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                     started,
                 )
                 .await;
-                let (stream, response) = match result {
+                let (request, stream, response) = match result {
                     Ok(value) => value,
                     Err(error) => {
                         journal(
@@ -355,7 +403,9 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                     .send(
                         "audit_usage",
                         &[],
-                        serde_json::from_value(json!({"usage":summary.usage.clone()}))?,
+                        serde_json::from_value(
+                            json!({"usage":summary.usage.clone(), "request":request}),
+                        )?,
                     )
                     .await?;
                 responses.push(json!({"stream":stream, "message_id":summary.message_id,
@@ -373,9 +423,15 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
             Ok::<(), anyhow::Error>(())
         }
         .await;
-        if let Err(error) = outcome {
-            let _ = turn.reply.send(Err(error)).await;
-            return Err(anyhow::anyhow!("Claude turn failed"));
+        match outcome {
+            Ok(()) => {}
+            // Nothing of a rejected request was sent, so later requests can
+            // follow on this connection.
+            Err(error) if error.is::<Rejected>() => reject(&turn, &error).await?,
+            Err(error) => {
+                let _ = turn.reply.send(Err(error)).await;
+                return Err(anyhow::anyhow!("Claude turn failed"));
+            }
         }
         turn_index += 1;
     }

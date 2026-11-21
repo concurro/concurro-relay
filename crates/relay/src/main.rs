@@ -5,11 +5,12 @@ use std::{
     io::{self, IsTerminal},
     path::PathBuf,
     process::Command as Process,
+    sync::Arc,
 };
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use concurro_relay::{login, plain, state::Store, transport::Server, tui};
+use concurro_relay::{login, plain, review::Reviewer, state::Store, transport::Server, tui};
 use concurro_relay_native as native;
 use concurro_relay_protocol::route::Route;
 
@@ -50,6 +51,18 @@ struct ServingArgs {
     /// How many requests the relay can serve at once.
     #[arg(long, default_value_t = 1)]
     links: usize,
+    /// A shell command which reviews each request before it is sent. It
+    /// gets the request as JSON on standard input; exiting with 0 accepts
+    /// it, with 1 rejects it, and otherwise leaves it to you, or accepts it
+    /// in `run`. The first line it prints is shown as the reason.
+    #[arg(long, env = "CONCURRO_RELAY_REVIEW_COMMAND")]
+    review_command: Option<String>,
+}
+
+impl ServingArgs {
+    fn reviewer(&self) -> Arc<Reviewer> {
+        Arc::new(Reviewer::new(self.review_command.clone()))
+    }
 }
 
 #[derive(Subcommand)]
@@ -111,10 +124,17 @@ async fn main() -> Result<()> {
                     cli.server.server(),
                     machine_name(),
                     cli.serving.links,
+                    cli.serving.reviewer(),
                 )
                 .await
             }
-            None => plain::run(plain::relay(&store)?, cli.serving.links).await,
+            None => {
+                plain::run(
+                    plain::relay(&store, cli.serving.reviewer())?,
+                    cli.serving.links,
+                )
+                .await
+            }
             Some(Command::Login {
                 server,
                 route,
@@ -128,7 +148,7 @@ async fn main() -> Result<()> {
                     .map(|_| ())
             }
             Some(Command::Run { serving }) => {
-                plain::run(plain::relay(&store)?, serving.links).await
+                plain::run(plain::relay(&store, serving.reviewer())?, serving.links).await
             }
             Some(Command::Connect { route }) => plain::connect(&store, route).await,
             Some(Command::Status) => plain::status(&store),

@@ -15,6 +15,7 @@ use std::{
 };
 
 use anyhow::Result;
+use concurro_relay_native::NativeRequest;
 use concurro_relay_protocol::{link::DeviceCode, route::Route};
 use ratatui::{
     DefaultTerminal, Frame,
@@ -37,6 +38,7 @@ use crate::{
     link,
     login::{self, Pending},
     plain,
+    review::{ANSWER_LIMIT, Reviewer},
     state::{Registration, Store},
     transcript,
     transport::Server,
@@ -164,17 +166,32 @@ struct Entry {
     side: Side,
 }
 
+/// A request waiting for the Sponsor's decision.
+struct Waiting {
+    ticket: u64,
+    link: usize,
+    request: NativeRequest,
+    since: Instant,
+}
+
 /// A registered relay at work.
 struct Dashboard {
     registration: Registration,
+    reviewer: Arc<Reviewer>,
+    /// Requests waiting for the Sponsor, oldest first.
+    waiting: VecDeque<Waiting>,
     logins: Vec<(Route, Result<String, String>)>,
     links: Vec<LinkState>,
     /// What happened, oldest first.
     activity: VecDeque<Entry>,
     /// The entry the cursor is on.
     selected: usize,
-    /// Whether the cursor stays on the newest entry as entries arrive.
+    /// Whether the cursor stays on the newest entry as entries arrive. It
+    /// never moves onto a waiting request by itself.
     following: bool,
+    /// The waiting request the Sponsor moved the cursor to, which alone an
+    /// answer is for.
+    chosen: Option<u64>,
     /// The first activity line shown and how many fit, as last drawn.
     top: Cell<usize>,
     page: Cell<usize>,
@@ -187,16 +204,24 @@ struct Dashboard {
 }
 
 impl Dashboard {
-    fn new(registration: Registration, credentials: &Source, links: usize) -> Self {
+    fn new(
+        registration: Registration,
+        credentials: &Source,
+        links: usize,
+        reviewer: Arc<Reviewer>,
+    ) -> Self {
         let logins = plain::logins(credentials, &registration.routes);
         Self {
             proved: vec![0; logins.len()],
             logins,
             registration,
+            reviewer,
+            waiting: VecDeque::new(),
             links: vec![LinkState::Connecting; links],
             activity: VecDeque::new(),
             selected: 0,
             following: true,
+            chosen: None,
             top: Cell::new(0),
             page: Cell::new(1),
             paged: false,
@@ -206,7 +231,11 @@ impl Dashboard {
     }
 
     fn apply(&mut self, mut event: Event) {
+        // The cursor stays on a waiting request, so that what is answered
+        // is what was read.
+        let pinned = self.answering().is_some();
         let mut said = None;
+        let mut open = false;
         match &mut event {
             Event::Link { link, state } => {
                 if let Some(shown) = self.links.get_mut(*link - 1) {
@@ -235,19 +264,78 @@ impl Dashboard {
                     transcript::response_text(&response),
                 ));
             }
+            Event::Asked {
+                link,
+                ticket,
+                request,
+                ..
+            } => {
+                self.waiting.push_back(Waiting {
+                    ticket: *ticket,
+                    link: *link,
+                    request: NativeRequest {
+                        prompt: String::new(),
+                        ..request.clone()
+                    },
+                    since: Instant::now(),
+                });
+                said = Some((
+                    events::request_text(request),
+                    "Waiting for your review.".into(),
+                ));
+                request.prompt = String::new();
+                open = true;
+            }
+            Event::Reviewed {
+                request, decision, ..
+            } => {
+                self.waiting
+                    .retain(|waiting| !same(&waiting.request, request));
+                let asked = self
+                    .activity
+                    .iter()
+                    .rev()
+                    .find_map(|entry| match &entry.event {
+                        Event::Asked {
+                            ticket,
+                            request: asked,
+                            ..
+                        } if same(asked, request) => Some(*ticket),
+                        _ => None,
+                    });
+                if let Some(ticket) = asked {
+                    self.settle(ticket, decision.to_string());
+                }
+                said = Some((events::request_text(request), decision.to_string()));
+                request.prompt = String::new();
+            }
+            // Usage is reported once a request was sent and answered. It
+            // belongs to the request's entry while that keeps its text.
             Event::NativeAudit { route, audit, .. } => {
                 if let Some(at) = self.logins.iter().position(|(served, _)| served == route) {
                     self.proved[at] += 1;
                 }
-                let usage = audit
-                    .usage
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "unavailable".into());
-                said = Some((
-                    mem::take(&mut audit.prompt),
-                    format!("Concurro-reported provider usage: {usage}"),
-                ));
+                let reviewed =
+                    self.activity
+                        .iter_mut()
+                        .rev()
+                        .find_map(|entry| match &entry.event {
+                            Event::Reviewed {
+                                request, decision, ..
+                            } if request.session_id == audit.session_id
+                                && request.request == audit.request =>
+                            {
+                                Some((decision.to_string(), &mut entry.said))
+                            }
+                            _ => None,
+                        });
+                if let Some((decision, Some((_, response)))) = reviewed {
+                    *response = format!(
+                        "{decision}\nConcurro-reported provider usage: {}",
+                        events::usage(audit)
+                    );
+                    return;
+                }
             }
             Event::Refused { .. } => {}
         }
@@ -255,28 +343,99 @@ impl Dashboard {
             at: Instant::now(),
             event,
             said,
-            open: false,
+            open,
             side: Side::Request,
         });
-        if self.activity.len() > ACTIVITY_KEPT {
-            self.activity.pop_front();
-            self.selected = self.selected.saturating_sub(1);
+        let waiting = &self.waiting;
+        // A request still waiting for the Sponsor keeps its entry and text.
+        let waits = |entry: &Entry| {
+            matches!(entry.event, Event::Asked { ticket, .. }
+                if waiting.iter().any(|waiting| waiting.ticket == ticket))
+        };
+        // Nor is the entry under the cursor evicted, which would move the
+        // cursor.
+        let selected = self.selected;
+        if self.activity.len() > ACTIVITY_KEPT
+            && let Some(oldest) = self
+                .activity
+                .iter()
+                .enumerate()
+                .position(|(at, entry)| at != selected && !waits(entry))
+        {
+            self.activity.remove(oldest);
+            if oldest < self.selected {
+                self.selected -= 1;
+            }
         }
         let outdated = self.activity.len().checked_sub(TEXT_KEPT + 1);
-        if let Some(entry) = outdated.and_then(|at| self.activity.get_mut(at)) {
+        if let Some(entry) = outdated
+            .and_then(|at| self.activity.get_mut(at))
+            .filter(|entry| !waits(entry))
+        {
             entry.said = None;
             entry.open = false;
         }
-        if self.following {
-            self.selected = self.activity.len() - 1;
+        let newest = self.activity.iter().rposition(|entry| !waits(entry));
+        if let (true, false, Some(newest)) = (self.following, pinned, newest) {
+            self.selected = newest;
         }
     }
 
-    /// Moves the cursor to entry `at`.
+    /// Which waiting request an answer is for: the one the Sponsor moved the
+    /// cursor to and which is still under it.
+    fn answering(&self) -> Option<usize> {
+        let Some(Event::Asked { ticket, .. }) =
+            self.activity.get(self.selected).map(|entry| &entry.event)
+        else {
+            return None;
+        };
+        if self.chosen != Some(*ticket) {
+            return None;
+        }
+        self.waiting
+            .iter()
+            .position(|waiting| waiting.ticket == *ticket)
+    }
+
+    /// Forgets the requests which no longer wait, having been decided
+    /// otherwise or abandoned, and says so on their entries.
+    fn prune(&mut self) {
+        let reviewer = &self.reviewer;
+        let (kept, withdrawn): (VecDeque<_>, VecDeque<_>) = mem::take(&mut self.waiting)
+            .into_iter()
+            .partition(|waiting| reviewer.is_waiting(waiting.ticket));
+        self.waiting = kept;
+        for waiting in withdrawn {
+            self.settle(
+                waiting.ticket,
+                "Withdrawn without an answer: the request was abandoned.".into(),
+            );
+        }
+    }
+
+    /// Replaces what the entry asking under `ticket` says of its answer.
+    fn settle(&mut self, ticket: u64, answer: String) {
+        let asked = self.activity.iter_mut().rev().find(
+            |entry| matches!(entry.event, Event::Asked { ticket: asked, .. } if asked == ticket),
+        );
+        if let Some(entry) = asked {
+            entry.open = false;
+            if let Some((_, response)) = &mut entry.said {
+                *response = answer;
+            }
+        }
+    }
+
+    /// Moves the cursor to entry `at`, which an answer is then for if it is
+    /// a waiting request.
     fn select(&mut self, at: usize) {
         self.selected = at;
         self.following = at + 1 >= self.activity.len();
         self.paged = false;
+        self.chosen = match self.activity.get(at).map(|entry| &entry.event) {
+            Some(Event::Asked { ticket, .. }) => Some(*ticket),
+            _ => None,
+        };
     }
 
     /// Acts on a key, returning whether it asks to quit.
@@ -288,6 +447,12 @@ impl Dashboard {
             .filter(|entry| entry.said.is_some());
         match key {
             KeyCode::Char('q') | KeyCode::Esc => return true,
+            KeyCode::Char('a') => self.reviewer.set_asking(!self.reviewer.asking()),
+            KeyCode::Char(answer @ ('y' | 'n')) => {
+                if let Some(waiting) = self.answering().and_then(|at| self.waiting.remove(at)) {
+                    self.reviewer.answer(waiting.ticket, answer == 'y');
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') => self.select(self.selected.saturating_sub(1)),
             KeyCode::Down | KeyCode::Char('j') => self.select((self.selected + 1).min(last)),
             KeyCode::Home => self.select(0),
@@ -380,6 +545,7 @@ struct App {
     /// What this relay registers as.
     name: String,
     links: usize,
+    reviewer: Arc<Reviewer>,
     messages: UnboundedSender<Message>,
     /// The relay at work, while it is.
     serving: Option<JoinHandle<()>>,
@@ -389,11 +555,12 @@ struct App {
 impl App {
     /// Starts serving as the relay registered in the store.
     fn serve(&mut self) -> Result<()> {
-        let relay = plain::relay(&self.store)?;
+        let relay = plain::relay(&self.store, self.reviewer.clone())?;
         self.state.screen = Screen::Dashboard(Dashboard::new(
             relay.registration.clone(),
             &self.credentials,
             self.links,
+            self.reviewer.clone(),
         ));
         let (events, mut reported) = mpsc::unbounded_channel();
         self.serving = Some(tokio::spawn(link::run(Arc::new(relay), self.links, events)));
@@ -420,11 +587,12 @@ impl App {
             Message::Key(key) => self.key(key),
             Message::Tick => {
                 self.state.ticks += 1;
-                if let Screen::Dashboard(dashboard) = &mut self.state.screen
-                    && self.state.ticks % LOGIN_CHECK_TICKS == 0
-                {
-                    dashboard.logins =
-                        plain::logins(&self.credentials, &dashboard.registration.routes);
+                if let Screen::Dashboard(dashboard) = &mut self.state.screen {
+                    dashboard.prune();
+                    if self.state.ticks.is_multiple_of(LOGIN_CHECK_TICKS) {
+                        dashboard.logins =
+                            plain::logins(&self.credentials, &dashboard.registration.routes);
+                    }
                 }
             }
             Message::Begun(Ok(pending)) => {
@@ -614,6 +782,11 @@ impl App {
     }
 }
 
+/// Whether `one` and `other` are the same request of the same session.
+fn same(one: &NativeRequest, other: &NativeRequest) -> bool {
+    one.session_id == other.session_id && one.request == other.request
+}
+
 /// A duration as hours, minutes and seconds.
 fn clock(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
@@ -788,7 +961,7 @@ fn wrapped(text: &str, width: usize) -> Vec<String> {
 
 /// The line which heads `entry` in the activity list, `since` being when
 /// the relay started.
-fn entry_line(entry: &Entry, selected: bool, since: Instant) -> Line<'static> {
+fn entry_line(entry: &Entry, selected: bool, waits: bool, since: Instant) -> Line<'static> {
     let cursor = if selected {
         "› ".cyan().bold()
     } else {
@@ -804,7 +977,11 @@ fn entry_line(entry: &Entry, selected: bool, since: Instant) -> Line<'static> {
     match &entry.event {
         Event::Proved { exchange, .. } => spans.extend([
             format!("{:<22}", exchange.route.label()).into(),
-            format!("{:<18}", exchange.model.as_deref().unwrap_or("")).cyan(),
+            format!(
+                "{:<18}",
+                events::one_line(exchange.model.as_deref().unwrap_or(""))
+            )
+            .cyan(),
             format!(
                 "sent {:>9}  received {:>9}  ",
                 events::size(exchange.sent as u64),
@@ -818,15 +995,41 @@ fn entry_line(entry: &Entry, selected: bool, since: Instant) -> Line<'static> {
             )
             .dim(),
         ]),
+        Event::Asked { route, request, .. } => spans.extend([
+            format!("{:<22}", route.label()).into(),
+            format!("{}  ", events::described(request)).cyan(),
+            if waits {
+                "waits for your review".yellow().bold()
+            } else {
+                "no longer waits for your review".dim()
+            },
+        ]),
+        Event::Reviewed {
+            route,
+            request,
+            decision,
+            ..
+        } => spans.extend([
+            format!("{:<22}", route.label()).into(),
+            format!("{}  ", events::described(request)).cyan(),
+            if decision.accept {
+                format!("{decision}  ").green()
+            } else {
+                format!("{decision}  ").red()
+            },
+            format!("sha256 {}", request.sha256).dim(),
+        ]),
         Event::NativeAudit { route, audit, .. } => spans.extend([
             format!("{:<22}", route.label()).into(),
-            format!("proved request {}  ", audit.turn).cyan(),
-            format!("sha256 {}", audit.sha256).dim(),
+            format!("request {}  ", audit.request).cyan(),
+            format!("usage {}", events::usage(audit)).dim(),
         ]),
         Event::Refused { reason, .. } => {
-            spans.extend(["refused  ".yellow(), reason.clone().into()])
+            spans.extend(["refused  ".yellow(), events::one_line(reason).into()])
         }
-        Event::Link { link, state } => spans.push(format!("link {link} {state}").red()),
+        Event::Link { link, state } => {
+            spans.push(events::one_line(&format!("link {link} {state}")).red())
+        }
     }
     let line = Line::from(spans);
     if selected { line.bold() } else { line }
@@ -846,7 +1049,14 @@ fn activity_lines(dashboard: &Dashboard, width: usize) -> (Vec<Line<'static>>, V
     let (mut lines, mut starts) = (Vec::new(), Vec::new());
     for (at, entry) in dashboard.activity.iter().enumerate() {
         starts.push(lines.len());
-        lines.push(entry_line(entry, at == dashboard.selected, dashboard.since));
+        let waits = matches!(entry.event, Event::Asked { ticket, .. }
+            if dashboard.waiting.iter().any(|waiting| waiting.ticket == ticket));
+        lines.push(entry_line(
+            entry,
+            at == dashboard.selected,
+            waits,
+            dashboard.since,
+        ));
         let (true, Some((request, response))) = (entry.open, &entry.said) else {
             continue;
         };
@@ -907,6 +1117,53 @@ fn summary_lines(dashboard: &Dashboard) -> Vec<Line<'static>> {
         links.push(shown);
     }
     lines.push(Line::from(links));
+    let reviewer = &dashboard.reviewer;
+    let mut review = vec![
+        "Review ".bold(),
+        if reviewer.asking() {
+            " asking you about each request".yellow()
+        } else {
+            " accepting each request".into()
+        },
+    ];
+    if let Some(hook) = reviewer.hook() {
+        review.push(format!(" the review hook leaves undecided · hook: {hook}").dim());
+    }
+    lines.push(Line::from(review));
+    if let Some(waiting) = dashboard
+        .answering()
+        .and_then(|at| dashboard.waiting.get(at))
+    {
+        let left = ANSWER_LIMIT.saturating_sub(waiting.since.elapsed());
+        let mut asked = vec![
+            format!(
+                "  Link {} {} waits for you: ",
+                waiting.link,
+                events::described(&waiting.request)
+            )
+            .yellow()
+            .bold(),
+            "y accept · n reject".bold(),
+            format!(" · rejected in {}", &clock(left)[3..]).dim(),
+        ];
+        if dashboard.waiting.len() > 1 {
+            asked.push(format!(" · {} more waiting", dashboard.waiting.len() - 1).dim());
+        }
+        lines.push(Line::from(asked));
+    } else if !dashboard.waiting.is_empty() {
+        lines.push(Line::from(vec![
+            format!(
+                "  {} waiting for you: ",
+                match dashboard.waiting.len() {
+                    1 => "A request is".to_owned(),
+                    waiting => format!("{waiting} requests are"),
+                }
+            )
+            .yellow()
+            .bold(),
+            "select one with ↑↓ to answer it".bold(),
+        ]));
+    }
     if dashboard
         .links
         .iter()
@@ -969,7 +1226,11 @@ fn draw(frame: &mut Frame, state: &State) {
                 Paragraph::new(shown).block(Block::new().padding(Padding::horizontal(2))),
                 list,
             );
-            "↑↓ select · enter open · tab request/response · pgup/pgdn scroll · r register again · q quit"
+            if dashboard.waiting.is_empty() {
+                "↑↓ select · enter open · tab request/response · pgup/pgdn scroll · a ask/accept · r register again · q quit"
+            } else {
+                "y accept · n reject · ↑↓ select · enter open · tab request/response · a ask/accept · q quit"
+            }
         }
         screen => {
             let (lines, hints) = match screen {
@@ -1032,7 +1293,13 @@ async fn run_in(
 /// Runs the view until the person quits. The relay signs in to `server`
 /// under `name` if the store holds no registration, and then serves on
 /// `links` links.
-pub async fn run(store: Store, server: Option<Server>, name: String, links: usize) -> Result<()> {
+pub async fn run(
+    store: Store,
+    server: Option<Server>,
+    name: String,
+    links: usize,
+    reviewer: Arc<Reviewer>,
+) -> Result<()> {
     let credentials = Source::Kept(store.clone());
     let (messages, received) = mpsc::unbounded_channel();
     let state = State {
@@ -1046,6 +1313,7 @@ pub async fn run(store: Store, server: Option<Server>, name: String, links: usiz
         credentials,
         name,
         links,
+        reviewer,
         messages: messages.clone(),
         serving: None,
         quit: false,
@@ -1069,11 +1337,16 @@ pub async fn run(store: Store, server: Option<Server>, name: String, links: usiz
 
 #[cfg(test)]
 mod tests {
+    use concurro_relay_native::NativeAudit;
     use concurro_relay_protocol::route::Route;
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
-    use crate::{credentials::Credential, events::Exchange};
+    use crate::{
+        credentials::Credential,
+        events::Exchange,
+        review::{Decider, Decision},
+    };
 
     fn credentials() -> Source {
         Source::Fixed(Credential {
@@ -1270,7 +1543,7 @@ mod tests {
 
     #[test]
     fn dashboard_counts_what_was_proved_and_shows_what_went_wrong() {
-        let mut dashboard = Dashboard::new(registration(), &credentials(), 2);
+        let mut dashboard = Dashboard::new(registration(), &credentials(), 2, Default::default());
         dashboard.apply(Event::Link {
             link: 1,
             state: LinkState::Up,
@@ -1311,12 +1584,13 @@ mod tests {
 
     #[test]
     fn a_refused_relay_is_told_how_to_register_again() {
-        let mut dashboard = Dashboard::new(registration(), &credentials(), 1);
+        let mut dashboard = Dashboard::new(registration(), &credentials(), 1, Default::default());
         assert!(
             !shown(&dashboard_state(Dashboard::new(
                 registration(),
                 &credentials(),
-                1
+                1,
+                Default::default(),
             )))
             .contains("register it again")
         );
@@ -1333,7 +1607,7 @@ mod tests {
 
     #[test]
     fn an_entry_opens_on_its_request_and_switches_to_its_response() {
-        let mut dashboard = Dashboard::new(registration(), &credentials(), 1);
+        let mut dashboard = Dashboard::new(registration(), &credentials(), 1, Default::default());
         dashboard.apply(exchange("first question", "first answer"));
         dashboard.apply(exchange("second question", "second answer"));
         assert_eq!(dashboard.selected, 1, "the cursor follows the newest entry");
@@ -1378,7 +1652,7 @@ mod tests {
 
     #[test]
     fn a_long_entry_starts_at_the_top_and_pages() {
-        let mut dashboard = Dashboard::new(registration(), &credentials(), 1);
+        let mut dashboard = Dashboard::new(registration(), &credentials(), 1, Default::default());
         dashboard.apply(exchange("short", "short"));
         let long: String = (1..=60)
             .map(|line| format!("line {line} of the answer\n"))
@@ -1411,7 +1685,7 @@ mod tests {
 
     #[test]
     fn only_the_newest_entries_keep_what_was_said() {
-        let mut dashboard = Dashboard::new(registration(), &credentials(), 1);
+        let mut dashboard = Dashboard::new(registration(), &credentials(), 1, Default::default());
         for _ in 0..TEXT_KEPT + 3 {
             dashboard.apply(exchange("question", "answer"));
         }
@@ -1424,5 +1698,339 @@ mod tests {
             TEXT_KEPT
         );
         assert!(dashboard.activity[2].said.is_none() && dashboard.activity[3].said.is_some());
+    }
+
+    fn native_request(number: u64) -> NativeRequest {
+        NativeRequest {
+            request: number,
+            prompt: format!("{{\"input\":\"question {number}\"}}"),
+            sha256: format!("digest-{number}"),
+            path: None,
+            headers: Vec::new(),
+            session_id: "session".into(),
+        }
+    }
+
+    /// A request the Sponsor is asked about is shown and answered, and its
+    /// decision and usage reach its entry.
+    #[tokio::test]
+    async fn a_request_waits_for_the_sponsor_and_gets_its_usage() {
+        let reviewer = Arc::new(Reviewer::new(None));
+        reviewer.set_asking(true);
+        let mut dashboard = Dashboard::new(registration(), &credentials(), 1, reviewer.clone());
+        let (events, mut reported) = mpsc::unbounded_channel();
+        let reviewing = {
+            let (reviewer, events) = (reviewer.clone(), events.clone());
+            tokio::spawn(async move {
+                reviewer
+                    .review(1, Route::ChatgptSubscription, &native_request(7), &events)
+                    .await
+            })
+        };
+        dashboard.apply(reported.recv().await.unwrap());
+        let mut state = dashboard_state(dashboard);
+        let screen = shown(&state);
+        for expected in [
+            "asking you about each request",
+            "A request is waiting for you",
+            "select one with ↑↓",
+            "question 7",
+        ] {
+            assert!(
+                screen.contains(expected),
+                "{expected} is missing from: {screen}"
+            );
+        }
+        let Screen::Dashboard(dashboard) = &mut state.screen else {
+            unreachable!("the dashboard is shown")
+        };
+        // Nothing is answered until the Sponsor moves the cursor to it.
+        assert!(!dashboard.key(KeyCode::Char('y')));
+        assert_eq!(dashboard.waiting.len(), 1);
+        assert!(!dashboard.key(KeyCode::Home));
+        let screen = shown(&state);
+        for expected in ["Link 1 request 7 waits for you", "y accept · n reject"] {
+            assert!(
+                screen.contains(expected),
+                "{expected} is missing from: {screen}"
+            );
+        }
+        let Screen::Dashboard(dashboard) = &mut state.screen else {
+            unreachable!("the dashboard is shown")
+        };
+        assert!(!dashboard.key(KeyCode::Char('y')));
+        let decision = reviewing.await.unwrap();
+        assert_eq!((decision.accept, decision.by), (true, Decider::Sponsor));
+        dashboard.apply(Event::Reviewed {
+            link: 1,
+            route: Route::ChatgptSubscription,
+            request: native_request(7),
+            decision,
+        });
+        dashboard.apply(Event::NativeAudit {
+            link: 1,
+            route: Route::ChatgptSubscription,
+            audit: NativeAudit {
+                request: 7,
+                sha256: "digest-7".into(),
+                usage: Some(serde_json::json!({"input_tokens": 5})),
+                session_id: "session".into(),
+            },
+        });
+        assert!(dashboard.waiting.is_empty());
+        assert_eq!(dashboard.activity.len(), 2);
+        assert!(!dashboard.activity[0].open);
+        assert_eq!(dashboard.proved, [1]);
+        let (_, response) = dashboard.activity[1].said.as_ref().unwrap();
+        assert_eq!(
+            response,
+            "accepted by the Sponsor\nConcurro-reported provider usage: {\"input_tokens\":5}"
+        );
+        assert!(!dashboard.key(KeyCode::Char('a')));
+        assert!(!reviewer.asking());
+        assert!(shown(&state).contains("accepting each request"));
+    }
+
+    /// A rejected request is not counted, and a request abandoned elsewhere
+    /// stops waiting.
+    #[tokio::test]
+    async fn rejected_and_abandoned_requests() {
+        let reviewer = Arc::new(Reviewer::new(None));
+        reviewer.set_asking(true);
+        let mut dashboard = Dashboard::new(registration(), &credentials(), 1, reviewer.clone());
+        let (events, mut reported) = mpsc::unbounded_channel();
+        let reviewing = {
+            let reviewer = reviewer.clone();
+            tokio::spawn(async move {
+                reviewer
+                    .review(1, Route::ChatgptSubscription, &native_request(1), &events)
+                    .await
+            })
+        };
+        dashboard.apply(reported.recv().await.unwrap());
+        assert_eq!(dashboard.waiting.len(), 1);
+        reviewing.abort();
+        let _ = reviewing.await;
+        dashboard.prune();
+        assert!(dashboard.waiting.is_empty());
+        let (_, answer) = dashboard.activity[0].said.as_ref().unwrap();
+        assert!(answer.starts_with("Withdrawn without an answer"));
+        let (lines, _) = activity_lines(&dashboard, 120);
+        assert!(
+            lines[0]
+                .to_string()
+                .contains("no longer waits for your review")
+        );
+        dashboard.apply(Event::Reviewed {
+            link: 1,
+            route: Route::ChatgptSubscription,
+            request: native_request(1),
+            decision: Decision {
+                accept: false,
+                by: Decider::Hook,
+                reason: Some("off topic".into()),
+            },
+        });
+        assert_eq!(dashboard.proved, [0]);
+        assert!(
+            shown(&dashboard_state(dashboard)).contains("rejected by the review hook: off topic")
+        );
+    }
+
+    /// A request waiting for the Sponsor keeps its text however much happens
+    /// meanwhile, and usage whose request lost its text gets an entry.
+    #[tokio::test]
+    async fn waiting_text_is_kept_and_usage_is_not_lost() {
+        let reviewer = Arc::new(Reviewer::new(None));
+        reviewer.set_asking(true);
+        let mut dashboard = Dashboard::new(registration(), &credentials(), 1, reviewer.clone());
+        let (events, mut reported) = mpsc::unbounded_channel();
+        let _reviewing = {
+            let reviewer = reviewer.clone();
+            tokio::spawn(async move {
+                reviewer
+                    .review(1, Route::ChatgptSubscription, &native_request(1), &events)
+                    .await
+            })
+        };
+        dashboard.apply(reported.recv().await.unwrap());
+        dashboard.apply(Event::Reviewed {
+            link: 1,
+            route: Route::ChatgptSubscription,
+            request: native_request(2),
+            decision: Decision {
+                accept: true,
+                by: Decider::Automatic,
+                reason: None,
+            },
+        });
+        for _ in 0..TEXT_KEPT + 5 {
+            dashboard.apply(exchange("later", "answer"));
+        }
+        assert!(dashboard.activity[0].said.is_some());
+        assert!(dashboard.activity[1].said.is_none());
+        dashboard.apply(Event::NativeAudit {
+            link: 1,
+            route: Route::ChatgptSubscription,
+            audit: NativeAudit {
+                request: 2,
+                sha256: "digest-2".into(),
+                usage: None,
+                session_id: "session".into(),
+            },
+        });
+        assert!(matches!(
+            dashboard.activity.back().unwrap().event,
+            Event::NativeAudit { .. }
+        ));
+    }
+
+    /// A request waiting for the Sponsor outlasts the activity list's limit.
+    #[tokio::test]
+    async fn a_waiting_request_outlasts_the_activity_limit() {
+        let reviewer = Arc::new(Reviewer::new(None));
+        reviewer.set_asking(true);
+        let mut dashboard = Dashboard::new(registration(), &credentials(), 1, reviewer.clone());
+        let (events, mut reported) = mpsc::unbounded_channel();
+        let _reviewing = {
+            let reviewer = reviewer.clone();
+            tokio::spawn(async move {
+                reviewer
+                    .review(1, Route::ChatgptSubscription, &native_request(1), &events)
+                    .await
+            })
+        };
+        dashboard.apply(reported.recv().await.unwrap());
+        for _ in 0..ACTIVITY_KEPT + 5 {
+            dashboard.apply(exchange("later", "answer"));
+        }
+        assert_eq!(dashboard.activity.len(), ACTIVITY_KEPT);
+        let (request, _) = dashboard.activity[0].said.as_ref().unwrap();
+        assert!(request.contains("question 1"));
+        assert!(matches!(dashboard.activity[0].event, Event::Asked { .. }));
+        // The cursor follows what arrives, but not onto the waiting request.
+        assert_eq!(dashboard.selected, ACTIVITY_KEPT - 1);
+    }
+
+    /// An answer is only for the waiting request the Sponsor moved the
+    /// cursor to, which stays there as other requests arrive.
+    #[tokio::test]
+    async fn an_answer_is_for_the_request_chosen() {
+        let reviewer = Arc::new(Reviewer::new(None));
+        reviewer.set_asking(true);
+        let mut dashboard = Dashboard::new(registration(), &credentials(), 2, reviewer.clone());
+        dashboard.apply(exchange("before", "answer"));
+        let (events, mut reported) = mpsc::unbounded_channel();
+        let reviewing: Vec<_> = (1..=3)
+            .map(|number| {
+                let (reviewer, events) = (reviewer.clone(), events.clone());
+                tokio::spawn(async move {
+                    reviewer
+                        .review(
+                            1,
+                            Route::ChatgptSubscription,
+                            &native_request(number),
+                            &events,
+                        )
+                        .await
+                })
+            })
+            .collect();
+        let mut asked = Vec::new();
+        let event = reported.recv().await.unwrap();
+        let Event::Asked { request, .. } = &event else {
+            unreachable!("only questions are reported")
+        };
+        asked.push(request.request);
+        dashboard.apply(event);
+        // The cursor does not move onto the waiting request by itself.
+        assert_eq!(dashboard.selected, 0);
+        assert!(!dashboard.key(KeyCode::Char('y')));
+        dashboard.select(1);
+        for _ in 0..2 {
+            let event = reported.recv().await.unwrap();
+            let Event::Asked { request, .. } = &event else {
+                unreachable!("only questions are reported")
+            };
+            asked.push(request.request);
+            dashboard.apply(event);
+        }
+        // The chosen request kept the cursor while the others arrived.
+        assert_eq!(dashboard.selected, 1);
+        assert!(!dashboard.key(KeyCode::Char('n')));
+        // Answered, it no longer takes an answer, nor passes one on.
+        assert!(!dashboard.key(KeyCode::Char('n')));
+        assert_eq!(dashboard.waiting.len(), 2);
+        dashboard.select(3);
+        assert!(!dashboard.key(KeyCode::Char('y')));
+        dashboard.select(2);
+        assert!(!dashboard.key(KeyCode::Char('y')));
+        assert!(dashboard.waiting.is_empty());
+        let mut decisions = Vec::new();
+        for reviewing in reviewing {
+            decisions.push(reviewing.await.unwrap().accept);
+        }
+        let answered =
+            |number: u64| decisions[asked.iter().position(|asked| *asked == number).unwrap()];
+        assert!(!answered(asked[0]));
+        assert!(answered(asked[1]) && answered(asked[2]));
+    }
+
+    /// A request withdrawn from under the cursor leaves the cursor there, so
+    /// an answer meant for it is not taken by a request arriving next.
+    #[tokio::test]
+    async fn a_withdrawn_request_does_not_pass_its_answer_on() {
+        let reviewer = Arc::new(Reviewer::new(None));
+        reviewer.set_asking(true);
+        let mut dashboard = Dashboard::new(registration(), &credentials(), 2, reviewer.clone());
+        let (events, mut reported) = mpsc::unbounded_channel();
+        let first = {
+            let (reviewer, events) = (reviewer.clone(), events.clone());
+            tokio::spawn(async move {
+                reviewer
+                    .review(1, Route::ChatgptSubscription, &native_request(1), &events)
+                    .await
+            })
+        };
+        dashboard.apply(reported.recv().await.unwrap());
+        first.abort();
+        let _ = first.await;
+        dashboard.prune();
+        let second = {
+            let reviewer = reviewer.clone();
+            tokio::spawn(async move {
+                reviewer
+                    .review(2, Route::ChatgptSubscription, &native_request(2), &events)
+                    .await
+            })
+        };
+        dashboard.apply(reported.recv().await.unwrap());
+        assert_eq!(dashboard.selected, 0);
+        assert!(!dashboard.key(KeyCode::Char('y')));
+        assert_eq!(dashboard.waiting.len(), 1);
+        dashboard.select(1);
+        assert!(!dashboard.key(KeyCode::Char('n')));
+        assert!(!second.await.unwrap().accept);
+    }
+
+    /// Eviction never takes the entry under the cursor.
+    #[test]
+    fn eviction_spares_the_entry_under_the_cursor() {
+        let mut dashboard = Dashboard::new(registration(), &credentials(), 1, Default::default());
+        dashboard.apply(Event::Refused {
+            link: 1,
+            reason: "kept".into(),
+        });
+        dashboard.select(0);
+        dashboard.following = false;
+        for _ in 0..ACTIVITY_KEPT {
+            dashboard.apply(exchange("later", "answer"));
+        }
+        assert_eq!(dashboard.activity.len(), ACTIVITY_KEPT);
+        assert_eq!(dashboard.selected, 0);
+        assert!(matches!(
+            &dashboard.activity[0].event,
+            Event::Refused { reason, .. } if reason == "kept"
+        ));
     }
 }

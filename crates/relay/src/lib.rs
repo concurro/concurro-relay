@@ -10,6 +10,7 @@ pub mod live;
 pub mod login;
 pub mod plain;
 pub mod policy;
+pub mod review;
 pub mod routes;
 pub mod serve;
 pub mod state;
