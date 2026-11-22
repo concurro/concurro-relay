@@ -12,6 +12,24 @@ pub const AUTH_INDEX: usize = 62;
 pub const MAX_FRAME_SIZE: usize = 16_384;
 /// Match the reference HPACK decoder's default decoded header-list budget.
 pub const MAX_HEADER_LIST_SIZE: usize = 65_536;
+/// The request paths a Claude session may use: the Messages API, which
+/// answers with the event streams the session reads.
+const PATHS: [&[u8]; 2] = [b"/v1/messages", b"/v1/messages?beta=true"];
+/// Header names a public template may not carry: the credential's, the
+/// authority's and the body length's, which the relay sets, and those
+/// HTTP/2 forbids (RFC 9113, section 8.2.2).
+const RESERVED_HEADERS: [&[u8]; 10] = [
+    b"authorization",
+    b"x-api-key",
+    b"host",
+    b"content-length",
+    b"connection",
+    b"keep-alive",
+    b"proxy-connection",
+    b"transfer-encoding",
+    b"upgrade",
+    b"te",
+];
 
 /// Public fields copied from one local Claude HTTP request.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,9 +107,7 @@ impl Template {
     /// Encode public fields without mutating the request HPACK table.
     pub fn public_headers(&self) -> Result<Vec<u8>> {
         ensure!(
-            self.path.starts_with(b"/v1/messages")
-                && !self.path.contains(&b'\r')
-                && !self.path.contains(&b'\n'),
+            PATHS.contains(&self.path.as_slice()),
             "unsupported Claude request path"
         );
         let mut block = vec![0x83, 0x87];
@@ -104,8 +120,7 @@ impl Template {
             ensure!(
                 !name.is_empty()
                     && !name.starts_with(b":")
-                    && name != b"authorization"
-                    && name != b"x-api-key"
+                    && !RESERVED_HEADERS.contains(&name.as_slice())
                     && name.iter().all(|byte| (33..=126).contains(byte))
                     && !name.contains(&b'\r')
                     && !name.contains(&b'\n')
@@ -749,6 +764,46 @@ mod tests {
         AuditFrame, IndexedConnection, ResponseEvent, ResponseReader, SponsorAudit, Template,
         bootstrap, frame,
     };
+
+    /// Only the Messages API paths are admitted, and no header the relay
+    /// sets or HTTP/2 forbids.
+    #[test]
+    fn templates_keep_to_the_messages_api() {
+        let with_path = |path: &[u8]| Template {
+            path: path.to_vec(),
+            ..Template::fixture_default()
+        };
+        assert!(with_path(b"/v1/messages").public_headers().is_ok());
+        assert!(
+            with_path(b"/v1/messages?beta=true")
+                .public_headers()
+                .is_ok()
+        );
+        for path in [
+            &b"/v1/messages/batches"[..],
+            b"/v1/messages/count_tokens",
+            b"/v1/messages/../../api/oauth/profile",
+            b"/v1/messages%2f..",
+            b"/v1/messages?beta=true&x=1",
+            b"/v1/messagesX",
+        ] {
+            assert!(with_path(path).public_headers().is_err(), "{path:?}");
+        }
+        for name in [
+            "host",
+            "Host",
+            "content-length",
+            "te",
+            "connection",
+            "x-api-key",
+        ] {
+            let mut template = Template::fixture_default();
+            template
+                .headers
+                .push((name.as_bytes().to_vec(), b"value".to_vec()));
+            assert!(template.public_headers().is_err(), "{name}");
+        }
+    }
 
     /// Match the frozen bootstrap and opaque authorization-index bytes.
     #[test]
