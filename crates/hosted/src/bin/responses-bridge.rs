@@ -1,10 +1,16 @@
 //! Local Codex WebSocket ingress that admits every Responses turn through agentgateway.
 
-use std::{collections::VecDeque, net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    collections::VecDeque,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use concurro_relay_protocol::ws::FINAL_EVENTS;
+use concurro_relay_verifier::accept;
 use futures::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
@@ -13,7 +19,10 @@ use http_body_util::{BodyExt, Full};
 use hyper::{Request, Uri, body::Bytes, client::conn::http1};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    time,
+};
 use tokio_tungstenite::{
     WebSocketStream, accept_hdr_async,
     tungstenite::{
@@ -31,6 +40,27 @@ struct Args {
     /// Actual agentgateway inference URL, used for every admitted POST.
     #[arg(long)]
     gateway: Uri,
+    /// Seconds a CLI connection has to finish its WebSocket upgrade.
+    #[arg(long, default_value_t = 10)]
+    handshake_timeout_secs: u64,
+    /// Turns a CLI may queue while one is in flight; one more closes its
+    /// connection.
+    #[arg(long, default_value_t = 8)]
+    queued_turns: usize,
+}
+
+/// How long a connection may take to upgrade, and how many turns it may
+/// queue.
+#[derive(Clone, Copy)]
+struct Limits {
+    handshake: Duration,
+    queued: usize,
+}
+
+/// Turns waiting for the one in flight, at most `limit` of them.
+struct Queue {
+    turns: VecDeque<Message>,
+    limit: usize,
 }
 
 /// Outcome of one gateway-admitted Responses turn.
@@ -51,9 +81,9 @@ enum TurnOutcome {
 }
 
 /// Carry one CLI WebSocket session through separately admitted gateway POSTs.
-async fn client(stream: TcpStream, gateway: Arc<Uri>) -> Result<()> {
+async fn client(stream: TcpStream, gateway: Arc<Uri>, limits: Limits) -> Result<()> {
     let mut authorization = None;
-    let socket = accept_hdr_async(
+    let upgrade = accept_hdr_async(
         stream,
         |request: &UpgradeRequest, response: UpgradeResponse| {
             if request.uri().path() == "/v1/responses" {
@@ -61,14 +91,19 @@ async fn client(stream: TcpStream, gateway: Arc<Uri>) -> Result<()> {
             }
             Ok(response)
         },
-    )
-    .await?;
+    );
+    let socket = time::timeout(limits.handshake, upgrade)
+        .await
+        .context("Codex WebSocket upgrade timed out")??;
     let authorization = authorization.context("Codex virtual key missing")?;
     let (mut sink, mut source) = socket.split();
-    let mut queued = VecDeque::new();
+    let mut queued = Queue {
+        turns: VecDeque::new(),
+        limit: limits.queued,
+    };
     let mut sequence = 0_u64;
     loop {
-        let incoming = if let Some(message) = queued.pop_front() {
+        let incoming = if let Some(message) = queued.turns.pop_front() {
             Some(Ok(message))
         } else {
             source.next().await
@@ -154,12 +189,14 @@ async fn client(stream: TcpStream, gateway: Arc<Uri>) -> Result<()> {
     Ok(())
 }
 
-/// Queue another turn or stop the active gateway request on cancellation and disconnect.
+/// Queue another turn, while `queued` has room, or stop the active gateway
+/// request on cancellation, disconnect or a full queue.
 async fn active_message(
     incoming: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
     sink: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
-    queued: &mut VecDeque<Message>,
+    queued: &mut Queue,
 ) -> Result<bool> {
+    let limit = queued.limit;
     match incoming {
         Some(Ok(Message::Text(raw))) => {
             let request: Value = serde_json::from_str(&raw)?;
@@ -168,8 +205,20 @@ async fn active_message(
                     eprintln!("Codex sent response.cancel");
                     Ok(false)
                 }
+                Some("response.create") if queued.turns.len() >= limit => {
+                    eprintln!("Codex queued more than {limit} turns");
+                    sink.send(Message::Text(
+                        json!({"type":"error","error":{
+                        "type":"too_many_queued_turns","code":"too_many_queued_turns",
+                        "message":format!("at most {limit} turns may wait for the one in flight")}})
+                        .to_string()
+                        .into(),
+                    ))
+                    .await?;
+                    Ok(false)
+                }
                 Some("response.create") => {
-                    queued.push_back(Message::Text(raw));
+                    queued.turns.push_back(Message::Text(raw));
                     Ok(true)
                 }
                 _ => bail!("unsupported Codex WebSocket request"),
@@ -219,7 +268,7 @@ fn denial_category(status: u16, body: &[u8]) -> &'static str {
 async fn forward(
     sink: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
     source: &mut SplitStream<WebSocketStream<TcpStream>>,
-    queued: &mut VecDeque<Message>,
+    queued: &mut Queue,
     gateway: &Uri,
     authorization: &hyper::http::HeaderValue,
     body: Vec<u8>,
@@ -330,14 +379,105 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let listener = TcpListener::bind(args.listen).await?;
     let gateway = Arc::new(args.gateway);
+    let limits = Limits {
+        handshake: Duration::from_secs(args.handshake_timeout_secs),
+        queued: args.queued_turns,
+    };
     println!("RESPONSES_BRIDGE_READY {}", listener.local_addr()?);
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream = accept::next_connection(&listener).await;
         let gateway = gateway.clone();
         tokio::spawn(async move {
-            if let Err(error) = client(stream, gateway).await {
+            if let Err(error) = client(stream, gateway, limits).await {
                 eprintln!("Codex gateway WebSocket ended: {error:#}");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::VecDeque, sync::Arc, time::Duration};
+
+    use futures::StreamExt;
+    use serde_json::Value;
+    use tokio::{
+        io::AsyncReadExt,
+        net::{TcpListener, TcpStream},
+    };
+    use tokio_tungstenite::{
+        WebSocketStream,
+        tungstenite::{Message, protocol::Role},
+    };
+
+    use super::{Limits, Queue, active_message, client};
+
+    /// A connected WebSocket pair: the bridge's end and the CLI's.
+    async fn sockets() -> (WebSocketStream<TcpStream>, WebSocketStream<TcpStream>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let cli = TcpStream::connect(address).await.unwrap();
+        let (bridge, _) = listener.accept().await.unwrap();
+        (
+            WebSocketStream::from_raw_socket(bridge, Role::Server, None).await,
+            WebSocketStream::from_raw_socket(cli, Role::Client, None).await,
+        )
+    }
+
+    /// Turns queue up to the limit, and one more is refused and ends the
+    /// connection's turn.
+    #[tokio::test]
+    async fn queued_turns_are_bounded() {
+        let (bridge, mut cli) = sockets().await;
+        let (mut sink, _source) = bridge.split();
+        let mut queued = Queue {
+            turns: VecDeque::new(),
+            limit: 2,
+        };
+        let turn = || Some(Ok(Message::Text(r#"{"type":"response.create"}"#.into())));
+        for _ in 0..2 {
+            assert!(
+                active_message(turn(), &mut sink, &mut queued)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(
+            !active_message(turn(), &mut sink, &mut queued)
+                .await
+                .unwrap()
+        );
+        assert_eq!(queued.turns.len(), 2);
+        let Some(Ok(Message::Text(refusal))) = cli.next().await else {
+            panic!("the CLI was not told");
+        };
+        let refusal: Value = serde_json::from_str(&refusal).unwrap();
+        assert_eq!(refusal["error"]["code"], "too_many_queued_turns");
+        cli.close(None).await.unwrap();
+    }
+
+    /// A connection which never upgrades is closed once the limit passes.
+    #[tokio::test]
+    async fn a_silent_connection_is_closed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let limits = Limits {
+            handshake: Duration::from_millis(200),
+            queued: 8,
+        };
+        let serving = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            client(
+                stream,
+                Arc::new("http://127.0.0.1:9/".parse().unwrap()),
+                limits,
+            )
+            .await
+        });
+        let mut silent = TcpStream::connect(address).await.unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), serving).await;
+        assert!(ended.unwrap().unwrap().is_err());
+        let mut byte = [0];
+        assert!(matches!(silent.read(&mut byte).await, Ok(0) | Err(_)));
     }
 }
