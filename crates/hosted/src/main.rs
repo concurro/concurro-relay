@@ -84,6 +84,10 @@ struct Args {
     /// Seconds one connection of a relay link waits for the other.
     #[arg(long, default_value_t = 30)]
     half_link_timeout_secs: u64,
+    /// Relay connections open at once before their relay is known; more are
+    /// closed as they arrive.
+    #[arg(long, default_value_t = 1024)]
+    max_pending_connections: usize,
     /// Unapproved relay registrations kept; a new one evicts the oldest.
     #[arg(long, default_value_t = 1000)]
     pending_registrations: usize,
@@ -753,6 +757,7 @@ async fn main() -> Result<()> {
         Arc::new(Acceptor::new(registry.clone(), ready).with_limits(Limits {
             handshake: Duration::from_secs(args.handshake_timeout_secs),
             half_link: Duration::from_secs(args.half_link_timeout_secs),
+            pending_connections: args.max_pending_connections,
         })),
     ));
     let accepted_pool = pool.clone();
@@ -801,6 +806,7 @@ mod tests {
             provider_ca: PathBuf::new(),
             handshake_timeout_secs: 10,
             half_link_timeout_secs: 30,
+            max_pending_connections: 1024,
             pending_registrations: 1000,
             relay_name_max_bytes: 256,
             started,

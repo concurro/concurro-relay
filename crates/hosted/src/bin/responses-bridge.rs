@@ -21,13 +21,15 @@ use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use tokio::{
     net::{TcpListener, TcpStream},
+    sync::Semaphore,
     time,
 };
 use tokio_tungstenite::{
-    WebSocketStream, accept_hdr_async,
+    WebSocketStream, accept_hdr_async_with_config,
     tungstenite::{
         Message,
         handshake::server::{Request as UpgradeRequest, Response as UpgradeResponse},
+        protocol::WebSocketConfig,
     },
 };
 
@@ -47,6 +49,12 @@ struct Args {
     /// connection.
     #[arg(long, default_value_t = 8)]
     queued_turns: usize,
+    /// Bytes a CLI's WebSocket message may have.
+    #[arg(long, default_value_t = 16 << 20)]
+    max_message_bytes: usize,
+    /// CLI connections open at once; more are closed as they arrive.
+    #[arg(long, default_value_t = 1024)]
+    max_connections: usize,
 }
 
 /// How long a connection may take to upgrade, and how many turns it may
@@ -55,6 +63,8 @@ struct Args {
 struct Limits {
     handshake: Duration,
     queued: usize,
+    message_bytes: usize,
+    connections: usize,
 }
 
 /// Turns waiting for the one in flight, at most `limit` of them.
@@ -83,7 +93,7 @@ enum TurnOutcome {
 /// Carry one CLI WebSocket session through separately admitted gateway POSTs.
 async fn client(stream: TcpStream, gateway: Arc<Uri>, limits: Limits) -> Result<()> {
     let mut authorization = None;
-    let upgrade = accept_hdr_async(
+    let upgrade = accept_hdr_async_with_config(
         stream,
         |request: &UpgradeRequest, response: UpgradeResponse| {
             if request.uri().path() == "/v1/responses" {
@@ -91,6 +101,11 @@ async fn client(stream: TcpStream, gateway: Arc<Uri>, limits: Limits) -> Result<
             }
             Ok(response)
         },
+        Some(
+            WebSocketConfig::default()
+                .max_message_size(Some(limits.message_bytes))
+                .max_frame_size(Some(limits.message_bytes)),
+        ),
     );
     let socket = time::timeout(limits.handshake, upgrade)
         .await
@@ -382,12 +397,25 @@ async fn main() -> Result<()> {
     let limits = Limits {
         handshake: Duration::from_secs(args.handshake_timeout_secs),
         queued: args.queued_turns,
+        message_bytes: args.max_message_bytes,
+        connections: args.max_connections,
     };
     println!("RESPONSES_BRIDGE_READY {}", listener.local_addr()?);
+    serve(listener, gateway, limits).await
+}
+
+/// Carries each CLI connection on `listener` to `gateway`, up to the
+/// connection limit at once.
+async fn serve(listener: TcpListener, gateway: Arc<Uri>, limits: Limits) -> ! {
+    let open = Arc::new(Semaphore::new(limits.connections));
     loop {
         let stream = accept::next_connection(&listener).await;
+        let Ok(place) = open.clone().try_acquire_owned() else {
+            continue;
+        };
         let gateway = gateway.clone();
         tokio::spawn(async move {
+            let _place = place;
             if let Err(error) = client(stream, gateway, limits).await {
                 eprintln!("Codex gateway WebSocket ended: {error:#}");
             }
@@ -410,7 +438,7 @@ mod tests {
         tungstenite::{Message, protocol::Role},
     };
 
-    use super::{Limits, Queue, active_message, client};
+    use super::{Limits, Queue, active_message, client, serve};
 
     /// A connected WebSocket pair: the bridge's end and the CLI's.
     async fn sockets() -> (WebSocketStream<TcpStream>, WebSocketStream<TcpStream>) {
@@ -464,6 +492,8 @@ mod tests {
         let limits = Limits {
             handshake: Duration::from_millis(200),
             queued: 8,
+            message_bytes: 16 << 20,
+            connections: 1024,
         };
         let serving = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -479,5 +509,79 @@ mod tests {
         assert!(ended.unwrap().unwrap().is_err());
         let mut byte = [0];
         assert!(matches!(silent.read(&mut byte).await, Ok(0) | Err(_)));
+    }
+
+    /// Connections beyond the limit are closed as they arrive.
+    #[tokio::test]
+    async fn connections_beyond_the_limit_are_closed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let limits = Limits {
+            handshake: Duration::from_secs(10),
+            queued: 8,
+            message_bytes: 16 << 20,
+            connections: 1,
+        };
+        tokio::spawn(serve(
+            listener,
+            Arc::new("http://127.0.0.1:9/".parse().unwrap()),
+            limits,
+        ));
+        let mut first = TcpStream::connect(address).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut second = TcpStream::connect(address).await.unwrap();
+        let mut byte = [0];
+        let closed = tokio::time::timeout(Duration::from_secs(2), second.read(&mut byte)).await;
+        assert!(matches!(closed, Ok(Ok(0)) | Ok(Err(_))), "{closed:?}");
+        let kept = tokio::time::timeout(Duration::from_millis(300), first.read(&mut byte)).await;
+        assert!(kept.is_err(), "the first connection was closed");
+    }
+
+    /// A message beyond the size limit ends the connection.
+    #[tokio::test]
+    async fn an_oversized_message_ends_the_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let limits = Limits {
+            handshake: Duration::from_secs(10),
+            queued: 8,
+            message_bytes: 64,
+            connections: 1024,
+        };
+        let serving = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            client(
+                stream,
+                Arc::new("http://127.0.0.1:9/".parse().unwrap()),
+                limits,
+            )
+            .await
+        });
+        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+            .uri(format!("ws://{address}/v1/responses"))
+            .header("host", address.to_string())
+            .header("authorization", "Bearer key")
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header(
+                "sec-websocket-key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
+            .body(())
+            .unwrap();
+        let stream = TcpStream::connect(address).await.unwrap();
+        let (mut cli, _) = tokio_tungstenite::client_async(request, stream)
+            .await
+            .unwrap();
+        use futures::SinkExt;
+        // Valid on its own: within the limit it would end the session cleanly.
+        let cancel = format!(
+            r#"{{"type":"response.cancel","pad":"{}"}}"#,
+            "x".repeat(100)
+        );
+        cli.send(Message::Text(cancel.into())).await.unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), serving).await;
+        assert!(ended.unwrap().unwrap().is_err());
     }
 }

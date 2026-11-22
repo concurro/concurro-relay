@@ -20,7 +20,7 @@ use socket2::{SockRef, TcpKeepalive};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
-    sync::mpsc::UnboundedSender,
+    sync::{Semaphore, mpsc::UnboundedSender},
     time,
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
@@ -41,6 +41,9 @@ pub struct Limits {
     pub handshake: Duration,
     /// For one connection of a link to be joined by the other.
     pub half_link: Duration,
+    /// Connections open at once before their relay is known; more are
+    /// closed as they arrive.
+    pub pending_connections: usize,
 }
 
 impl Default for Limits {
@@ -48,6 +51,7 @@ impl Default for Limits {
         Self {
             handshake: Duration::from_secs(10),
             half_link: Duration::from_secs(30),
+            pending_connections: 1024,
         }
     }
 }
@@ -274,10 +278,16 @@ pub async fn serve<R: Registry>(
     tls: TlsAcceptor,
     acceptor: Arc<Acceptor<R, TlsStream<TcpStream>>>,
 ) {
+    let unknown = Arc::new(Semaphore::new(acceptor.limits.pending_connections));
     loop {
         let stream = next_connection(&listener).await;
+        // Held until the connection's relay is known, or it ends.
+        let Ok(waiting) = unknown.clone().try_acquire_owned() else {
+            continue;
+        };
         let (tls, acceptor) = (tls.clone(), acceptor.clone());
         tokio::spawn(async move {
+            let _waiting = waiting;
             if stream.set_nodelay(true).is_err()
                 || SockRef::from(&stream)
                     .set_tcp_keepalive(&KEEPALIVE)
@@ -407,5 +417,28 @@ mod tests {
             .try_recv()
             .expect("the replacement was closed early");
         assert_eq!(paired.number, 9);
+    }
+
+    /// Connections beyond the limit of those whose relay is not yet known
+    /// are closed as they arrive, while the earlier ones are kept.
+    #[tokio::test]
+    async fn connections_beyond_the_limit_are_closed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready, _accepted) = mpsc::unbounded_channel();
+        let acceptor = Acceptor::new(Arc::new(Empty), ready).with_limits(Limits {
+            pending_connections: 1,
+            ..Limits::default()
+        });
+        tokio::spawn(serve(listener, tls(), Arc::new(acceptor)));
+        let mut first = TcpStream::connect(address).await.unwrap();
+        // The first holds the only place while its handshake waits.
+        time::sleep(Duration::from_millis(100)).await;
+        let mut second = TcpStream::connect(address).await.unwrap();
+        let mut byte = [0];
+        let closed = time::timeout(Duration::from_secs(2), second.read(&mut byte)).await;
+        assert!(matches!(closed, Ok(Ok(0)) | Ok(Err(_))), "{closed:?}");
+        let kept = time::timeout(Duration::from_millis(300), first.read(&mut byte)).await;
+        assert!(kept.is_err(), "the first connection was closed");
     }
 }
