@@ -21,6 +21,28 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 const CODE_LIFETIME: Duration = Duration::from_secs(600);
+
+/// How large a relay's public key is: an Ed25519 key.
+const PUBLIC_KEY_BYTES: usize = 32;
+
+/// How many registrations may wait for approval, and how long a relay's
+/// name may be. Each may be set.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Unapproved registrations kept; a new one evicts the oldest.
+    pub pending: usize,
+    /// Bytes of a relay's name.
+    pub name_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            pending: 1000,
+            name_bytes: 256,
+        }
+    }
+}
 const CODE_LETTERS: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 
 /// Exact owner and immutable Vault record approved for one relay key.
@@ -81,7 +103,8 @@ struct Pending {
     approved: Option<String>,
 }
 
-/// Persisted keys and pending approvals.
+/// Keys and pending approvals. Unapproved registrations are kept in memory
+/// only; see [`Persisted`].
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct State {
     /// Unexpired device-code registrations.
@@ -93,6 +116,30 @@ struct State {
     blocked: HashSet<String>,
 }
 
+/// What of a [`State`] is written: everything but unapproved registrations,
+/// which a flood of registrations would otherwise turn into a flood of
+/// writes. Read back, it is a `State`.
+#[derive(Serialize)]
+struct Persisted<'a> {
+    pending: HashMap<&'a String, &'a Pending>,
+    approved: &'a HashMap<String, (Vec<u8>, Bindings)>,
+    blocked: &'a HashSet<String>,
+}
+
+impl<'a> From<&'a State> for Persisted<'a> {
+    fn from(state: &'a State) -> Self {
+        Self {
+            pending: state
+                .pending
+                .iter()
+                .filter(|(_, pending)| pending.approved.is_some())
+                .collect(),
+            approved: &state.approved,
+            blocked: &state.blocked,
+        }
+    }
+}
+
 /// Registry whose approval is driven only by the owner-authenticated Vault.
 pub struct HostedRegistry {
     file: PathBuf,
@@ -101,6 +148,7 @@ pub struct HostedRegistry {
     /// Serializes complete records in the withdrawal journal.
     journal: Mutex<()>,
     withdrawals: Option<UnboundedSender<String>>,
+    limits: Limits,
 }
 
 impl HostedRegistry {
@@ -138,6 +186,7 @@ impl HostedRegistry {
             verification_uri: "/credentials/relay".into(),
             journal: Mutex::new(()),
             withdrawals,
+            limits: Limits::default(),
         };
         for relay in pending {
             if let Err(error) = registry.deregister(&relay) {
@@ -145,6 +194,12 @@ impl HostedRegistry {
             }
         }
         Ok(registry)
+    }
+
+    /// This registry with `limits` instead of the defaults.
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Set the public owner page printed by Sponsor during registration.
@@ -282,7 +337,7 @@ impl HostedRegistry {
         let parent = self.file.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent)?;
         let temp = self.file.with_extension("tmp");
-        fs::write(&temp, serde_json::to_vec(state)?)?;
+        fs::write(&temp, serde_json::to_vec(&Persisted::from(state))?)?;
         fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))?;
         fs::File::open(&temp)?.sync_all()?;
         fs::rename(temp, &self.file)?;
@@ -326,11 +381,38 @@ impl Registry for HostedRegistry {
         {
             return Err("invalid relay routes".into());
         }
-        let mut current = self.state.lock().expect("registry lock is not poisoned");
-        let mut state = current.clone();
+        if registration.public_key.len() != PUBLIC_KEY_BYTES {
+            return Err("invalid relay key".into());
+        }
+        if registration.name.len() > self.limits.name_bytes {
+            return Err(format!(
+                "relay name longer than {} bytes",
+                self.limits.name_bytes
+            ));
+        }
+        // Held only for memory work: unapproved registrations are not written.
+        let mut state = self.state.lock().expect("registry lock is not poisoned");
         state
             .pending
             .retain(|_, pending| pending.approved.is_some() || pending.expires > now());
+        let unapproved = |state: &State| {
+            state
+                .pending
+                .iter()
+                .filter(|(_, pending)| pending.approved.is_none())
+                .min_by_key(|(_, pending)| pending.expires)
+                .map(|(code, _)| code.clone())
+        };
+        while state
+            .pending
+            .values()
+            .filter(|pending| pending.approved.is_none())
+            .count()
+            >= self.limits.pending.max(1)
+            && let Some(oldest) = unapproved(&state)
+        {
+            state.pending.remove(&oldest);
+        }
         let device_code = loop {
             let code = hex::encode(identity::random::<16>());
             if !state.pending.contains_key(&code) {
@@ -364,8 +446,6 @@ impl Registry for HostedRegistry {
                 approved: None,
             },
         );
-        self.keep(&state).map_err(|error| error.to_string())?;
-        *current = state;
         Ok(DeviceCode {
             device_code,
             user_code,
@@ -473,7 +553,7 @@ mod tests {
             .register(Registration {
                 version: 4,
                 name: "mixed".into(),
-                public_key: vec![2; 65],
+                public_key: vec![2; 32],
                 routes: vec![Route::ClaudeSubscription, Route::ChatgptSubscription],
             })
             .unwrap();
@@ -546,7 +626,8 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-    /// Failed writes stay unpublished; approval and withdrawal survive reopen.
+    /// Failed writes stay unpublished; approval and withdrawal survive reopen,
+    /// but an unapproved registration does not.
     #[test]
     fn registration_reopens_and_requires_owner_approval() {
         let path = std::env::temp_dir().join(format!(
@@ -556,14 +637,17 @@ mod tests {
         let registration = Registration {
             version: 4,
             name: "fixture".into(),
-            public_key: vec![1; 65],
+            public_key: vec![1; 32],
             routes: vec![Route::ClaudeSubscription],
         };
         let registry = HostedRegistry::open(path.clone(), None).unwrap();
         let code = registry.register(registration.clone()).unwrap();
         assert!(registry.poll(&code.device_code).unwrap().is_none());
         drop(registry);
+        // An unapproved registration is not kept across a restart.
         let registry = HostedRegistry::open(path.clone(), None).unwrap();
+        assert!(registry.poll(&code.device_code).is_err());
+        let code = registry.register(registration.clone()).unwrap();
         let binding = Binding {
             user_id: 7,
             login: "owner".into(),
@@ -653,7 +737,7 @@ mod tests {
                 .register(Registration {
                     version: 4,
                     name: "fixture".into(),
-                    public_key: vec![version as u8; 65],
+                    public_key: vec![version as u8; 32],
                     routes: vec![Route::ClaudeSubscription],
                 })
                 .unwrap();
@@ -701,5 +785,46 @@ mod tests {
         );
         fs::remove_file(path).unwrap();
         fs::remove_file(journal).unwrap();
+    }
+
+    /// Registrations need a valid key and a short name, and at most the
+    /// configured number wait, the oldest giving way; none is written.
+    #[test]
+    fn registrations_are_bounded_and_unwritten() {
+        let path = std::env::temp_dir().join(format!(
+            "hosted-registry-{}.json",
+            hex::encode(identity::random::<8>())
+        ));
+        let registry = HostedRegistry::open(path.clone(), None)
+            .unwrap()
+            .with_limits(Limits {
+                pending: 2,
+                name_bytes: 8,
+            });
+        let registration = |name: &str, key: usize| Registration {
+            version: 5,
+            name: name.into(),
+            public_key: vec![1; key],
+            routes: vec![Route::ClaudeSubscription],
+        };
+        assert!(registry.register(registration("laptop", 65)).is_err());
+        assert!(registry.register(registration("a-long-name", 32)).is_err());
+        let first = registry.register(registration("laptop", 32)).unwrap();
+        let second = registry.register(registration("laptop", 32)).unwrap();
+        // The first is the oldest.
+        registry
+            .state
+            .lock()
+            .unwrap()
+            .pending
+            .get_mut(&first.device_code)
+            .unwrap()
+            .expires -= 1;
+        let third = registry.register(registration("laptop", 32)).unwrap();
+        let codes = [first, second, third];
+        assert!(registry.poll(&codes[0].device_code).is_err());
+        assert!(registry.poll(&codes[1].device_code).unwrap().is_none());
+        assert!(registry.poll(&codes[2].device_code).unwrap().is_none());
+        assert!(!path.exists());
     }
 }

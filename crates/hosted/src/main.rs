@@ -84,6 +84,12 @@ struct Args {
     /// Seconds one connection of a relay link waits for the other.
     #[arg(long, default_value_t = 30)]
     half_link_timeout_secs: u64,
+    /// Unapproved relay registrations kept; a new one evicts the oldest.
+    #[arg(long, default_value_t = 1000)]
+    pending_registrations: usize,
+    /// Bytes a relay's registered name may have.
+    #[arg(long, default_value_t = 256)]
+    relay_name_max_bytes: usize,
     /// Unix start time; live telemetry before it is unknown.
     #[arg(skip)]
     started: f64,
@@ -731,7 +737,11 @@ async fn main() -> Result<()> {
     let (withdrawals, mut withdrawn) = mpsc::unbounded_channel();
     let registry = Arc::new(
         HostedRegistry::open(args.registry.clone(), Some(withdrawals))?
-            .with_verification_uri(args.verification_url.clone()),
+            .with_verification_uri(args.verification_url.clone())
+            .with_limits(registry::Limits {
+                pending: args.pending_registrations,
+                name_bytes: args.relay_name_max_bytes,
+            }),
     );
     let pool = Pool::shared(clock);
     let (ready, mut accepted) = mpsc::unbounded_channel();
@@ -791,6 +801,8 @@ mod tests {
             provider_ca: PathBuf::new(),
             handshake_timeout_secs: 10,
             half_link_timeout_secs: 30,
+            pending_registrations: 1000,
+            relay_name_max_bytes: 256,
             started,
         })
     }
@@ -859,7 +871,7 @@ mod tests {
             .register(Registration {
                 version: 4,
                 name: "studio".into(),
-                public_key: vec![3; 65],
+                public_key: vec![3; 32],
                 routes: vec![Route::ChatgptSubscription, Route::ClaudeSubscription],
             })
             .unwrap();
