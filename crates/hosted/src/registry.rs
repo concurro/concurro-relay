@@ -152,7 +152,8 @@ pub struct HostedRegistry {
 }
 
 impl HostedRegistry {
-    /// Open a durable registry file, retaining pending and approved registrations.
+    /// Open a durable registry file, retaining approved registrations and
+    /// the approved codes their relays poll with.
     pub fn open(file: PathBuf, withdrawals: Option<UnboundedSender<String>>) -> Result<Self> {
         let mut state: State = if file.exists() {
             serde_json::from_slice(&fs::read(&file)?)
@@ -160,6 +161,11 @@ impl HostedRegistry {
         } else {
             State::default()
         };
+        // Unapproved codes live in memory only, even those an older
+        // verifier wrote.
+        state
+            .pending
+            .retain(|_, pending| pending.approved.is_some());
         let journal = file.with_extension("withdrawn");
         if journal.exists() {
             let retired = fs::read_to_string(&journal)?;
@@ -332,7 +338,7 @@ impl HostedRegistry {
             .and_then(|(_, bindings)| bindings.iter().next().map(|binding| binding.user_id))
     }
 
-    /// Atomically replace the state file after each change.
+    /// Atomically replace the state file with what of `state` is kept.
     fn keep(&self, state: &State) -> Result<()> {
         let parent = self.file.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent)?;
@@ -395,23 +401,19 @@ impl Registry for HostedRegistry {
         state
             .pending
             .retain(|_, pending| pending.approved.is_some() || pending.expires > now());
-        let unapproved = |state: &State| {
-            state
-                .pending
-                .iter()
-                .filter(|(_, pending)| pending.approved.is_none())
-                .min_by_key(|(_, pending)| pending.expires)
-                .map(|(code, _)| code.clone())
-        };
-        while state
+        // The oldest unapproved codes make room for this one, at once.
+        let mut unapproved: Vec<_> = state
             .pending
-            .values()
-            .filter(|pending| pending.approved.is_none())
-            .count()
-            >= self.limits.pending.max(1)
-            && let Some(oldest) = unapproved(&state)
-        {
-            state.pending.remove(&oldest);
+            .iter()
+            .filter(|(_, pending)| pending.approved.is_none())
+            .map(|(code, pending)| (pending.expires, code.clone()))
+            .collect();
+        let excess = (unapproved.len() + 1).saturating_sub(self.limits.pending.max(1));
+        if excess > 0 {
+            unapproved.sort_unstable();
+            for (_, code) in &unapproved[..excess] {
+                state.pending.remove(code);
+            }
         }
         let device_code = loop {
             let code = hex::encode(identity::random::<16>());
@@ -826,5 +828,49 @@ mod tests {
         assert!(registry.poll(&codes[1].device_code).unwrap().is_none());
         assert!(registry.poll(&codes[2].device_code).unwrap().is_none());
         assert!(!path.exists());
+    }
+
+    /// Unapproved codes an older verifier wrote are dropped on load, and a
+    /// registration beyond the limit evicts all the excess at once.
+    #[test]
+    fn stale_codes_are_dropped_and_excess_evicted() {
+        let path = std::env::temp_dir().join(format!(
+            "hosted-registry-{}.json",
+            hex::encode(identity::random::<8>())
+        ));
+        let registration = Registration {
+            version: 5,
+            name: "laptop".into(),
+            public_key: vec![1; 32],
+            routes: vec![Route::ClaudeSubscription],
+        };
+        let mut state = State::default();
+        for at in 0..5 {
+            state.pending.insert(
+                format!("code-{at}"),
+                Pending {
+                    registration: registration.clone(),
+                    user_code: format!("CODE-{at:04}"),
+                    expires: now() + 600,
+                    approved: None,
+                },
+            );
+        }
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let registry = HostedRegistry::open(path.clone(), None).unwrap();
+        assert!(registry.state.lock().unwrap().pending.is_empty());
+        {
+            let mut current = registry.state.lock().unwrap();
+            *current = state;
+        }
+        let registry = registry.with_limits(Limits {
+            pending: 2,
+            name_bytes: 256,
+        });
+        let code = registry.register(registration).unwrap();
+        let pending = &registry.state.lock().unwrap().pending;
+        assert_eq!(pending.len(), 2);
+        assert!(pending.contains_key(&code.device_code));
+        fs::remove_file(path).unwrap();
     }
 }
