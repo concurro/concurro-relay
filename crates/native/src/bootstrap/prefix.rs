@@ -211,32 +211,12 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
     };
     let mut tail = head[partial.len()..].to_vec();
     if context.options.profile == Profile::Codex {
-        for (name, value) in &context.options.codex_headers {
-            ensure!(
-                !name.is_empty()
-                    && name
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric()
-                            || b"!#$%&'*+-.^_`|~".contains(&byte))
-                    && !value.contains(['\r', '\n'])
-                    && !codex::RESERVED_UPGRADE_HEADERS
-                        .contains(&name.to_ascii_lowercase().as_str()),
-                "invalid public CLI upgrade header"
-            );
-            tail.splice(
-                tail.len() - 2..tail.len() - 2,
-                format!("{name}: {value}\r\n").bytes(),
-            );
-        }
-        if let Some(account) = &context.options.account {
-            ensure!(
-                !account.is_empty() && !account.contains(['\r', '\n']),
-                "invalid provider account identity"
-            );
-            tail.splice(
-                tail.len() - 2..tail.len() - 2,
-                format!("ChatGPT-Account-Id: {account}\r\n").bytes(),
-            );
+        tail = codex::request_tail(
+            &tail,
+            &context.options.codex_headers,
+            context.options.account.as_deref(),
+        )?;
+        if context.options.account.is_some() {
             peer.send("request_tail", &tail, Map::new()).await?;
         }
     }

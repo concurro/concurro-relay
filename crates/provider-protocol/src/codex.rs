@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use concurro_relay_protocol::ws::{self, Asked, Inbox};
+
+use crate::header_key;
 use serde::{
     Deserialize, Serialize,
     de::{self, MapAccess, Visitor},
@@ -340,6 +342,66 @@ pub const RESERVED_UPGRADE_HEADERS: [&str; 13] = [
     "transfer-encoding",
 ];
 
+/// Whether `name` is one of [`RESERVED_UPGRADE_HEADERS`], as a server may
+/// read it.
+fn reserved_upgrade_header(name: &[u8]) -> bool {
+    let key = header_key(name);
+    RESERVED_UPGRADE_HEADERS
+        .iter()
+        .any(|reserved| reserved.as_bytes() == key)
+}
+
+/// Whether `name` is an HTTP header name token.
+fn header_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(byte))
+}
+
+/// Whether `value` is a header value without control characters but tabs.
+fn header_value(value: &[u8]) -> bool {
+    value
+        .iter()
+        .all(|byte| *byte == b'\t' || !byte.is_ascii_control())
+}
+
+/// The public continuation of an upgrade after the protected credential:
+/// `base`, the handshake headers ending in the blank line, with the CLI's
+/// public `headers` and the Sponsor's provider `account` added before that
+/// line.
+pub fn request_tail(
+    base: &[u8],
+    headers: &[(String, String)],
+    account: Option<&str>,
+) -> Result<Vec<u8>> {
+    ensure!(base.ends_with(b"\r\n\r\n"), "incomplete upgrade headers");
+    let mut tail = base.to_vec();
+    let mut add = |name: &str, value: &str| {
+        tail.splice(
+            tail.len() - 2..tail.len() - 2,
+            format!("{name}: {value}\r\n").bytes(),
+        );
+    };
+    for (name, value) in headers {
+        ensure!(
+            header_name(name.as_bytes())
+                && header_value(value.as_bytes())
+                && !reserved_upgrade_header(name.as_bytes()),
+            "invalid public CLI upgrade header"
+        );
+        add(name, value);
+    }
+    if let Some(account) = account {
+        ensure!(
+            !account.is_empty() && header_value(account.as_bytes()),
+            "invalid provider account identity"
+        );
+        add("ChatGPT-Account-Id", account);
+    }
+    Ok(tail)
+}
+
 /// Validate the public HTTP continuation admitted after the protected bearer
 /// slot, which names the Sponsor's own provider `account`, if it has one.
 pub fn validate_request_tail(
@@ -363,34 +425,18 @@ pub fn validate_request_tail(
             .position(|byte| *byte == b':')
             .context("invalid admitted HTTP header")?;
         let name = &line[..split];
-        ensure!(
-            !name.is_empty()
-                && name
-                    .iter()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(byte)),
-            "invalid admitted HTTP header"
-        );
         let value = line[split + 1..].trim_ascii();
         ensure!(
-            value
-                .iter()
-                .all(|byte| *byte == b'\t' || !byte.is_ascii_control()),
+            header_name(name) && header_value(value),
             "invalid admitted HTTP header"
         );
-        let lower = name.to_ascii_lowercase();
-        match lower.as_slice() {
+        match header_key(name).as_slice() {
             b"connection" => connection.push(value),
             b"upgrade" => upgrade.push(value),
             b"sec-websocket-version" => version.push(value),
             b"sec-websocket-key" => key.push(value),
             b"chatgpt-account-id" => accounts.push(value),
-            reserved
-                if RESERVED_UPGRADE_HEADERS
-                    .iter()
-                    .any(|name| name.as_bytes() == reserved) =>
-            {
-                bail!("conflicting admitted HTTP header")
-            }
+            _ if reserved_upgrade_header(name) => bail!("conflicting admitted HTTP header"),
             _ => {}
         }
     }
@@ -569,7 +615,7 @@ mod tests {
 
     use super::{
         RequestBinding, RequestClaim, Responses, audited_payload, frame_length, normalize_request,
-        request_head, upgrade_response, validate_request_tail,
+        request_head, request_tail, upgrade_response, validate_request_tail,
     };
     use concurro_relay_protocol::ws;
 
@@ -732,5 +778,37 @@ mod tests {
         }
         let beta = with("ChatGPT-Account-Id: acct-own\r\nOpenAI-Beta: responses=v1\r\n");
         validate_request_tail(beta.as_bytes(), b"public", Some("acct-own")).unwrap();
+        let alias = with("ChatGPT-Account-Id: acct-own\r\nChatGPT_Account_Id: acct-team\r\n");
+        assert!(validate_request_tail(alias.as_bytes(), b"public", Some("acct-own")).is_err());
+    }
+
+    /// The tail Concurro builds from a Codex CLI's upgrade is the one the
+    /// Sponsor admits, and the CLI can set nothing reserved.
+    #[test]
+    fn built_tails_are_admitted() {
+        let (head, slot) = request_head(b"token", b"public");
+        let base = &head[slot + b"token".len() + 2..];
+        let headers = [
+            ("OpenAI-Beta", "responses=experimental"),
+            ("originator", "codex_cli_rs"),
+            ("session_id", "0193"),
+            ("User-Agent", "codex_cli_rs/0.50.0 (Mac OS 15.0; arm64)"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        for account in [Some("acct-own"), None] {
+            let tail = request_tail(base, &headers, account).unwrap();
+            validate_request_tail(&tail, b"public", account).unwrap();
+        }
+        for (name, value) in [
+            ("ChatGPT_Account_Id", "acct-team"),
+            ("Cookie", "session=1"),
+            ("X-Note", "a\u{1}b"),
+        ] {
+            let headers = [(name.to_owned(), value.to_owned())];
+            assert!(
+                request_tail(base, &headers, Some("acct-own")).is_err(),
+                "{name}"
+            );
+        }
     }
 }

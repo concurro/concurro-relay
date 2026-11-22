@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use httlib_hpack::Decoder;
+
+use crate::header_key;
 use serde_json::{Map, Value};
 
 /// HTTP/2 connection preface sent inside the protected first record.
@@ -120,7 +122,7 @@ impl Template {
             ensure!(
                 !name.is_empty()
                     && !name.starts_with(b":")
-                    && !RESERVED_HEADERS.contains(&name.as_slice())
+                    && !RESERVED_HEADERS.contains(&header_key(&name).as_slice())
                     && name.iter().all(|byte| (33..=126).contains(byte))
                     && !name.contains(&b'\r')
                     && !name.contains(&b'\n')
@@ -796,6 +798,8 @@ mod tests {
             "te",
             "connection",
             "x-api-key",
+            "X_Api_Key",
+            "content_length",
         ] {
             let mut template = Template::fixture_default();
             template
