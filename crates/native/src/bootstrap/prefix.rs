@@ -134,7 +134,7 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
         head[partial.len()..].to_vec()
     };
     if context.options.profile == Profile::Codex {
-        codex::validate_request_tail(&tail, &websocket_key)?;
+        codex::validate_request_tail(&tail, &websocket_key, context.options.account.as_deref())?;
     }
     let binding = binding(context);
     let input = [&context.master_mask[..], &[0; 64], &binding, partial].concat();
@@ -219,21 +219,8 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                         .all(|byte| byte.is_ascii_alphanumeric()
                             || b"!#$%&'*+-.^_`|~".contains(&byte))
                     && !value.contains(['\r', '\n'])
-                    && ![
-                        "authorization",
-                        "host",
-                        "connection",
-                        "upgrade",
-                        "sec-websocket-key",
-                        "sec-websocket-version",
-                        "sec-websocket-extensions",
-                        "proxy-authorization",
-                        "x-api-key",
-                        "cookie",
-                        "chatgpt-account-id",
-                        "content-length"
-                    ]
-                    .contains(&name.to_ascii_lowercase().as_str()),
+                    && !codex::RESERVED_UPGRADE_HEADERS
+                        .contains(&name.to_ascii_lowercase().as_str()),
                 "invalid public CLI upgrade header"
             );
             tail.splice(

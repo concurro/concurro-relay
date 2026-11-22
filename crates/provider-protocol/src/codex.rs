@@ -321,8 +321,32 @@ pub fn frame_length(bytes: &[u8]) -> Result<Option<usize>> {
     ))
 }
 
-/// Validate the public HTTP continuation admitted after the protected bearer slot.
-pub fn validate_request_tail(tail: &[u8], websocket_key: &[u8]) -> Result<()> {
+/// Upgrade header names a CLI may not set: the credential's, the provider
+/// account's and the WebSocket handshake's, which the relay sets, and those
+/// which would change how the request is read.
+pub const RESERVED_UPGRADE_HEADERS: [&str; 13] = [
+    "authorization",
+    "host",
+    "connection",
+    "upgrade",
+    "sec-websocket-key",
+    "sec-websocket-version",
+    "sec-websocket-extensions",
+    "proxy-authorization",
+    "x-api-key",
+    "cookie",
+    "chatgpt-account-id",
+    "content-length",
+    "transfer-encoding",
+];
+
+/// Validate the public HTTP continuation admitted after the protected bearer
+/// slot, which names the Sponsor's own provider `account`, if it has one.
+pub fn validate_request_tail(
+    tail: &[u8],
+    websocket_key: &[u8],
+    account: Option<&str>,
+) -> Result<()> {
     ensure!(
         tail.ends_with(b"\r\n\r\n"),
         "incomplete admitted request headers"
@@ -331,6 +355,7 @@ pub fn validate_request_tail(tail: &[u8], websocket_key: &[u8]) -> Result<()> {
     let mut upgrade = Vec::new();
     let mut version = Vec::new();
     let mut key = Vec::new();
+    let mut accounts = Vec::new();
     for line in tail[..tail.len() - 4].split(|byte| *byte == b'\n') {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         let split = line
@@ -346,20 +371,33 @@ pub fn validate_request_tail(tail: &[u8], websocket_key: &[u8]) -> Result<()> {
             "invalid admitted HTTP header"
         );
         let value = line[split + 1..].trim_ascii();
+        ensure!(
+            value
+                .iter()
+                .all(|byte| *byte == b'\t' || !byte.is_ascii_control()),
+            "invalid admitted HTTP header"
+        );
         let lower = name.to_ascii_lowercase();
         match lower.as_slice() {
-            b"authorization"
-            | b"host"
-            | b"proxy-authorization"
-            | b"transfer-encoding"
-            | b"content-length" => bail!("conflicting admitted HTTP header"),
             b"connection" => connection.push(value),
             b"upgrade" => upgrade.push(value),
             b"sec-websocket-version" => version.push(value),
             b"sec-websocket-key" => key.push(value),
+            b"chatgpt-account-id" => accounts.push(value),
+            reserved
+                if RESERVED_UPGRADE_HEADERS
+                    .iter()
+                    .any(|name| name.as_bytes() == reserved) =>
+            {
+                bail!("conflicting admitted HTTP header")
+            }
             _ => {}
         }
     }
+    ensure!(
+        accounts == account.map(str::as_bytes).into_iter().collect::<Vec<_>>(),
+        "admitted provider account differs from the Sponsor's"
+    );
     ensure!(
         connection == [b"Upgrade"]
             && upgrade == [b"websocket"]
@@ -658,8 +696,41 @@ mod tests {
         upgrade_response(head, "expected").unwrap();
         assert!(upgrade_response(head, "other").is_err());
         let tail = b"Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: public\r\n\r\n";
-        validate_request_tail(tail, b"public").unwrap();
+        validate_request_tail(tail, b"public", None).unwrap();
         let conflicting = b"Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: public\r\nAuthorization: extra\r\n\r\n";
-        assert!(validate_request_tail(conflicting, b"public").is_err());
+        assert!(validate_request_tail(conflicting, b"public", None).is_err());
+    }
+
+    /// The upgrade names the Sponsor's own account, once, and nothing the
+    /// relay sets.
+    #[test]
+    fn upgrade_names_the_sponsor_account() {
+        let with = |extra: &str| {
+            format!(
+                "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: public\r\n{extra}\r\n"
+            )
+        };
+        let own = with("ChatGPT-Account-Id: acct-own\r\n");
+        validate_request_tail(own.as_bytes(), b"public", Some("acct-own")).unwrap();
+        assert!(validate_request_tail(own.as_bytes(), b"public", Some("acct-team")).is_err());
+        assert!(validate_request_tail(own.as_bytes(), b"public", None).is_err());
+        let none = with("");
+        assert!(validate_request_tail(none.as_bytes(), b"public", Some("acct-own")).is_err());
+        let twice = with("ChatGPT-Account-Id: acct-own\r\nchatgpt-account-id: acct-own\r\n");
+        assert!(validate_request_tail(twice.as_bytes(), b"public", Some("acct-own")).is_err());
+        for extra in [
+            "Cookie: session=1\r\n",
+            "Sec-WebSocket-Extensions: permessage-deflate\r\n",
+            "OpenAI-Beta: x\u{0}y\r\n",
+            "OpenAI-Beta: x\ry\r\n",
+        ] {
+            let tail = with(&format!("ChatGPT-Account-Id: acct-own\r\n{extra}"));
+            assert!(
+                validate_request_tail(tail.as_bytes(), b"public", Some("acct-own")).is_err(),
+                "{extra:?}"
+            );
+        }
+        let beta = with("ChatGPT-Account-Id: acct-own\r\nOpenAI-Beta: responses=v1\r\n");
+        validate_request_tail(beta.as_bytes(), b"public", Some("acct-own")).unwrap();
     }
 }
