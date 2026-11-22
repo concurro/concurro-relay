@@ -13,7 +13,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -43,6 +43,7 @@ use tokio::{
     io::{self, AsyncRead, AsyncWrite},
     sync::mpsc::{self, UnboundedSender},
     task::JoinSet,
+    time,
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -82,6 +83,10 @@ impl RelayConfig {
         Ok((served, credential))
     }
 }
+
+/// How long a link's TLSNotary session may take to deliver what it holds
+/// once the link ends.
+const SESSION_DRAIN: Duration = Duration::from_secs(5);
 
 /// Has `reviewer` decide `request` on `link`, and reports the decision
 /// before anything of the request is sent.
@@ -619,43 +624,49 @@ where
         events,
         reviews: Reviews::new(),
     };
-    let mut served = 0;
-    let mut first = Some(first);
-    // A failure to read the next order means Concurro ended the link.
-    while let Some(Ok(order)) = match first.take() {
-        Some(order) => Some(Ok(order)),
-        None => orders.next().await,
-    } {
-        served += match order {
-            Order::Job(job) => usize::from(
-                perform(
-                    &job,
-                    &mut handle,
-                    &mut orders,
-                    &mut notices,
-                    config,
-                    &reporter,
-                )
-                .await?,
-            ),
-            Order::Open { job, key } => {
-                carry(
-                    &job,
-                    &key,
-                    &mut handle,
-                    &mut orders,
-                    &mut notices,
-                    config,
-                    &reporter,
-                )
-                .await?
-            }
-            other => bail!("Concurro gave an order which needs an open connection: {other:?}"),
-        };
+    let served = async {
+        let mut served = 0;
+        let mut first = Some(first);
+        // A failure to read the next order means Concurro ended the link.
+        while let Some(Ok(order)) = match first.take() {
+            Some(order) => Some(Ok(order)),
+            None => orders.next().await,
+        } {
+            served += match order {
+                Order::Job(job) => usize::from(
+                    perform(
+                        &job,
+                        &mut handle,
+                        &mut orders,
+                        &mut notices,
+                        config,
+                        &reporter,
+                    )
+                    .await?,
+                ),
+                Order::Open { job, key } => {
+                    carry(
+                        &job,
+                        &key,
+                        &mut handle,
+                        &mut orders,
+                        &mut notices,
+                        config,
+                        &reporter,
+                    )
+                    .await?
+                }
+                other => bail!("Concurro gave an order which needs an open connection: {other:?}"),
+            };
+        }
+        Ok(served)
     }
+    .await;
+    // However the orders ended, proofs already made, such as one of a
+    // refused upgrade, still reach Concurro before the session ends.
     handle.close();
-    let _ = driving.join_next().await;
-    Ok(served)
+    let _ = time::timeout(SESSION_DRAIN, driving.join_next()).await;
+    served
 }
 
 #[cfg(test)]
