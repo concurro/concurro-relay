@@ -385,4 +385,27 @@ mod tests {
         let mut byte = [0];
         assert_eq!(relay.read(&mut byte).await.unwrap(), 0);
     }
+
+    /// A connection which replaced a waiting one for the same link outlives
+    /// the replaced one's limit, and still pairs.
+    #[tokio::test(start_paused = true)]
+    async fn a_replacement_half_keeps_its_own_limit() {
+        let (ready, mut accepted) = mpsc::unbounded_channel();
+        let acceptor = Acceptor::new(Arc::new(Empty), ready);
+        let (first, mut first_relay) = tokio::io::duplex(64);
+        let (second, _second_relay) = tokio::io::duplex(64);
+        let (proofs, _relay_proofs) = tokio::io::duplex(64);
+        acceptor.pair("relay-1".into(), 9, 1, Role::Control, first);
+        time::sleep(Duration::from_secs(20)).await;
+        acceptor.pair("relay-1".into(), 9, 1, Role::Control, second);
+        let mut byte = [0];
+        assert_eq!(first_relay.read(&mut byte).await.unwrap(), 0);
+        // Past the first connection's limit, within the second's.
+        time::sleep(Duration::from_secs(15)).await;
+        acceptor.pair("relay-1".into(), 9, 1, Role::Proofs, proofs);
+        let paired = accepted
+            .try_recv()
+            .expect("the replacement was closed early");
+        assert_eq!(paired.number, 9);
+    }
 }
