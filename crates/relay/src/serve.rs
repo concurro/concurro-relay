@@ -536,6 +536,13 @@ where
         provider_port,
     } = &first
     {
+        // Only a route the Sponsor registered for may spend its credential.
+        if !config.served.iter().any(|served| served.route == *route) {
+            let reason = format!("{} is not served", route.label());
+            wire::send(&mut control, &Notice::Refused(reason.clone())).await?;
+            let _ = events.send(Event::Refused { link, reason });
+            return Ok(0);
+        }
         let credential = config.credentials.load(*route)?;
         let account = credential
             .headers
@@ -650,12 +657,59 @@ where
 
 #[cfg(test)]
 mod tests {
-    use concurro_relay_protocol::{link::Order, meter::Counters, route::Route};
+    use concurro_relay_protocol::{
+        Roots,
+        link::{Notice, Order},
+        meter::Counters,
+        route::Route,
+        wire,
+    };
     use futures::stream;
     use tokio::sync::mpsc;
 
-    use super::{Reporter, Reviews};
-    use crate::{events::Event, review::Reviewer};
+    use super::{RelayConfig, Reporter, Reviews, serve_link};
+    use crate::{
+        credentials::{Credential, Source},
+        events::Event,
+        review::Reviewer,
+        routes::Served,
+    };
+
+    /// A native session for a route the relay is not registered for is
+    /// refused, and the link stays free.
+    #[tokio::test]
+    async fn an_unregistered_route_is_refused() {
+        let config = RelayConfig {
+            served: vec![Served::builtin(Route::ChatgptSubscription)],
+            credentials: Source::Fixed(Credential::token("sk-test")),
+            roots: Roots::Mozilla,
+            parents: Default::default(),
+            reviewer: Default::default(),
+        };
+        let (control, mut verifier) = tokio::io::duplex(1 << 16);
+        let (proofs, _proofs) = tokio::io::duplex(1 << 16);
+        let (events, mut reported) = mpsc::unbounded_channel();
+        let serving = tokio::spawn(async move {
+            serve_link(control, proofs, &config, 1, &Counters::default(), &events).await
+        });
+        wire::send(
+            &mut verifier,
+            &Order::NativeStart {
+                route: Route::ClaudeSubscription,
+                provider_host: "api.anthropic.com".into(),
+                provider_port: 443,
+            },
+        )
+        .await
+        .unwrap();
+        let answer: Notice = wire::recv(&mut verifier).await.unwrap();
+        assert!(matches!(answer, Notice::Refused(reason) if reason.contains("not served")));
+        assert_eq!(serving.await.unwrap().unwrap(), 0);
+        assert!(matches!(
+            reported.recv().await,
+            Some(Event::Refused { link: 1, .. })
+        ));
+    }
 
     /// A review waiting for the Sponsor ends with the link, and its question
     /// is withdrawn.
