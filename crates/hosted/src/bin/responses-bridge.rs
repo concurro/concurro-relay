@@ -3,6 +3,7 @@
 use std::{
     collections::VecDeque,
     net::SocketAddr,
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -43,18 +44,18 @@ struct Args {
     #[arg(long)]
     gateway: Uri,
     /// Seconds a CLI connection has to finish its WebSocket upgrade.
-    #[arg(long, default_value_t = 10)]
-    handshake_timeout_secs: u64,
+    #[arg(long, default_value = "10")]
+    handshake_timeout_secs: NonZeroU64,
     /// Turns a CLI may queue while one is in flight; one more closes its
     /// connection.
-    #[arg(long, default_value_t = 8)]
-    queued_turns: usize,
+    #[arg(long, default_value = "8")]
+    queued_turns: NonZeroUsize,
     /// Bytes a CLI's WebSocket message may have.
-    #[arg(long, default_value_t = 16 << 20)]
-    max_message_bytes: usize,
+    #[arg(long, default_value = "16777216")]
+    max_message_bytes: NonZeroUsize,
     /// CLI connections open at once; more are closed as they arrive.
-    #[arg(long, default_value_t = 1024)]
-    max_connections: usize,
+    #[arg(long, default_value = "1024")]
+    max_connections: NonZeroUsize,
 }
 
 /// How long a connection may take to upgrade, and how many turns it may
@@ -395,10 +396,10 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(args.listen).await?;
     let gateway = Arc::new(args.gateway);
     let limits = Limits {
-        handshake: Duration::from_secs(args.handshake_timeout_secs),
-        queued: args.queued_turns,
-        message_bytes: args.max_message_bytes,
-        connections: args.max_connections,
+        handshake: Duration::from_secs(args.handshake_timeout_secs.get()),
+        queued: args.queued_turns.get(),
+        message_bytes: args.max_message_bytes.get(),
+        connections: args.max_connections.get(),
     };
     println!("RESPONSES_BRIDGE_READY {}", listener.local_addr()?);
     serve(listener, gateway, limits).await
@@ -583,5 +584,24 @@ mod tests {
         cli.send(Message::Text(cancel.into())).await.unwrap();
         let ended = tokio::time::timeout(Duration::from_secs(5), serving).await;
         assert!(ended.unwrap().unwrap().is_err());
+    }
+
+    /// A limit of 0, which would stop the bridge serving, is refused.
+    #[test]
+    fn zero_limits_are_refused() {
+        use clap::Parser;
+
+        let required = ["responses-bridge", "--gateway=http://127.0.0.1:9/"];
+        assert!(super::Args::try_parse_from(required).is_ok());
+        for limit in [
+            "--handshake-timeout-secs=0",
+            "--queued-turns=0",
+            "--max-message-bytes=0",
+            "--max-connections=0",
+        ] {
+            let mut arguments = required.to_vec();
+            arguments.push(limit);
+            assert!(super::Args::try_parse_from(arguments).is_err(), "{limit}");
+        }
     }
 }

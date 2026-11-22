@@ -7,6 +7,7 @@ use std::{
     fs,
     future::Future,
     net::SocketAddr,
+    num::{NonZeroU64, NonZeroUsize},
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -79,21 +80,21 @@ struct Args {
     #[arg(long, default_value = "/etc/ssl/certs/ca-certificates.crt")]
     provider_ca: PathBuf,
     /// Seconds a relay connection has to finish its TLS handshake.
-    #[arg(long, default_value_t = 10)]
-    handshake_timeout_secs: u64,
+    #[arg(long, default_value = "10")]
+    handshake_timeout_secs: NonZeroU64,
     /// Seconds one connection of a relay link waits for the other.
-    #[arg(long, default_value_t = 30)]
-    half_link_timeout_secs: u64,
+    #[arg(long, default_value = "30")]
+    half_link_timeout_secs: NonZeroU64,
     /// Relay connections open at once before their relay is known; more are
     /// closed as they arrive.
-    #[arg(long, default_value_t = 1024)]
-    max_pending_connections: usize,
+    #[arg(long, default_value = "1024")]
+    max_pending_connections: NonZeroUsize,
     /// Unapproved relay registrations kept; a new one evicts the oldest.
-    #[arg(long, default_value_t = 1000)]
-    pending_registrations: usize,
+    #[arg(long, default_value = "1000")]
+    pending_registrations: NonZeroUsize,
     /// Bytes a relay's registered name may have.
-    #[arg(long, default_value_t = 256)]
-    relay_name_max_bytes: usize,
+    #[arg(long, default_value = "256")]
+    relay_name_max_bytes: NonZeroUsize,
     /// Unix start time; live telemetry before it is unknown.
     #[arg(skip)]
     started: f64,
@@ -743,8 +744,8 @@ async fn main() -> Result<()> {
         HostedRegistry::open(args.registry.clone(), Some(withdrawals))?
             .with_verification_uri(args.verification_url.clone())
             .with_limits(registry::Limits {
-                pending: args.pending_registrations,
-                name_bytes: args.relay_name_max_bytes,
+                pending: args.pending_registrations.get(),
+                name_bytes: args.relay_name_max_bytes.get(),
             }),
     );
     let pool = Pool::shared(clock);
@@ -755,9 +756,9 @@ async fn main() -> Result<()> {
         relay,
         tls(&args.certificate, &args.private_key)?,
         Arc::new(Acceptor::new(registry.clone(), ready).with_limits(Limits {
-            handshake: Duration::from_secs(args.handshake_timeout_secs),
-            half_link: Duration::from_secs(args.half_link_timeout_secs),
-            pending_connections: args.max_pending_connections,
+            handshake: Duration::from_secs(args.handshake_timeout_secs.get()),
+            half_link: Duration::from_secs(args.half_link_timeout_secs.get()),
+            pending_connections: args.max_pending_connections.get(),
         })),
     ));
     let accepted_pool = pool.clone();
@@ -789,6 +790,31 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    /// A limit of 0, which would stop the verifier serving, is refused.
+    #[test]
+    fn zero_limits_are_refused() {
+        let required = [
+            "concurro-relay-hosted",
+            "--certificate=c",
+            "--private-key=k",
+            "--registry=r",
+            "--service-token=t",
+            "--verification-url=u",
+        ];
+        assert!(Args::try_parse_from(required).is_ok());
+        for limit in [
+            "--handshake-timeout-secs=0",
+            "--half-link-timeout-secs=0",
+            "--max-pending-connections=0",
+            "--pending-registrations=0",
+            "--relay-name-max-bytes=0",
+        ] {
+            let mut arguments = required.to_vec();
+            arguments.push(limit);
+            assert!(Args::try_parse_from(arguments).is_err(), "{limit}");
+        }
+    }
+
     /// Arguments for in-process private-listener tests.
     fn fixture_args(started: f64) -> Arc<Args> {
         Arc::new(Args {
@@ -804,11 +830,11 @@ mod tests {
             codex_provider_host: String::new(),
             codex_provider_port: 0,
             provider_ca: PathBuf::new(),
-            handshake_timeout_secs: 10,
-            half_link_timeout_secs: 30,
-            max_pending_connections: 1024,
-            pending_registrations: 1000,
-            relay_name_max_bytes: 256,
+            handshake_timeout_secs: NonZeroU64::new(10).unwrap(),
+            half_link_timeout_secs: NonZeroU64::new(30).unwrap(),
+            max_pending_connections: NonZeroUsize::new(1024).unwrap(),
+            pending_registrations: NonZeroUsize::new(1000).unwrap(),
+            relay_name_max_bytes: NonZeroUsize::new(256).unwrap(),
             started,
         })
     }

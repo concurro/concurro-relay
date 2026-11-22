@@ -29,7 +29,8 @@ const PUBLIC_KEY_BYTES: usize = 32;
 /// name may be. Each may be set.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    /// Unapproved registrations kept; a new one evicts the oldest.
+    /// Unapproved registrations kept, at least one; a new one evicts the
+    /// oldest.
     pub pending: usize,
     /// Bytes of a relay's name.
     pub name_bytes: usize,
