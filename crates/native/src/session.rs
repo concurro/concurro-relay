@@ -212,13 +212,14 @@ async fn review_request<C: AsyncRead + AsyncWrite + Unpin>(
     }
     let mut line = serde_json::to_vec(&entry)?;
     line.push(b'\n');
-    tokio::fs::OpenOptions::new()
+    let mut record = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(runtime.output.join("sponsor-requests.jsonl"))
-        .await?
-        .write_all(&line)
         .await?;
+    record.write_all(&line).await?;
+    // Written through before Concurro hears the decision.
+    record.flush().await?;
     if verdict.accept {
         approvals.approved = Some(Approved {
             request: number,
