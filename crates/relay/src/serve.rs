@@ -42,6 +42,7 @@ use tlsn::{
 use tokio::{
     io::{self, AsyncRead, AsyncWrite},
     sync::mpsc::{self, UnboundedSender},
+    task::JoinSet,
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -607,7 +608,9 @@ where
         return Ok(1);
     }
     let (driver, mut handle) = Session::new(proofs.compat()).split();
-    let driver = tokio::spawn(driver);
+    // Held here, the session's driver ends with the link however it ends.
+    let mut driving = JoinSet::new();
+    driving.spawn(driver);
     let (orders, mut notices) = io::split(control);
     let mut orders = pin!(link::incoming::<_, Order>(orders));
     let reporter = Reporter {
@@ -651,7 +654,7 @@ where
         };
     }
     handle.close();
-    let _ = driver.await;
+    let _ = driving.join_next().await;
     Ok(served)
 }
 
