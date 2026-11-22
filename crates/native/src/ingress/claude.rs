@@ -33,30 +33,50 @@ impl Request {
     /// Answers this request with the Sponsor's rejection, `reason`, when no
     /// session was started for it.
     pub async fn refuse(mut self, reason: &str) -> Result<()> {
-        let body = rejection(reason)?;
-        self.stream
-            .write_all(
-                format!(
-                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                )
-                .as_bytes(),
-            )
-            .await?;
-        self.stream.write_all(&body).await?;
-        Ok(self.stream.shutdown().await?)
+        respond(&mut self.stream, "403 Forbidden", &rejection(reason)?).await
     }
 }
 
 /// The error body which tells a CLI the Sponsor rejected its request.
 pub fn rejection(reason: &str) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec(&serde_json::json!({"type": "error",
-        "error": {"type": "permission_error", "message": reason}}))?)
+    error_body("permission_error", reason)
 }
 
-/// Accept one complete local Claude POST, including its JSON body.
+/// An error body of the provider's `kind`, saying `message`.
+fn error_body(kind: &str, message: &str) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&serde_json::json!({"type": "error",
+        "error": {"type": kind, "message": message}}))?)
+}
+
+/// Answers on `stream` with `status` and the JSON error `body`, and closes it.
+async fn respond(stream: &mut TcpStream, status: &str, body: &[u8]) -> Result<()> {
+    stream
+        .write_all(
+            format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await?;
+    stream.write_all(body).await?;
+    Ok(stream.shutdown().await?)
+}
+
+/// Accept one complete local Claude POST, including its JSON body. A request
+/// the relay does not serve is answered with an error, and the next awaited.
 pub async fn accept(listener: &TcpListener) -> Result<Request> {
-    let (mut stream, _) = listener.accept().await?;
+    loop {
+        let (stream, _) = listener.accept().await?;
+        if let Some(request) = read(stream).await? {
+            return Ok(request);
+        }
+    }
+}
+
+/// Reads one local Claude POST from `stream`, or answers it with an error
+/// when its path or headers are not served.
+async fn read(mut stream: TcpStream) -> Result<Option<Request>> {
     let mut head = Vec::new();
     while !head.ends_with(b"\r\n\r\n") {
         let mut byte = [0];
@@ -110,12 +130,17 @@ pub async fn accept(listener: &TcpListener) -> Result<Request> {
         path: path.as_bytes().to_vec(),
         headers,
     };
-    template.public_headers()?;
-    Ok(Request {
+    if let Err(error) = template.public_headers() {
+        // The CLI may have gone; the session carries on either way.
+        let body = error_body("invalid_request_error", &format!("{error:#}"))?;
+        let _ = respond(&mut stream, "400 Bad Request", &body).await;
+        return Ok(None);
+    }
+    Ok(Some(Request {
         stream,
         template,
         body,
-    })
+    }))
 }
 
 /// Forward each authenticated response fragment on the local HTTP connection.
@@ -313,5 +338,31 @@ mod tests {
                 .unwrap()
                 .ends_with("off topic")
         );
+    }
+
+    /// A request the relay does not serve is answered with an error, and the
+    /// next request, as Claude Code sends it, is accepted.
+    #[tokio::test]
+    async fn an_unserved_request_is_answered_and_the_next_accepted() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepting = tokio::spawn(async move { accept(&listener).await.unwrap() });
+        let mut unserved = TcpStream::connect(address).await.unwrap();
+        unserved.write_all(b"POST /v1/messages/count_tokens?beta=true HTTP/1.1\r\nAuthorization: Bearer local-relay-placeholder\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}").await.unwrap();
+        let mut answer = String::new();
+        unserved.read_to_string(&mut answer).await.unwrap();
+        assert!(
+            answer.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "{answer}"
+        );
+        assert!(answer.contains("unsupported Claude request path"));
+        let mut served = TcpStream::connect(address).await.unwrap();
+        served.write_all(b"POST /v1/messages?beta=true HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer local-relay-placeholder\r\nContent-Type: application/json\r\nAnthropic-Version: 2023-06-01\r\nAnthropic-Beta: claude-code-20250219,oauth-2025-04-20\r\nX-App: cli\r\nUser-Agent: claude-cli/2.0.0 (external, cli)\r\nConnection: keep-alive\r\nAccept-Encoding: gzip\r\nContent-Length: 2\r\n\r\n{}").await.unwrap();
+        let request = accepting.await.unwrap();
+        assert_eq!(request.template.path, b"/v1/messages?beta=true");
+        assert!(request.template.headers.iter().all(|(name, _)| !matches!(
+            name.as_slice(),
+            b"host" | b"connection" | b"accept-encoding"
+        )));
     }
 }
