@@ -1,16 +1,16 @@
 //! Durable owner-approved relay identities for the hosted verifier.
 
 use std::{
-    collections::{HashMap, HashSet},
-    fs::{self, OpenOptions},
-    io::Write,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    collections::{BTreeSet, HashMap, HashSet},
+    fs,
+    path::PathBuf,
     sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, ensure};
+use concurro_relay_hosted_api::dispatch::{CHATGPT_SUBSCRIPTION, CLAUDE_SUBSCRIPTION};
+use concurro_relay_hosted_api::owner;
 use concurro_relay_protocol::{
     identity,
     link::{DeviceCode, Registered, Registration},
@@ -19,6 +19,8 @@ use concurro_relay_protocol::{
 use concurro_relay_verifier::accept::Registry;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
+
+use crate::storage;
 
 const CODE_LIFETIME: Duration = Duration::from_secs(600);
 
@@ -46,7 +48,7 @@ impl Default for Limits {
 }
 const CODE_LETTERS: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 
-/// Exact owner and immutable Vault record approved for one relay key.
+/// Exact owner and immutable credential record approved for one relay key.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Binding {
     /// Owner's verified GitHub user ID.
@@ -55,11 +57,11 @@ pub struct Binding {
     pub login: String,
     /// Approved provider route.
     pub route: String,
-    /// Ordered Vault entry that owns this key.
+    /// Ordered credential entry that owns this key.
     pub entry_id: String,
     /// Immutable record identity for this version.
     pub record_id: String,
-    /// Vault credential version approved for this key.
+    /// Credential version approved for this key.
     pub version: u64,
 }
 
@@ -110,11 +112,14 @@ struct Pending {
 struct State {
     /// Unexpired device-code registrations.
     pending: HashMap<String, Pending>,
-    /// Approved public keys and exact Vault bindings.
+    /// Approved public keys and exact credential bindings.
     approved: HashMap<String, (Vec<u8>, Bindings)>,
     /// Locally quarantined keys whose durable withdrawal needs a retry.
     #[serde(default)]
     blocked: HashSet<String>,
+    /// Approved relay IDs indexed by owner; rebuilt when a registry is opened.
+    #[serde(skip)]
+    by_owner: HashMap<u64, BTreeSet<String>>,
 }
 
 /// What of a [`State`] is written: everything but unapproved registrations,
@@ -141,7 +146,7 @@ impl<'a> From<&'a State> for Persisted<'a> {
     }
 }
 
-/// Registry whose approval is driven only by the owner-authenticated Vault.
+/// Registry whose approvals are driven by the private owner API.
 pub struct HostedRegistry {
     file: PathBuf,
     state: Mutex<State>,
@@ -186,6 +191,15 @@ impl HostedRegistry {
                 state.blocked.remove(relay);
             }
         }
+        for (relay, (_, bindings)) in &state.approved {
+            if let Some(binding) = bindings.iter().next() {
+                state
+                    .by_owner
+                    .entry(binding.user_id)
+                    .or_default()
+                    .insert(relay.clone());
+            }
+        }
         let pending: Vec<_> = state.blocked.iter().cloned().collect();
         let registry = Self {
             file,
@@ -215,84 +229,109 @@ impl HostedRegistry {
         self
     }
 
-    /// Approve a displayed user code for one exact Claude Vault record.
-    pub fn approve(&self, code: &str, binding: Binding) -> Result<String> {
-        self.approve_set(code, Bindings::One(binding))
-    }
-
     /// Approve every registered route as one indivisible owner decision.
-    pub fn approve_routes(&self, code: &str, mut bindings: Vec<Binding>) -> Result<String> {
-        bindings.sort_by(|left, right| left.route.cmp(&right.route));
-        self.approve_set(code, Bindings::Routes(bindings))
+    pub fn approve(&self, approval: owner::Approval) -> Result<String, ApprovalError> {
+        let owner::Approval {
+            code,
+            user,
+            bindings,
+        } = approval;
+        let bindings = bindings
+            .into_iter()
+            .map(|binding| Binding {
+                user_id: user.id,
+                login: user.login.clone(),
+                route: binding.route,
+                entry_id: binding.entry_id,
+                record_id: binding.record_id,
+                version: binding.version,
+            })
+            .collect();
+        self.approve_routes(&code, bindings)
     }
 
     /// Persist a complete binding set before the Sponsor can poll successfully.
-    fn approve_set(&self, code: &str, bindings: Bindings) -> Result<String> {
-        let selected: Vec<_> = bindings.iter().collect();
-        ensure!(
-            !selected.is_empty()
-                && selected.len() <= Route::ALL.len()
-                && selected.iter().all(|binding| binding.user_id > 0
-                    && binding.version > 0
-                    && !binding.login.is_empty()
-                    && binding.entry_id.len() == 32
-                    && binding.record_id.len() == 64)
-                && selected
-                    .iter()
-                    .all(|binding| binding.user_id == selected[0].user_id
-                        && binding.login == selected[0].login),
-            "invalid relay binding"
-        );
-        let routes: HashSet<_> = selected
+    fn approve_routes(
+        &self,
+        code: &str,
+        mut bindings: Vec<Binding>,
+    ) -> Result<String, ApprovalError> {
+        let Some(first) = bindings.first() else {
+            return Err(ApprovalError::Invalid);
+        };
+        let user_id = first.user_id;
+        if user_id == 0
+            || first.login.is_empty()
+            || bindings.len() > Route::ALL.len()
+            || bindings.iter().any(|binding| {
+                binding.user_id != user_id
+                    || binding.login != first.login
+                    || binding.version == 0
+                    || binding.entry_id.len() != 32
+                    || binding.record_id.len() != 64
+            })
+        {
+            return Err(ApprovalError::Invalid);
+        }
+        let routes: HashSet<_> = bindings
             .iter()
             .map(|binding| binding.route.as_str())
             .collect();
-        ensure!(
-            routes.len() == selected.len(),
-            "duplicate relay route binding"
-        );
+        if routes.len() != bindings.len() {
+            return Err(ApprovalError::Invalid);
+        }
         let mut current = self.state.lock().expect("registry lock is not poisoned");
-        let mut state = current.clone();
-        let (registration, existing) = state
+        let (device_code, pending) = current
             .pending
-            .values()
-            .find(|pending| {
+            .iter()
+            .find(|(_, pending)| {
                 pending.user_code == code && (pending.approved.is_some() || pending.expires > now())
             })
-            .map(|pending| (pending.registration.clone(), pending.approved.clone()))
-            .context("unknown or expired relay code")?;
-        let registered: HashSet<_> = registration
+            .ok_or(ApprovalError::Unknown)?;
+        let registered: HashSet<_> = pending
+            .registration
             .routes
             .iter()
             .copied()
             .map(vault_route)
             .collect();
-        ensure!(
-            registered == routes && registered.len() == registration.routes.len(),
-            "relay binding routes differ from registration"
-        );
-        if let Some(relay) = existing {
-            ensure!(
-                !state.blocked.contains(&relay)
-                    && state
-                        .approved
-                        .get(&relay)
-                        .is_some_and(|(_, prior)| *prior == bindings),
-                "relay code is already bound"
-            );
-            return Ok(relay);
+        if registered != routes {
+            return Err(ApprovalError::Conflict);
+        }
+        if let Some(relay) = &pending.approved {
+            if !current.blocked.contains(relay)
+                && current.approved.get(relay).is_some_and(|(_, prior)| {
+                    prior.iter().count() == bindings.len()
+                        && bindings
+                            .iter()
+                            .all(|binding| prior.get(&binding.route) == Some(binding))
+                })
+            {
+                return Ok(relay.clone());
+            }
+            return Err(ApprovalError::Conflict);
         }
         let relay = format!("relay-{}", hex::encode(identity::random::<16>()));
+        let mut state = current.clone();
+        bindings.sort_by(|left, right| left.route.cmp(&right.route));
+        state.approved.insert(
+            relay.clone(),
+            (
+                pending.registration.public_key.clone(),
+                Bindings::Routes(bindings),
+            ),
+        );
         state
-            .approved
-            .insert(relay.clone(), (registration.public_key, bindings));
+            .by_owner
+            .entry(user_id)
+            .or_default()
+            .insert(relay.clone());
         state
             .pending
-            .values_mut()
-            .find(|pending| pending.user_code == code)
+            .get_mut(device_code)
             .expect("pending registration was just found")
             .approved = Some(relay.clone());
-        self.keep(&state)?;
+        self.keep(&state).map_err(ApprovalError::Storage)?;
         *current = state;
         Ok(relay)
     }
@@ -307,7 +346,7 @@ impl HostedRegistry {
             .and_then(|(_, bindings)| bindings.get(route).cloned())
     }
 
-    /// The device name and exact Vault routes of an unapproved, unexpired code.
+    /// The device name and exact subscription routes of an unapproved, unexpired code.
     pub fn pending(&self, code: &str) -> Option<PendingCode> {
         let state = self.state.lock().expect("registry lock is not poisoned");
         state
@@ -329,46 +368,54 @@ impl HostedRegistry {
             })
     }
 
-    /// The owner every route binding of an approved, unwithdrawn relay belongs to.
-    pub fn owner(&self, relay: &str) -> Option<u64> {
+    /// Registered relays for this owner, excluding withdrawals and quarantined relays.
+    pub fn relays(&self, user_id: u64) -> Vec<String> {
         let state = self.state.lock().expect("registry lock is not poisoned");
         state
-            .approved
-            .get(relay)
-            .filter(|_| !state.blocked.contains(relay))
-            .and_then(|(_, bindings)| bindings.iter().next().map(|binding| binding.user_id))
+            .by_owner
+            .get(&user_id)
+            .into_iter()
+            .flatten()
+            .filter(|relay| !state.blocked.contains(*relay))
+            .cloned()
+            .collect()
     }
 
     /// Atomically replace the state file with what of `state` is kept.
     fn keep(&self, state: &State) -> Result<()> {
-        let parent = self.file.parent().unwrap_or(Path::new("."));
-        fs::create_dir_all(parent)?;
-        let temp = self.file.with_extension("tmp");
-        fs::write(&temp, serde_json::to_vec(&Persisted::from(state))?)?;
-        fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))?;
-        fs::File::open(&temp)?.sync_all()?;
-        fs::rename(temp, &self.file)?;
-        fs::File::open(parent)?.sync_all()?;
-        Ok(())
+        storage::replace(&self.file, &serde_json::to_vec(&Persisted::from(state))?)
     }
 }
 
+/// Why a Sponsor approval could not be completed.
+#[derive(Debug)]
+pub enum ApprovalError {
+    /// Invalid owner or binding input.
+    Invalid,
+    /// No known registration with this code.
+    Unknown,
+    /// Routes or bindings conflict with the existing registration.
+    Conflict,
+    /// Registry storage could not commit the approval.
+    Storage(anyhow::Error),
+}
+
 /// What an owner sees of a pending code before approving it.
-#[derive(Debug, Eq, PartialEq, Serialize)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct PendingCode {
     /// Name the Sponsor registered, usually its host name.
     pub name: String,
-    /// Exact Vault routes the approval must bind, in registration order.
+    /// Exact subscription routes the approval must bind, in registration order.
     pub routes: Vec<&'static str>,
     /// Unix expiry of the code.
     pub expires: u64,
 }
 
-/// A route's name in Vault records.
+/// A route's name in credential records.
 fn vault_route(route: Route) -> &'static str {
     match route {
-        Route::ClaudeSubscription => "claude-subscription",
-        Route::ChatgptSubscription => "chatgpt-subscription",
+        Route::ClaudeSubscription => CLAUDE_SUBSCRIPTION,
+        Route::ChatgptSubscription => CHATGPT_SUBSCRIPTION,
     }
 }
 
@@ -503,18 +550,10 @@ impl Registry for HostedRegistry {
             let _ = withdrawals.send(relay.to_owned());
         }
         let journal = self.file.with_extension("withdrawn");
-        let result = (|| -> Result<()> {
+        let result = {
             let _guard = self.journal.lock().expect("journal lock is not poisoned");
-            let mut log = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&journal)?;
-            fs::set_permissions(&journal, fs::Permissions::from_mode(0o600))?;
-            log.write_all(format!("{relay}\n").as_bytes())?;
-            log.sync_all()?;
-            fs::File::open(journal.parent().unwrap_or(Path::new(".")))?.sync_all()?;
-            Ok(())
-        })();
+            storage::append(&journal, format!("{relay}\n").as_bytes())
+        };
         if let Err(error) = result {
             return Err(format!(
                 "relay withdrawal is pending: {error:#}; registry quarantine: {}",
@@ -522,7 +561,15 @@ impl Registry for HostedRegistry {
             ));
         }
         let mut state = self.state.lock().expect("registry lock is not poisoned");
-        state.approved.remove(relay);
+        if let Some((_, bindings)) = state.approved.remove(relay)
+            && let Some(binding) = bindings.iter().next()
+            && let Some(relays) = state.by_owner.get_mut(&binding.user_id)
+        {
+            relays.remove(relay);
+            if relays.is_empty() {
+                state.by_owner.remove(&binding.user_id);
+            }
+        }
         state
             .pending
             .retain(|_, pending| pending.approved.as_deref() != Some(relay));
@@ -536,7 +583,7 @@ impl Registry for HostedRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{slice, sync::Arc};
 
     use tokio::sync::mpsc;
 
@@ -578,7 +625,11 @@ mod tests {
             record_id: "d".repeat(64),
             ..claude.clone()
         };
-        assert!(registry.approve(&code.user_code, claude.clone()).is_err());
+        assert!(
+            registry
+                .approve_routes(&code.user_code, vec![claude.clone()])
+                .is_err()
+        );
         assert!(registry.poll(&code.device_code).unwrap().is_none());
         let pending = registry.pending(&code.user_code).unwrap();
         assert_eq!(
@@ -602,8 +653,8 @@ mod tests {
         );
         // An approved code is no longer offered for lookup; the owner is exact.
         assert_eq!(registry.pending(&code.user_code), None);
-        assert_eq!(registry.owner(&relay), Some(7));
-        assert_eq!(registry.owner("relay-unknown"), None);
+        assert_eq!(registry.relays(7), slice::from_ref(&relay));
+        assert!(registry.relays(8).is_empty());
         assert_eq!(
             registry
                 .approve_routes(&code.user_code, vec![claude.clone(), codex.clone()])
@@ -659,12 +710,18 @@ mod tests {
             record_id: "b".repeat(64),
             version: 3,
         };
-        let blocked = path.with_extension("tmp");
+        let blocked = storage::with_suffix(&path, ".tmp");
         fs::create_dir(&blocked).unwrap();
-        assert!(registry.approve(&code.user_code, binding.clone()).is_err());
+        assert!(
+            registry
+                .approve_routes(&code.user_code, vec![binding.clone()])
+                .is_err()
+        );
         assert!(registry.poll(&code.device_code).unwrap().is_none());
         fs::remove_dir(&blocked).unwrap();
-        let relay = registry.approve(&code.user_code, binding.clone()).unwrap();
+        let relay = registry
+            .approve_routes(&code.user_code, vec![binding.clone()])
+            .unwrap();
         assert_eq!(
             registry.binding_for(&relay, "claude-subscription"),
             Some(binding.clone())
@@ -676,6 +733,8 @@ mod tests {
         {
             let mut state = registry.state.lock().unwrap();
             state.pending.get_mut(&code.device_code).unwrap().expires = now() - 1;
+            // Previous releases stored a single route as one binding rather than an array.
+            state.approved.get_mut(&relay).unwrap().1 = Bindings::One(binding.clone());
             registry.keep(&state).unwrap();
         }
         drop(registry);
@@ -685,7 +744,12 @@ mod tests {
             reopened.binding_for(&relay, "claude-subscription"),
             Some(binding.clone())
         );
-        assert_eq!(reopened.approve(&code.user_code, binding).unwrap(), relay);
+        assert_eq!(
+            reopened
+                .approve_routes(&code.user_code, vec![binding])
+                .unwrap(),
+            relay
+        );
         let expired = reopened.register(registration.clone()).unwrap();
         {
             let mut state = reopened.state.lock().unwrap();
@@ -695,25 +759,25 @@ mod tests {
         assert_eq!(reopened.pending(&expired.user_code), None);
         assert!(
             reopened
-                .approve(
+                .approve_routes(
                     &expired.user_code,
-                    Binding {
+                    vec![Binding {
                         user_id: 7,
                         login: "owner".into(),
                         route: "claude-subscription".into(),
                         entry_id: "a".repeat(32),
                         record_id: "b".repeat(64),
                         version: 4,
-                    }
+                    }],
                 )
                 .is_err()
         );
         let journal = path.with_extension("withdrawn");
         fs::create_dir(&journal).unwrap();
-        assert_eq!(reopened.owner(&relay), Some(7));
+        assert_eq!(reopened.relays(7), slice::from_ref(&relay));
         assert!(reopened.deregister(&relay).is_err());
         assert_eq!(received.try_recv().unwrap(), relay);
-        assert_eq!(reopened.owner(&relay), None);
+        assert!(reopened.relays(7).is_empty());
         assert_eq!(reopened.binding_for(&relay, "claude-subscription"), None);
         assert!(reopened.public_key(&relay).is_some());
         assert!(HostedRegistry::open(path.clone(), None).is_err());
@@ -746,21 +810,21 @@ mod tests {
                 .unwrap();
             relays.push(
                 registry
-                    .approve(
+                    .approve_routes(
                         &code.user_code,
-                        Binding {
+                        vec![Binding {
                             user_id: 7,
                             login: "owner".into(),
                             route: "claude-subscription".into(),
                             entry_id: "a".repeat(32),
                             record_id: format!("{version:064x}"),
                             version,
-                        },
+                        }],
                     )
                     .unwrap(),
             );
         }
-        let blocked = path.with_extension("tmp");
+        let blocked = storage::with_suffix(&path, ".tmp");
         fs::create_dir(&blocked).unwrap();
         let workers: Vec<_> = relays
             .iter()

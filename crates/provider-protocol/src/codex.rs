@@ -454,6 +454,14 @@ pub fn validate_request_tail(
     Ok(())
 }
 
+/// Usage reported on a terminal provider response, including incomplete and failed ones.
+pub fn terminal_usage(event: &Value) -> Option<&Value> {
+    event["type"]
+        .as_str()
+        .filter(|kind| ws::FINAL_EVENTS.contains(kind))
+        .and_then(|_| event["response"].get("usage"))
+}
+
 /// A response turn's events and associated usage.
 pub struct Turn {
     /// JSON events in the provider's observed order.
@@ -556,7 +564,7 @@ impl Responses {
                             == asked.previous.as_deref(),
                         "completed response parent differs"
                     );
-                    self.usage = event["response"].get("usage").cloned();
+                    self.usage = terminal_usage(&event).cloned();
                 }
                 return Ok(Some(Turn {
                     events: std::mem::take(&mut self.events),

@@ -1,0 +1,15 @@
+[package]
+name = "concurro-relay-hosted-api"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Private API contracts for the Concurro hosted relay verifier"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+percent-encoding.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true

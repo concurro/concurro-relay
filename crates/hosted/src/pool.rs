@@ -1,43 +1,31 @@
 //! Authenticated relay links: idle links parked under a liveness watch, links
-//! leased to one task turn, and the owner telemetry derived from both.
+//! leased to one signed session, and the owner telemetry derived from both.
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
+use concurro_relay_hosted_api::owner::{ActiveSlot, Relay, Task};
 use concurro_relay_verifier::accept::Accepted;
-use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     sync::{Mutex, mpsc, oneshot, watch},
     task::AbortHandle,
 };
 
-use crate::registry::Binding;
+use crate::{registry::Binding, timestamp};
 
 /// A relay's stable link slot across reconnects.
 pub type Slot = (String, u32);
-/// Exchange session and turn that own a lease.
-pub type Turn = (String, String);
-
-/// Task identity Exchange supplies with a dispatch; shown only to the relay's owner.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub struct Task {
-    /// Task repository as `owner/repo`.
-    pub repository: String,
-    /// Task issue number.
-    pub issue: u64,
-}
-
 /// One task's exclusive relay link and retained native provider session.
 #[derive(Clone)]
 pub struct Lease {
+    /// Signed claim authorizing the lease.
+    pub claim_id: String,
     /// Relay whose link is leased.
     pub relay: String,
     /// Relay and slot of the leased link; at most one lease holds a slot.
     pub slot: Slot,
     /// Random number of the leased link, distinguishing it from later links on the slot.
     pub number: u64,
-    /// Admitted turn deadline, in Unix seconds.
-    pub deadline: f64,
     /// When the lease took its link.
     pub started: f64,
     /// Task the turn belongs to, when Exchange supplied it.
@@ -59,44 +47,12 @@ struct Parked<S> {
 /// Unassigned authenticated links, task-bound leases and per-relay liveness.
 pub struct Pool<S> {
     ready: HashMap<Slot, Parked<S>>,
-    /// Leases by the turn that holds them.
-    pub leases: HashMap<Turn, Lease>,
-    /// Released turns and the deadline until which they cannot lease again.
-    pub cancelled: HashMap<Turn, f64>,
+    /// Leases by the signed session that holds them.
+    pub leases: HashMap<String, Lease>,
     /// When each relay last had a live link, updated as links come and go.
     seen: HashMap<String, f64>,
     /// Watchers report links that ended while idle.
     gone: mpsc::UnboundedSender<(Slot, u64)>,
-}
-
-/// One relay's live capacity and activity as the owner sees it.
-#[derive(Debug, PartialEq, Serialize)]
-pub struct RelayStatus {
-    /// Relay identity.
-    pub relay: String,
-    /// Idle authenticated links; capacity is shared by every route of the relay.
-    pub idle: usize,
-    /// Leased links, oldest first.
-    pub active: Vec<Active>,
-    /// Now while a link is live; otherwise when the last one ended, if seen since start.
-    pub last_seen: Option<f64>,
-}
-
-/// One leased link: which approval it serves, since when, and for which task.
-#[derive(Debug, PartialEq, Serialize)]
-pub struct Active {
-    /// Link slot; distinct among the relay's leases at any time.
-    pub slot: u32,
-    /// Route of the approval served.
-    pub route: String,
-    /// Vault entry of that approval.
-    pub entry_id: String,
-    /// Vault version of that approval.
-    pub version: u64,
-    /// When the lease took its link, in Unix seconds.
-    pub since: f64,
-    /// Task the lease serves, when known.
-    pub task: Option<Task>,
 }
 
 impl<S: AsyncRead + Unpin + Send + 'static> Pool<S> {
@@ -106,7 +62,6 @@ impl<S: AsyncRead + Unpin + Send + 'static> Pool<S> {
         let pool = Arc::new(Mutex::new(Self {
             ready: HashMap::new(),
             leases: HashMap::new(),
-            cancelled: HashMap::new(),
             seen: HashMap::new(),
             gone,
         }));
@@ -192,26 +147,27 @@ impl<S: AsyncRead + Unpin + Send + 'static> Pool<S> {
     }
 
     /// Remove a finished lease if it is still the one on record.
-    pub fn finish(&mut self, turn: &Turn, number: u64, now: f64) {
-        if let Some(lease) = self.leases.get(turn).filter(|lease| lease.number == number) {
+    pub fn finish(&mut self, session: &str, number: u64, now: f64) {
+        if let Some(lease) = self
+            .leases
+            .get(session)
+            .filter(|lease| lease.number == number)
+        {
             self.seen.insert(lease.relay.clone(), now);
-            self.leases.remove(turn);
+            self.leases.remove(session);
         }
     }
 
-    /// Retire a task before or during native startup and abort its current worker.
-    pub fn release(&mut self, turn: Turn, deadline: f64, now: f64) {
-        self.cancelled.retain(|_, expiry| *expiry > now);
-        if deadline > now {
-            self.cancelled
-                .entry(turn.clone())
-                .and_modify(|expiry| *expiry = expiry.max(deadline))
-                .or_insert(deadline);
-        }
-        if let Some(lease) = self.leases.remove(&turn) {
+    /// Stop the native worker for each active lease of a durably revoked claim.
+    pub fn release(&mut self, claim_id: &str, now: f64) {
+        self.leases.retain(|_, lease| {
+            if lease.claim_id != claim_id {
+                return true;
+            }
             lease.abort.abort();
-            self.seen.insert(lease.relay, now);
-        }
+            self.seen.insert(lease.relay.clone(), now);
+            false
+        });
     }
 
     /// Drop every idle link and lease of a withdrawn relay.
@@ -233,35 +189,35 @@ impl<S: AsyncRead + Unpin + Send + 'static> Pool<S> {
     }
 
     /// Live capacity and activity of `relay`, as of `now`.
-    pub fn status(&self, relay: &str, now: f64) -> RelayStatus {
+    pub fn status(&self, relay: &str, now: f64) -> Relay {
         let idle = self.ready.keys().filter(|slot| slot.0 == relay).count();
         let mut active: Vec<_> = self
             .leases
             .values()
             .filter(|lease| lease.relay == relay)
-            .map(|lease| Active {
+            .map(|lease| ActiveSlot {
                 slot: lease.slot.1,
                 route: lease.binding.route.clone(),
                 entry_id: lease.binding.entry_id.clone(),
                 version: lease.binding.version,
-                since: lease.started,
+                since: timestamp(lease.started),
                 task: lease.task.clone(),
             })
             .collect();
         active.sort_by(|left, right| {
             left.since
-                .total_cmp(&right.since)
+                .cmp(&right.since)
                 .then(left.slot.cmp(&right.slot))
         });
         let live = idle > 0 || !active.is_empty();
-        RelayStatus {
-            relay: relay.to_owned(),
+        Relay {
+            relay_id: relay.to_owned(),
             idle,
             active,
             last_seen: if live {
-                Some(now)
+                Some(timestamp(now))
             } else {
-                self.seen.get(relay).copied()
+                self.seen.get(relay).copied().map(timestamp)
             },
         }
     }
@@ -297,10 +253,10 @@ mod tests {
 
     fn lease(relay: &str, slot: u32, route: &str, task: Option<Task>) -> Lease {
         Lease {
+            claim_id: format!("claim-{slot}"),
             relay: relay.into(),
             slot: (relay.into(), slot),
             number: u64::from(slot),
-            deadline: NOW + 60.0,
             started: NOW - f64::from(slot),
             task,
             binding: Binding {
@@ -317,11 +273,7 @@ mod tests {
     }
 
     /// Wait until the sweeper has applied what the watchers reported.
-    async fn settled(
-        pool: &Arc<Mutex<Pool<DuplexStream>>>,
-        relay: &str,
-        idle: usize,
-    ) -> RelayStatus {
+    async fn settled(pool: &Arc<Mutex<Pool<DuplexStream>>>, relay: &str, idle: usize) -> Relay {
         for _ in 0..100 {
             let status = pool.lock().await.status(relay, NOW + 5.0);
             if status.idle == idle {
@@ -343,15 +295,18 @@ mod tests {
         pool.lock().await.park(first, NOW - 30.0);
         pool.lock().await.park(second, NOW - 30.0);
         let live = pool.lock().await.status("relay-a", NOW + 5.0);
-        assert_eq!((live.idle, live.last_seen), (2, Some(NOW + 5.0)));
+        assert_eq!((live.idle, live.last_seen), (2, Some(timestamp(NOW + 5.0))));
         drop(relay_first);
         let status = settled(&pool, "relay-a", 1).await;
-        assert_eq!(status.last_seen, Some(NOW + 5.0));
+        assert_eq!(status.last_seen, Some(timestamp(NOW + 5.0)));
         let mut pool = pool.lock().await;
         assert!(pool.take(&("relay-a".into(), 1), NOW).await.is_none());
         pool.withdraw("relay-a", NOW);
         let withdrawn = pool.status("relay-a", NOW + 5.0);
-        assert_eq!((withdrawn.idle, withdrawn.last_seen), (0, Some(NOW)));
+        assert_eq!(
+            (withdrawn.idle, withdrawn.last_seen),
+            (0, Some(timestamp(NOW)))
+        );
     }
 
     /// A reconnected slot replaces its old link, whose late end does not
@@ -392,20 +347,20 @@ mod tests {
             issue: 4,
         };
         pool.leases.insert(
-            ("s1".into(), "t1".into()),
+            "s1".into(),
             lease("relay-a", 1, "claude-subscription", Some(task.clone())),
         );
         pool.leases.insert(
-            ("s2".into(), "t2".into()),
+            "s2".into(),
             lease("relay-a", 2, "chatgpt-subscription", None),
         );
         pool.leases.insert(
-            ("s3".into(), "t3".into()),
+            "s3".into(),
             lease("relay-b", 3, "claude-subscription", None),
         );
         let status = pool.status("relay-a", NOW);
         assert_eq!(status.idle, 0);
-        assert_eq!(status.last_seen, Some(NOW));
+        assert_eq!(status.last_seen, Some(timestamp(NOW)));
         assert_eq!(
             status
                 .active
@@ -420,7 +375,7 @@ mod tests {
         // Two sessions of one approval starting in the same second stay distinct.
         let mut same = lease("relay-a", 4, "claude-subscription", None);
         same.started = NOW - 1.0;
-        pool.leases.insert(("s4".into(), "t4".into()), same);
+        pool.leases.insert("s4".into(), same);
         let concurrent = pool.status("relay-a", NOW);
         let slots: Vec<_> = concurrent
             .active
@@ -431,7 +386,9 @@ mod tests {
         assert_eq!(
             slots
                 .iter()
-                .filter(|(entry, since, _)| *entry == "a".repeat(32) && *since == NOW - 1.0)
+                .filter(
+                    |(entry, since, _)| *entry == "a".repeat(32) && *since == timestamp(NOW - 1.0)
+                )
                 .count(),
             2
         );
@@ -443,15 +400,18 @@ mod tests {
                 .len(),
             3
         );
-        pool.leases.remove(&("s4".into(), "t4".into()));
-        pool.finish(&("s1".into(), "t1".into()), 99, NOW);
+        pool.leases.remove("s4");
+        pool.finish("s1", 99, NOW);
         assert_eq!(pool.status("relay-a", NOW).active.len(), 2);
-        pool.finish(&("s1".into(), "t1".into()), 1, NOW - 1.0);
+        pool.finish("s1", 1, NOW - 1.0);
         let finished = pool.status("relay-a", NOW);
         assert_eq!(finished.active.len(), 1);
-        pool.release(("s2".into(), "t2".into()), NOW + 60.0, NOW + 2.0);
+        pool.release("claim-2", NOW + 2.0);
         let ended = pool.status("relay-a", NOW + 9.0);
-        assert_eq!((ended.active.len(), ended.last_seen), (0, Some(NOW + 2.0)));
+        assert_eq!(
+            (ended.active.len(), ended.last_seen),
+            (0, Some(timestamp(NOW + 2.0)))
+        );
         assert_eq!(pool.status("relay-b", NOW).active.len(), 1);
     }
 }

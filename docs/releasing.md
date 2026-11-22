@@ -71,6 +71,25 @@ gh workflow run release.yml -f tag=dry-run                  # build and test; pu
 gh workflow run release.yml --ref v0.1.0 -f tag=v0.1.0      # release an existing tag
 ```
 
+## Protocol 5 release
+
+1. In the release PR, set the workspace version to `0.2.0`, refresh the lockfile
+   with `cargo update --workspace`, and include the protocol 5 client requirement
+   in the changelog. The existing release-plz and dist workflows tag and build
+   the two Sponsor bundles when that PR merges.
+2. Install Sponsor 0.2.0 on any device that will pair or serve work. Protocol 4
+   clients receive the existing update message.
+3. Resolve the `v0.2.0` tag to its full commit SHA. Check CI and the published
+   verifier image for that SHA and use it as the deployment pin. Use the same
+   Git tag for the `concurro-relay-hosted-api` dependency in Concurro.
+4. Provision the three distinct [verifier bearers and exchange public keys](../README.md#hosted-verifier).
+   Mount the existing registry and the claim journal on durable storage. Activate
+   sponsorship with the Accounts owner API, Gateway signed dispatch and Exchange
+   claim issuer and release caller in place. The previous Vault/Exchange HTTP
+   endpoints and shared verifier token were removed.
+5. Verify pairing and a subscription dispatch with a protocol 5 Sponsor after
+   the new callers are connected.
+
 ## The Sponsor bundle and installing it
 
 | Target | Archive | Runs on |

@@ -4,6 +4,8 @@ User-facing changes to the Sponsor relay per release.
 
 ## [Unreleased]
 
+- Sponsor uses relay protocol 5. Upgrade Sponsor and the hosted verifier together.
+
 ## [0.1.1](https://github.com/concurro/concurro-relay/compare/v0.1.0...v0.1.1) - 2026-11-18
 
 Adds a Sponsor package for Linux.

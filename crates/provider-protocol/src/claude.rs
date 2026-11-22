@@ -707,55 +707,124 @@ pub fn summarize_sse(
             .any(|part| part == b"text/event-stream"),
         "provider returned HTTP {status} without SSE"
     );
-    let mut start = None;
-    let mut delta = None;
-    let mut tool_uses = Vec::new();
-    for line in body.split(|byte| *byte == b'\n') {
-        if let Some(value) = line.strip_prefix(b"data: ") {
-            let event: Value = serde_json::from_slice(value)?;
-            match event["type"].as_str() {
-                Some("message_start") => {
-                    ensure!(
-                        start.replace(event).is_none(),
-                        "duplicate Claude message_start"
-                    );
+    let mut summary = SseSummarizer::default();
+    summary.push(body)?;
+    summary.finish()
+}
+
+/// Incrementally summarize the same raw SSE body without retaining its content deltas.
+#[derive(Default)]
+pub struct SseSummarizer {
+    partial: Vec<u8>,
+    start: Option<Value>,
+    delta: Option<Value>,
+    stopped: bool,
+    tool_uses: Vec<String>,
+}
+
+impl SseSummarizer {
+    /// Accept a body fragment; an event may span more than one fragment.
+    pub fn push(&mut self, bytes: &[u8]) -> Result<()> {
+        for part in bytes.split_inclusive(|byte| *byte == b'\n') {
+            if let Some(line) = part.strip_suffix(b"\n") {
+                if self.partial.is_empty() {
+                    self.event(line)?;
+                } else {
+                    let mut complete = std::mem::take(&mut self.partial);
+                    complete.extend_from_slice(line);
+                    self.event(&complete)?;
+                    complete.clear();
+                    self.partial = complete;
                 }
-                Some("message_delta") => {
-                    ensure!(
-                        delta.replace(event).is_none(),
-                        "duplicate Claude message_delta"
-                    );
-                }
-                Some("content_block_start") if event["content_block"]["type"] == "tool_use" => {
-                    tool_uses.push(
-                        event["content_block"]["name"]
-                            .as_str()
-                            .context("Claude tool name missing")?
-                            .to_owned(),
-                    );
-                }
-                _ => {}
+            } else {
+                self.partial.extend_from_slice(part);
             }
         }
+        Ok(())
     }
-    let start = start.context("Claude message_start missing")?;
-    let delta = delta.context("Claude message_delta missing")?;
-    let message_id = start["message"]["id"]
-        .as_str()
-        .context("Claude message id missing")?
-        .to_owned();
-    let mut usage = start["message"]["usage"]
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    if let Some(update) = delta["usage"].as_object() {
-        usage.extend(update.clone());
+
+    /// Collect identity, usage and tool names from one complete SSE data line.
+    fn event(&mut self, line: &[u8]) -> Result<()> {
+        let Some(value) = line.strip_prefix(b"data: ") else {
+            return Ok(());
+        };
+        let event: Value = serde_json::from_slice(value)?;
+        match event["type"].as_str() {
+            Some("message_start") => {
+                ensure!(
+                    self.start.replace(event).is_none(),
+                    "duplicate Claude message_start"
+                );
+            }
+            Some("message_delta") => {
+                ensure!(
+                    self.delta.replace(event).is_none(),
+                    "duplicate Claude message_delta"
+                );
+            }
+            Some("message_stop") => self.stopped = true,
+            Some("content_block_start") if event["content_block"]["type"] == "tool_use" => {
+                self.tool_uses.push(
+                    event["content_block"]["name"]
+                        .as_str()
+                        .context("Claude tool name missing")?
+                        .to_owned(),
+                );
+            }
+            _ => {}
+        }
+        Ok(())
     }
-    Ok(SseSummary {
-        message_id,
-        usage: Value::Object(usage),
-        tool_uses,
-    })
+
+    /// Return usage as soon as the authenticated message_stop has arrived.
+    pub fn completed(&self) -> Option<SseSummary> {
+        self.stopped.then(|| self.summary().ok()).flatten()
+    }
+
+    /// Resolve usage at EOF and validate any final line without a newline.
+    pub fn finish(&mut self) -> Result<SseSummary> {
+        let last = std::mem::take(&mut self.partial);
+        self.event(&last)?;
+        self.summary()
+    }
+
+    /// Build the common usage projection from complete SSE events.
+    fn summary(&self) -> Result<SseSummary> {
+        let start = self
+            .start
+            .as_ref()
+            .context("Claude message_start missing")?;
+        self.delta
+            .as_ref()
+            .context("Claude message_delta missing")?;
+        let message_id = start["message"]["id"]
+            .as_str()
+            .context("Claude message id missing")?
+            .to_owned();
+        Ok(SseSummary {
+            message_id,
+            usage: self.usage(),
+            tool_uses: self.tool_uses.clone(),
+        })
+    }
+
+    /// Provider-reported usage seen so far, including input-only partial usage.
+    pub fn usage(&self) -> Value {
+        let mut usage = self
+            .start
+            .as_ref()
+            .and_then(|start| start["message"]["usage"].as_object())
+            .cloned()
+            .unwrap_or_default();
+        if let Some(update) = self
+            .delta
+            .as_ref()
+            .and_then(|delta| delta["usage"].as_object())
+        {
+            usage.extend(update.clone());
+        }
+        Value::Object(usage)
+    }
 }
 
 #[cfg(test)]

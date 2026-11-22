@@ -140,6 +140,46 @@ Concurro can see prompts, responses, and some account metadata, but not the prov
 
 The relay saves its identity key in a file only your user can read, under `concurro-relay` in your system's configuration directory. Set `--state-dir` or `CONCURRO_RELAY_HOME` to use another directory. Provider credentials are stored separately: in Keychain on macOS, beside the key on Linux.
 
+## Hosted verifier
+
+Sponsor 0.2.0 and the verifier both use relay protocol 5. Protocol 4 Sponsors must
+upgrade before they can connect. The Sponsor's TLS listener is separate from the
+internal HTTP listener for Accounts, Gateway and Exchange.
+
+| Flag | Value |
+| ---- | ---- |
+| `--owner-token` | Accounts bearer file for `/owner/v1/*` |
+| `--inference-token` | Gateway bearer file for `/dispatch/v2/*` |
+| `--release-token` | Exchange bearer file for `/release/v1/*` |
+| `--exchange-public-keys` | Exchange Ed25519 public keys in a JSON Web Key Set, indexed by `kid` |
+| `--registry` | Durable approved relay registry |
+| `--claim-journal` | Durable call, token and revocation journal. Defaults to the registry path with `.claims` appended |
+| `--certificate`, `--private-key` | Certificate and key for the public Sponsor TLS listener |
+| `--relay-listen`, `--private-listen` | Bind addresses for the public TLS and internal HTTP listeners |
+| `--verification-url` | Full URL of the owner page where the Sponsor's pairing code is entered |
+
+Use three distinct token files containing the raw tokens. Each caller sends
+`Authorization: Bearer <token>` to its own API. Keep the private listener on the
+internal network. Provision the claim signing key only on Exchange and configure
+its public key on the verifier. Keep the Exchange and verifier clocks synchronized
+for claim issue and expiry checks. For rotation, include both active public keys
+until every claim signed by the old one has expired. A JWKS contains entries of
+the form `{"kty":"OKP","crv":"Ed25519","kid":"exchange-1","x":"<base64url-raw-public-key>"}`,
+under the top-level `keys` array. Encode the 32-byte public key without padding.
+
+Mount the registry and journal on durable storage. The journal records admission
+before a call reaches native ingress and persists known provider input and output
+usage before response completion. An interrupted response records the observed
+lower bound when the provider reported partial usage. Known-expiry records are
+removed after expiry.
+A release received before dispatch fences the ID until the verifier learns its
+expiry from a signed claim. An append failure stops admission and release
+acknowledgements until the journal can be reopened after repairing storage.
+
+The [hosted API crate](crates/hosted-api) defines the private wire types and JWS
+codec. See [its API notes](crates/hosted-api/README.md) and the
+[0.2.0 release sequence](docs/releasing.md#protocol-5-release).
+
 ## Development
 
 The workspace uses Rust. Install [cargo-nextest](https://nexte.st), then fetch and patch the upstream dependencies before building or testing:
@@ -163,6 +203,7 @@ The script creates `upstream/`, which is excluded from Git, and won't overwrite 
 | Path | Purpose |
 | ---- | ---- |
 | `crates/relay` | Sponsor CLI, provider sign-in, activity view, and relay links |
+| `crates/hosted-api` | Shared owner, claim, dispatch and release contracts |
 | `crates/hosted` | Hosted verifier, registration storage, session pool, and Responses bridge |
 | `crates/verifier` | Shared verifier and TLSNotary integration |
 | `crates/protocol` | Relay identity, messages, and provider routes |

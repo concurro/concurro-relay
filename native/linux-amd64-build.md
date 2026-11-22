@@ -54,15 +54,13 @@ and records its digest in the run summary. Deploy it by that tag or digest, neve
 
 ## Qualification
 
-Before the sources were checked in, an image built by this recipe from the same pinned
-sources passed the seven offline owner/Gateway fixtures in
-`concurro/gateway/tests/hosted_relay_spike.py` against the frozen macOS Sponsor:
-`test_owner_gateway_relay`, `test_two_links_two_turns`, `test_inflight_cancel`,
-`test_mixed_routes`, `test_codex_tool_loop`, `test_codex_ws_cancel` and
-`test_codex_ws_denials`. No live provider was used.
+The workspace tests cover the hosted private listener's authorization, approval
+and protocol 5 registration, signed dispatch, and call, token and release
+persistence. The bundle test exercises the native bootstrap and request proofs
+with a local provider fixture.
 
-For a deployed overlay, set the verifier image to a published tag or digest and
-`CONCURRO_RELAY_VERIFICATION_URL` to the full public backoffice approval URL; the verifier
-prints it to Sponsor during login. Provision the verifier certificate, key and shared
-private token as described in the
-[Gateway guide](../../concurro/gateway/README.md#sponsorship-metadata-and-private-resolution).
+Set the deployed verifier to a published image tag or digest and give
+`--verification-url` the public owner approval URL printed to Sponsor during
+login. Mount the certificate, key, separate private caller tokens, exchange
+public keys, registry and claim journal as described in the
+[hosted verifier README](../README.md#hosted-verifier).

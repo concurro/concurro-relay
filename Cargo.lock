@@ -495,22 +495,39 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
+ "concurro-relay-hosted-api",
  "concurro-relay-native",
  "concurro-relay-protocol",
+ "concurro-relay-provider-protocol",
  "concurro-relay-verifier",
  "futures",
  "hex",
  "http-body-util",
  "hyper",
  "hyper-util",
- "ring",
  "rustls",
  "rustls-pemfile 2.2.0",
  "serde",
  "serde_json",
+ "subtle",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "tokio-util",
+]
+
+[[package]]
+name = "concurro-relay-hosted-api"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "percent-encoding",
+ "ring",
+ "serde",
+ "serde_json",
+ "time",
 ]
 
 [[package]]
@@ -946,6 +963,9 @@ name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "derive_builder"
@@ -2171,6 +2191,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "percent-encoding"
+version = "2.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2974,6 +3000,7 @@ dependencies = [
  "powerfmt",
  "serde_core",
  "time-core",
+ "time-macros",
 ]
 
 [[package]]
@@ -2981,6 +3008,16 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
+
+[[package]]
+name = "time-macros"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
+dependencies = [
+ "num-conv",
+ "time-core",
+]
 
 [[package]]
 name = "tiny-keccak"
@@ -3278,6 +3315,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",
