@@ -81,6 +81,9 @@ struct Args {
     /// Seconds a relay connection has to finish its TLS handshake.
     #[arg(long, default_value_t = 10)]
     handshake_timeout_secs: u64,
+    /// Seconds one connection of a relay link waits for the other.
+    #[arg(long, default_value_t = 30)]
+    half_link_timeout_secs: u64,
     /// Unix start time; live telemetry before it is unknown.
     #[arg(skip)]
     started: f64,
@@ -739,6 +742,7 @@ async fn main() -> Result<()> {
         tls(&args.certificate, &args.private_key)?,
         Arc::new(Acceptor::new(registry.clone(), ready).with_limits(Limits {
             handshake: Duration::from_secs(args.handshake_timeout_secs),
+            half_link: Duration::from_secs(args.half_link_timeout_secs),
         })),
     ));
     let accepted_pool = pool.clone();
@@ -786,6 +790,7 @@ mod tests {
             codex_provider_port: 0,
             provider_ca: PathBuf::new(),
             handshake_timeout_secs: 10,
+            half_link_timeout_secs: 30,
             started,
         })
     }

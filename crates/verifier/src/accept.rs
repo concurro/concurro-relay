@@ -4,7 +4,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -36,12 +39,15 @@ const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 pub struct Limits {
     /// For a connection to finish its TLS handshake.
     pub handshake: Duration,
+    /// For one connection of a link to be joined by the other.
+    pub half_link: Duration,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
             handshake: Duration::from_secs(10),
+            half_link: Duration::from_secs(30),
         }
     }
 }
@@ -82,12 +88,23 @@ pub struct Accepted<S> {
     pub proofs: S,
 }
 
+/// The first connection of a link, waiting for the second.
+struct Half<S> {
+    role: Role,
+    stream: S,
+    /// Tells this connection from a later one of the same link.
+    wait: u64,
+}
+
+/// Waiting first connections, by relay, random link number, and stable slot.
+type Halves<S> = Arc<Mutex<HashMap<(String, u64, u32), Half<S>>>>;
+
 /// Receives relays' connections.
 pub struct Acceptor<R, S> {
     registry: Arc<R>,
-    /// The first connection of each link whose second has not arrived, by
-    /// relay, random link number, and stable slot.
-    halves: Mutex<HashMap<(String, u64, u32), (Role, S)>>,
+    halves: Halves<S>,
+    /// Numbers the waits in `halves`.
+    waits: AtomicU64,
     ready: UnboundedSender<Accepted<S>>,
     limits: Limits,
 }
@@ -107,7 +124,8 @@ where
     pub fn new(registry: Arc<R>, ready: UnboundedSender<Accepted<S>>) -> Self {
         Self {
             registry,
-            halves: Mutex::default(),
+            halves: Arc::default(),
+            waits: AtomicU64::new(0),
             ready,
             limits: Limits::default(),
         }
@@ -199,18 +217,28 @@ where
     }
 
     /// Keeps `stream` until its link's other connection arrives, or pairs
-    /// it with the one already waiting.
+    /// it with the one already waiting. A connection left waiting longer
+    /// than the half-link limit is closed.
     fn pair(&self, relay: String, link: u64, slot: u32, role: Role, stream: S) {
         let mut halves = self.halves.lock().expect("lock is not poisoned");
         let key = (relay, link, slot);
         let (control, proofs) = match halves.remove(&key) {
-            Some((other_role, other)) if other_role != role => match role {
-                Role::Control => (stream, other),
-                Role::Proofs => (other, stream),
+            Some(other) if other.role != role => match role {
+                Role::Control => (stream, other.stream),
+                Role::Proofs => (other.stream, stream),
             },
             // A repeated role replaces the connection which was waiting.
             _ => {
-                halves.insert(key, (role, stream));
+                let wait = self.waits.fetch_add(1, Ordering::Relaxed);
+                halves.insert(key.clone(), Half { role, stream, wait });
+                let (waiting, limit) = (self.halves.clone(), self.limits.half_link);
+                tokio::spawn(async move {
+                    time::sleep(limit).await;
+                    let mut halves = waiting.lock().expect("lock is not poisoned");
+                    if halves.get(&key).is_some_and(|half| half.wait == wait) {
+                        halves.remove(&key);
+                    }
+                });
                 return;
             }
         };
@@ -283,6 +311,8 @@ mod tests {
     };
     use tokio_rustls::TlsAcceptor;
 
+    use concurro_relay_protocol::link::Role;
+
     use super::{Acceptor, Limits, Registry, serve};
 
     /// Knows no relays.
@@ -325,11 +355,34 @@ mod tests {
         let (ready, _accepted) = mpsc::unbounded_channel();
         let acceptor = Acceptor::new(Arc::new(Empty), ready).with_limits(Limits {
             handshake: Duration::from_millis(200),
+            ..Limits::default()
         });
         tokio::spawn(serve(listener, tls(), Arc::new(acceptor)));
         let mut silent = TcpStream::connect(address).await.unwrap();
         let mut byte = [0];
         let closed = time::timeout(Duration::from_secs(5), silent.read(&mut byte)).await;
         assert!(matches!(closed, Ok(Ok(0)) | Ok(Err(_))), "{closed:?}");
+    }
+
+    /// A link's two connections are paired, and a first connection left
+    /// waiting past the half-link limit is closed.
+    #[tokio::test(start_paused = true)]
+    async fn an_unmatched_half_is_closed() {
+        let (ready, mut accepted) = mpsc::unbounded_channel();
+        let acceptor = Acceptor::new(Arc::new(Empty), ready);
+        let (control, _relay_control) = tokio::io::duplex(64);
+        let (proofs, _relay_proofs) = tokio::io::duplex(64);
+        acceptor.pair("relay-1".into(), 7, 1, Role::Control, control);
+        time::sleep(Duration::from_secs(5)).await;
+        acceptor.pair("relay-1".into(), 7, 1, Role::Proofs, proofs);
+        let paired = accepted.recv().await.unwrap();
+        assert_eq!((paired.number, paired.slot), (7, 1));
+
+        let (lonely, mut relay) = tokio::io::duplex(64);
+        acceptor.pair("relay-1".into(), 8, 1, Role::Control, lonely);
+        time::sleep(Duration::from_secs(31)).await;
+        assert!(acceptor.halves.lock().unwrap().is_empty());
+        let mut byte = [0];
+        assert_eq!(relay.read(&mut byte).await.unwrap(), 0);
     }
 }
