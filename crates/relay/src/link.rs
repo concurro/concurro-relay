@@ -8,7 +8,7 @@ use concurro_relay_protocol::{
     link::{self, Hello, PROTOCOL_VERSION, Refusal, Role},
     meter::{Counters, Metered},
 };
-use tokio::{sync::mpsc::UnboundedSender, time};
+use tokio::{sync::mpsc::UnboundedSender, task::JoinSet, time};
 
 use crate::{
     events::{Event, LinkState},
@@ -98,15 +98,76 @@ impl Relay {
 }
 
 /// Keeps `links` links open for `relay`, reporting to `events`, until every
-/// one of them has been refused.
+/// one of them has been refused. Dropping or aborting it ends every link,
+/// with the sessions they serve.
 pub async fn run(relay: Arc<Relay>, links: usize, events: UnboundedSender<Event>) {
-    let workers: Vec<_> = (1..=links)
-        .map(|link| {
-            let (relay, events) = (relay.clone(), events.clone());
-            tokio::spawn(async move { relay.keep(link, events).await })
+    let mut workers = JoinSet::new();
+    for link in 1..=links {
+        let (relay, events) = (relay.clone(), events.clone());
+        workers.spawn(async move { relay.keep(link, events).await });
+    }
+    while workers.join_next().await.is_some() {}
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use concurro_relay_protocol::{Roots, identity::Identity, route::Route};
+    use tokio::{sync::mpsc, time};
+
+    use super::{Relay, run};
+    use crate::{
+        credentials::{Credential, Source},
+        events::{Event, LinkState},
+        routes::Served,
+        serve::RelayConfig,
+        state::Registration,
+        transport::Server,
+    };
+
+    /// Aborting the relay ends every link it keeps open, so none serves on
+    /// under an old registration.
+    #[tokio::test]
+    async fn aborting_the_relay_ends_its_links() {
+        let relay = Relay {
+            registration: Registration {
+                // Nothing listens here, so each link keeps retrying.
+                server: Server {
+                    address: "127.0.0.1:1".into(),
+                    ca_file: None,
+                },
+                relay: "relay-1".into(),
+                login: "octocat".into(),
+                name: "laptop".into(),
+                routes: vec![Route::ChatgptSubscription],
+            },
+            identity: Identity::generate().unwrap().0,
+            config: RelayConfig {
+                served: vec![Served::builtin(Route::ChatgptSubscription)],
+                credentials: Source::Fixed(Credential::token("sk-test")),
+                roots: Roots::Mozilla,
+                parents: Default::default(),
+                reviewer: Default::default(),
+            },
+        };
+        let (events, mut reported) = mpsc::unbounded_channel();
+        let running = tokio::spawn(run(Arc::new(relay), 2, events));
+        let mut connecting = 0;
+        while connecting < 2 {
+            if let Some(Event::Link {
+                state: LinkState::Connecting,
+                ..
+            }) = reported.recv().await
+            {
+                connecting += 1;
+            }
+        }
+        running.abort();
+        let ended = time::timeout(Duration::from_secs(5), async {
+            while reported.recv().await.is_some() {}
         })
-        .collect();
-    for worker in workers {
-        let _ = worker.await;
+        .await;
+        assert!(ended.is_ok(), "a link kept running after the relay ended");
     }
 }
