@@ -600,6 +600,8 @@ dependencies = [
  "anyhow",
  "concurro-relay-protocol",
  "futures",
+ "rcgen",
+ "rustls",
  "serde_json",
  "socket2",
  "tlsn",

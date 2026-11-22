@@ -21,7 +21,7 @@ use concurro_relay_protocol::{
     wire,
     ws::FINAL_EVENTS,
 };
-use concurro_relay_verifier::accept::{self, Accepted, Acceptor};
+use concurro_relay_verifier::accept::{self, Accepted, Acceptor, Limits};
 use futures::{SinkExt, StreamExt};
 use pool::{Lease, Task};
 use registry::{Binding, HostedRegistry};
@@ -78,6 +78,9 @@ struct Args {
     /// Provider certificate trust roots.
     #[arg(long, default_value = "/etc/ssl/certs/ca-certificates.crt")]
     provider_ca: PathBuf,
+    /// Seconds a relay connection has to finish its TLS handshake.
+    #[arg(long, default_value_t = 10)]
+    handshake_timeout_secs: u64,
     /// Unix start time; live telemetry before it is unknown.
     #[arg(skip)]
     started: f64,
@@ -734,7 +737,9 @@ async fn main() -> Result<()> {
     tokio::spawn(accept::serve(
         relay,
         tls(&args.certificate, &args.private_key)?,
-        Arc::new(Acceptor::new(registry.clone(), ready)),
+        Arc::new(Acceptor::new(registry.clone(), ready).with_limits(Limits {
+            handshake: Duration::from_secs(args.handshake_timeout_secs),
+        })),
     ));
     let accepted_pool = pool.clone();
     tokio::spawn(async move {
@@ -750,7 +755,7 @@ async fn main() -> Result<()> {
     });
     eprintln!("hosted relay verifier listening on {}", args.relay_listen);
     loop {
-        let (stream, _) = private_listener.accept().await?;
+        let stream = accept::next_connection(&private_listener).await;
         let (token, registry, pool, args) =
             (token.clone(), registry.clone(), pool.clone(), args.clone());
         tokio::spawn(async move {
@@ -780,6 +785,7 @@ mod tests {
             codex_provider_host: String::new(),
             codex_provider_port: 0,
             provider_ca: PathBuf::new(),
+            handshake_timeout_secs: 10,
             started,
         })
     }
