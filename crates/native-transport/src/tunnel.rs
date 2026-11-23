@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     fmt,
     future::Future,
+    io, mem,
     net::Ipv4Addr,
     num::NonZeroUsize,
     sync::{
@@ -12,11 +13,11 @@ use std::{
     },
 };
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, Notify, mpsc, oneshot},
+    sync::{Mutex, Notify, oneshot},
     task::JoinHandle,
     time::{self, Duration, Instant},
 };
@@ -139,7 +140,7 @@ impl Frame {
             Kind::End | Kind::Close => {
                 ensure!(self.payload.is_empty(), "invalid native tunnel EOF")
             }
-            Kind::Data => {}
+            Kind::Data => ensure!(!self.payload.is_empty(), "empty native tunnel data"),
         }
         Ok(())
     }
@@ -164,88 +165,165 @@ pub enum Role {
     Concurro,
 }
 
-/// Ordered inbound channel data, with `None` indicating remote EOF.
-type Inbound = mpsc::UnboundedReceiver<Option<Vec<u8>>>;
 /// Registration acknowledgement or tunnel failure.
 type Reply = oneshot::Sender<std::result::Result<u16, String>>;
 
-/// Bytes this side may still send on one channel.
-struct Credit {
-    /// Unspent bytes the peer has allowed.
-    available: StdMutex<usize>,
-    /// Whether the peer abandoned the channel.
-    closed: AtomicBool,
-    /// Wakes a sender waiting for credit.
+/// One channel's state, shared by the link reader and the channel's pump.
+struct Flow {
+    /// Credit, received bytes and the channel's ends.
+    state: StdMutex<FlowState>,
+    /// Wakes the pump when the state changes.
     changed: Notify,
 }
 
-impl Credit {
+/// See [`Flow`].
+struct FlowState {
+    /// Bytes this side may still send.
+    credit: usize,
+    /// Received bytes not yet given to the local socket.
+    received: Vec<u8>,
+    /// Received bytes not yet written to the local socket, at most
+    /// [`WINDOW`].
+    queued: usize,
+    /// Whether the peer ended its direction.
+    ended: bool,
+    /// Whether the channel was abandoned, by the peer or the tunnel.
+    closed: bool,
+}
+
+/// What the local socket gets next.
+enum Incoming {
+    /// Bytes to write.
+    Bytes(Vec<u8>),
+    /// The peer's end of data.
+    End,
+}
+
+impl Flow {
     /// Start with the window every channel begins with.
     fn new() -> Self {
         Self {
-            available: StdMutex::new(WINDOW),
-            closed: AtomicBool::new(false),
+            state: StdMutex::new(FlowState {
+                credit: WINDOW,
+                received: Vec::new(),
+                queued: 0,
+                ended: false,
+                closed: false,
+            }),
             changed: Notify::new(),
         }
     }
 
-    /// Wait for credit and take up to `most` bytes of it.
-    async fn take(&self, most: usize) -> Result<usize> {
+    /// Change the state and wake the pump.
+    fn update<T>(&self, change: impl FnOnce(&mut FlowState) -> T) -> T {
+        let value = change(&mut self.state.lock().unwrap());
+        self.changed.notify_waiters();
+        value
+    }
+
+    /// Wait until `ready` gives a value, failing once the channel is closed.
+    async fn wait<T>(&self, mut ready: impl FnMut(&mut FlowState) -> Option<T>) -> Result<T> {
         loop {
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            ensure!(
-                !self.closed.load(Ordering::SeqCst),
-                "native tunnel channel closed by peer"
-            );
             {
-                let mut available = self.available.lock().unwrap();
-                if *available > 0 {
-                    let taken = most.min(*available);
-                    *available -= taken;
-                    return Ok(taken);
+                let mut state = self.state.lock().unwrap();
+                ensure!(!state.closed, "native tunnel channel closed");
+                if let Some(value) = ready(&mut state) {
+                    return Ok(value);
                 }
             }
             changed.await;
         }
     }
 
-    /// Add bytes the peer allowed.
-    fn grant(&self, bytes: usize) {
-        let mut available = self.available.lock().unwrap();
-        *available = available.saturating_add(bytes);
-        self.changed.notify_waiters();
+    /// Wait for credit and take up to `most` bytes of it.
+    async fn take_credit(&self, most: usize) -> Result<usize> {
+        self.wait(|state| {
+            (state.credit > 0).then(|| {
+                let taken = most.min(state.credit);
+                state.credit -= taken;
+                taken
+            })
+        })
+        .await
     }
 
-    /// Wait until the peer abandons the channel.
+    /// Wait for what the local socket gets next.
+    async fn next(&self) -> Result<Incoming> {
+        self.wait(|state| {
+            if !state.received.is_empty() {
+                Some(Incoming::Bytes(mem::take(&mut state.received)))
+            } else {
+                state.ended.then_some(Incoming::End)
+            }
+        })
+        .await
+    }
+
+    /// Complete local socket I/O unless the channel is abandoned first.
+    async fn unless_closed<T>(&self, operation: impl Future<Output = io::Result<T>>) -> Result<T> {
+        tokio::select! {
+            result = operation => Ok(result?),
+            () = self.closed() => bail!("native tunnel channel closed"),
+        }
+    }
+
+    /// Wait until the channel is abandoned.
     async fn closed(&self) {
         loop {
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if self.closed.load(Ordering::SeqCst) {
+            if self.state.lock().unwrap().closed {
                 return;
             }
             changed.await;
         }
     }
 
-    /// Wake the sender of a channel the peer abandoned.
-    fn close(&self) {
-        self.closed.store(true, Ordering::SeqCst);
-        self.changed.notify_waiters();
+    /// Queue bytes the peer sent.
+    fn receive(&self, bytes: &[u8]) -> Result<()> {
+        self.update(|state| {
+            ensure!(!state.ended, "native tunnel data after its end");
+            state.queued += bytes.len();
+            ensure!(
+                state.queued <= WINDOW,
+                "native tunnel peer overran its channel window"
+            );
+            state.received.extend_from_slice(bytes);
+            Ok(())
+        })
     }
-}
 
-/// One open channel.
-struct Channel {
-    /// Inbound queue; dropped when the peer abandons the channel.
-    inbound: mpsc::UnboundedSender<Option<Vec<u8>>>,
-    /// Received bytes not yet granted back to the peer, at most [`WINDOW`].
-    held: usize,
-    /// This side's own sending credit.
-    credit: Arc<Credit>,
+    /// Note the peer's end of data.
+    fn end(&self) -> Result<()> {
+        self.update(|state| {
+            ensure!(!state.ended, "native tunnel channel ended twice");
+            state.ended = true;
+            Ok(())
+        })
+    }
+
+    /// Add bytes the peer allowed.
+    fn grant(&self, bytes: usize) {
+        self.update(|state| state.credit = state.credit.saturating_add(bytes));
+    }
+
+    /// Note `bytes` written to the local socket.
+    fn written(&self, bytes: usize) {
+        let mut state = self.state.lock().unwrap();
+        state.queued = state.queued.saturating_sub(bytes);
+    }
+
+    /// Abandon the channel, releasing what it queued.
+    fn close(&self) {
+        self.update(|state| {
+            state.closed = true;
+            state.received = Vec::new();
+        });
+    }
 }
 
 /// A Concurro listener for one Sponsor registration.
@@ -268,7 +346,7 @@ struct Shared {
     /// Concurro listeners by local port, until their claim ends.
     listeners: HashMap<u16, Listening>,
     /// Open channels by number.
-    channels: HashMap<u32, Channel>,
+    channels: HashMap<u32, Arc<Flow>>,
     /// Highest channel number opened; lower ones absent from `channels` are
     /// closed, and late frames for them are dropped.
     highest: u32,
@@ -278,20 +356,12 @@ struct Shared {
 
 impl Shared {
     /// Track channel `number`, which must exceed every earlier one.
-    fn open(&mut self, number: u32) -> Result<(Inbound, Arc<Credit>)> {
+    fn open(&mut self, number: u32) -> Result<Arc<Flow>> {
         ensure!(number > self.highest, "native tunnel channel reused");
         self.highest = number;
-        let (inbound, receiver) = mpsc::unbounded_channel();
-        let credit = Arc::new(Credit::new());
-        self.channels.insert(
-            number,
-            Channel {
-                inbound,
-                held: 0,
-                credit: credit.clone(),
-            },
-        );
-        Ok((receiver, credit))
+        let flow = Arc::new(Flow::new());
+        self.channels.insert(number, flow.clone());
+        Ok(flow)
     }
 
     /// Fail on a frame for a channel that never existed; a closed one's are
@@ -410,9 +480,8 @@ impl Inner {
         for (_, listening) in shared.listeners.drain() {
             listening.task.abort();
         }
-        for channel in shared.channels.values() {
-            let _ = channel.inbound.send(None);
-            channel.credit.close();
+        for flow in shared.channels.values() {
+            flow.close();
         }
         self.closed.notify_waiters();
     }
@@ -424,51 +493,40 @@ impl Inner {
 
     /// Open the next local channel to `registration`; numbers reach the peer
     /// in increasing order.
-    async fn open_local(&self, registration: u32) -> Result<(u32, Inbound, Arc<Credit>)> {
+    async fn open_local(&self, registration: u32) -> Result<(u32, Arc<Flow>)> {
         self.write(|| {
             let mut shared = self.shared.lock().unwrap();
             let number = shared
                 .highest
                 .checked_add(1)
                 .context("native tunnel channels exhausted")?;
-            let (inbound, credit) = shared.open(number)?;
+            let flow = shared.open(number)?;
             Ok((
                 Frame {
                     kind: Kind::Open,
                     channel: number,
                     payload: registration.to_be_bytes().to_vec(),
                 },
-                (number, inbound, credit),
+                (number, flow),
             ))
         })
         .await
     }
 
-    /// Stop tracking channel `number`, telling the peer when it was still open.
+    /// Abandon channel `number`, telling the peer when it was still open.
     async fn close_channel(&self, number: u32) {
-        let open = self
-            .shared
-            .lock()
-            .unwrap()
-            .channels
-            .remove(&number)
-            .is_some();
-        if open && !self.stopped.load(Ordering::SeqCst) {
-            let _ = self.send(Kind::Close, number, Vec::new()).await;
+        let flow = self.shared.lock().unwrap().channels.remove(&number);
+        if let Some(flow) = flow {
+            flow.close();
+            if !self.stopped.load(Ordering::SeqCst) {
+                let _ = self.send(Kind::Close, number, Vec::new()).await;
+            }
         }
     }
 
-    /// Grant `bytes` the local side consumed back to the peer.
-    async fn grant(&self, number: u32, bytes: usize) -> Result<()> {
-        {
-            let mut shared = self.shared.lock().unwrap();
-            let Some(channel) = shared.channels.get_mut(&number) else {
-                return Ok(());
-            };
-            channel.held -= bytes;
-        }
-        self.send(Kind::Credit, number, (bytes as u32).to_be_bytes().to_vec())
-            .await
+    /// Whether Sponsor registration `number` still exposes `target`.
+    fn registered(&self, number: u32, target: u16) -> bool {
+        self.shared.lock().unwrap().registrations.get(&number) == Some(&target)
     }
 }
 
@@ -734,18 +792,17 @@ async fn read_loop<R: AsyncRead + Unpin>(mut read: R, inner: Arc<Inner>) -> Resu
             }
             (Role::Sponsor, Kind::Open) => {
                 let registration = frame.number();
-                let (target, full, receiver, credit) = {
+                let (target, full, flow) = {
                     let mut shared = inner.shared.lock().unwrap();
                     let target = shared.registrations.get(&registration).copied();
                     let full = shared.channels.len() >= inner.channels;
-                    let (receiver, credit) = shared.open(frame.channel)?;
-                    (target, full, receiver, credit)
+                    (target, full, shared.open(frame.channel)?)
                 };
                 match (target, full) {
                     (Some(target), false) => {
                         let connecting = inner.clone();
                         tokio::spawn(async move {
-                            connect_target(connecting, frame.channel, target, receiver, credit)
+                            connect_target(connecting, frame.channel, registration, target, flow)
                                 .await;
                         });
                     }
@@ -765,34 +822,20 @@ async fn read_loop<R: AsyncRead + Unpin>(mut read: R, inner: Arc<Inner>) -> Resu
                     }
                 }
             }
-            (_, Kind::Data | Kind::End) => {
+            (_, Kind::Data | Kind::End | Kind::Credit | Kind::Close) => {
                 let mut shared = inner.shared.lock().unwrap();
-                match shared.channels.get_mut(&frame.channel) {
-                    Some(channel) => {
-                        channel.held += frame.payload.len();
-                        ensure!(
-                            channel.held <= WINDOW,
-                            "native tunnel peer overran its channel window"
-                        );
-                        let _ = channel
-                            .inbound
-                            .send((frame.kind == Kind::Data).then_some(frame.payload));
+                let Some(flow) = shared.channels.get(&frame.channel).cloned() else {
+                    shared.closed(frame.channel)?;
+                    continue;
+                };
+                match frame.kind {
+                    Kind::Data => flow.receive(&frame.payload)?,
+                    Kind::End => flow.end()?,
+                    Kind::Credit => flow.grant(frame.number() as usize),
+                    _ => {
+                        shared.channels.remove(&frame.channel);
+                        flow.close();
                     }
-                    None => shared.closed(frame.channel)?,
-                }
-            }
-            (_, Kind::Credit) => {
-                let shared = inner.shared.lock().unwrap();
-                match shared.channels.get(&frame.channel) {
-                    Some(channel) => channel.credit.grant(frame.number() as usize),
-                    None => shared.closed(frame.channel)?,
-                }
-            }
-            (_, Kind::Close) => {
-                let mut shared = inner.shared.lock().unwrap();
-                match shared.channels.remove(&frame.channel) {
-                    Some(channel) => channel.credit.close(),
-                    None => shared.closed(frame.channel)?,
                 }
             }
             _ => bail!("unexpected native tunnel frame for role"),
@@ -820,34 +863,44 @@ async fn accept_loop(
         let Some((socket, _)) = accepted else {
             return Ok(());
         };
-        let (number, receiver, credit) = inner.open_local(registration).await?;
-        pump_channel(inner.clone(), number, socket, receiver, credit);
+        let (number, flow) = inner.open_local(registration).await?;
+        pump_channel(inner.clone(), number, socket, flow);
     }
 }
 
-/// Connect a Sponsor target, retrying while it starts, then pump the channel;
-/// a target that never accepts closes only this channel.
+/// Connect a Sponsor target, retrying while it starts, then pump the channel.
+/// A target that never accepts, a released registration or the peer's Close
+/// ends only this channel.
 async fn connect_target(
     inner: Arc<Inner>,
     number: u32,
+    registration: u32,
     target: u16,
-    receiver: Inbound,
-    credit: Arc<Credit>,
+    flow: Arc<Flow>,
 ) {
     let deadline = Instant::now() + REGISTRATION_TIMEOUT;
     loop {
-        // A channel the peer closes stops connecting, releasing what it queued.
+        if !inner.registered(registration, target) {
+            inner.close_channel(number).await;
+            return;
+        }
         let attempt = inner
             .until_closed(async {
                 tokio::select! {
                     socket = TcpStream::connect((Ipv4Addr::LOCALHOST, target)) => Ok(Some(socket?)),
-                    () = credit.closed() => Ok(None),
+                    () = flow.closed() => Ok(None),
                 }
             })
             .await;
         match attempt {
+            // The port may belong to another service once the registration
+            // is released.
+            Ok(Some(_)) if !inner.registered(registration, target) => {
+                inner.close_channel(number).await;
+                return;
+            }
             Ok(Some(socket)) => {
-                pump_channel(inner, number, socket, receiver, credit);
+                pump_channel(inner, number, socket, flow);
                 return;
             }
             Ok(None) => return,
@@ -861,7 +914,7 @@ async fn connect_target(
                     .until_closed(async {
                         tokio::select! {
                             () = time::sleep(Duration::from_millis(20)) => Ok(true),
-                            () = credit.closed() => Ok(false),
+                            () = flow.closed() => Ok(false),
                         }
                     })
                     .await;
@@ -881,104 +934,85 @@ async fn connect_target(
 }
 
 /// Pump both TCP directions within the channel's credit and preserve a remote
-/// half-close; a failure closes this channel alone.
-fn pump_channel(
-    inner: Arc<Inner>,
-    number: u32,
-    socket: TcpStream,
-    mut inbound: Inbound,
-    credit: Arc<Credit>,
-) {
+/// half-close. Abandoning the channel stops both directions; a failure closes
+/// this channel alone.
+fn pump_channel(inner: Arc<Inner>, number: u32, socket: TcpStream, flow: Arc<Flow>) {
     tokio::spawn(async move {
         let (mut read, mut write) = socket.into_split();
-        let failed = {
-            let outbound = async {
-                let mut buffer = vec![0; MAX_PAYLOAD];
-                loop {
-                    let count = inner
-                        .until_closed(async {
-                            tokio::select! {
-                                count = read.read(&mut buffer) => Ok(count?),
-                                () = credit.closed() => bail!("native tunnel channel closed by peer"),
-                            }
-                        })
-                        .await?;
-                    if count == 0 {
-                        inner.send(Kind::End, number, Vec::new()).await?;
-                        return Ok::<(), anyhow::Error>(());
-                    }
-                    let mut sent = 0;
-                    while sent < count {
-                        let allowed = inner.until_closed(credit.take(count - sent)).await?;
-                        inner
-                            .send(Kind::Data, number, buffer[sent..sent + allowed].to_vec())
-                            .await?;
-                        sent += allowed;
-                    }
+        let outbound = async {
+            let mut buffer = vec![0; MAX_PAYLOAD];
+            loop {
+                let count = inner
+                    .until_closed(flow.unless_closed(read.read(&mut buffer)))
+                    .await?;
+                if count == 0 {
+                    return inner.send(Kind::End, number, Vec::new()).await;
                 }
-            };
-            let incoming = async {
-                let mut consumed = 0;
-                loop {
-                    let payload = inner
-                        .until_closed(async { Ok(inbound.recv().await) })
+                let mut sent = 0;
+                while sent < count {
+                    let allowed = inner.until_closed(flow.take_credit(count - sent)).await?;
+                    inner
+                        .send(Kind::Data, number, buffer[sent..sent + allowed].to_vec())
                         .await?;
-                    match payload {
-                        Some(Some(bytes)) => {
-                            inner
-                                .until_closed(async { Ok(write.write_all(&bytes).await?) })
-                                .await?;
-                            consumed += bytes.len();
-                            if consumed >= GRANT {
-                                inner.grant(number, consumed).await?;
-                                consumed = 0;
-                            }
-                        }
-                        Some(None) => {
-                            inner
-                                .until_closed(async { Ok(write.shutdown().await?) })
-                                .await?;
-                            return Ok::<(), anyhow::Error>(());
-                        }
-                        None => return Err(anyhow!("native tunnel channel closed by peer")),
-                    }
-                }
-            };
-            tokio::pin!(outbound, incoming);
-            let mut sent_done = false;
-            let mut received_done = false;
-            let mut failed = false;
-            while !sent_done || !received_done {
-                tokio::select! {
-                    sent = &mut outbound, if !sent_done => match sent {
-                        Ok(()) => sent_done = true,
-                        Err(error) => {
-                            if !inner.stopped.load(Ordering::SeqCst) {
-                                eprintln!("NATIVE_TUNNEL outbound {number}: {error:#}");
-                            }
-                            failed = true;
-                            break;
-                        }
-                    },
-                    received = &mut incoming, if !received_done => match received {
-                        Ok(()) => received_done = true,
-                        Err(error) => {
-                            if !inner.stopped.load(Ordering::SeqCst) {
-                                eprintln!("NATIVE_TUNNEL inbound {number}: {error:#}");
-                            }
-                            failed = true;
-                            break;
-                        }
-                    },
+                    sent += allowed;
                 }
             }
-            failed
         };
+        let incoming = async {
+            let mut written = 0;
+            loop {
+                match inner.until_closed(flow.next()).await? {
+                    Incoming::Bytes(bytes) => {
+                        inner
+                            .until_closed(flow.unless_closed(write.write_all(&bytes)))
+                            .await?;
+                        flow.written(bytes.len());
+                        written += bytes.len();
+                        if written >= GRANT {
+                            inner
+                                .send(
+                                    Kind::Credit,
+                                    number,
+                                    (written as u32).to_be_bytes().to_vec(),
+                                )
+                                .await?;
+                            written = 0;
+                        }
+                    }
+                    Incoming::End => {
+                        return inner
+                            .until_closed(flow.unless_closed(write.shutdown()))
+                            .await;
+                    }
+                }
+            }
+        };
+        // Neither direction is cancelled: a failure abandons the channel, which
+        // stops the other at its next socket I/O or wait, never inside a frame
+        // write, which would break the link's framing.
+        let stopping = |result: Result<()>| {
+            if result.is_err() {
+                flow.close();
+            }
+            result
+        };
+        let (sent, received) = tokio::join!(
+            async { stopping(outbound.await.context("outbound")) },
+            async { stopping(incoming.await.context("inbound")) },
+        );
         drop((read, write));
-        if failed {
-            inner.close_channel(number).await;
-        } else {
-            inner.shared.lock().unwrap().channels.remove(&number);
+        // A channel the peer closed is no longer tracked.
+        let tracked = inner.shared.lock().unwrap().channels.contains_key(&number);
+        match sent.and(received) {
+            Err(error) if tracked => {
+                if !inner.stopped.load(Ordering::SeqCst) {
+                    eprintln!("NATIVE_TUNNEL channel {number}: {error:#}");
+                }
+                inner.close_channel(number).await;
+            }
+            _ => {
+                inner.shared.lock().unwrap().channels.remove(&number);
+            }
         }
     });
 }
@@ -993,7 +1027,7 @@ mod tests {
         time,
     };
 
-    use super::{Frame, Kind, Role, Tunnel, UNCLAIMED, WINDOW, pump_channel};
+    use super::{Frame, GRANT, Kind, Role, Tunnel, UNCLAIMED, WINDOW, pump_channel};
 
     /// Cancellation drops a channel blocked on link and TCP backpressure.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1005,12 +1039,9 @@ mod tests {
             .await
             .unwrap();
         let (socket, _) = listener.accept().await.unwrap();
-        let (inbound, credit) = tunnel.inner.shared.lock().unwrap().open(7).unwrap();
-        let sender = tunnel.inner.shared.lock().unwrap().channels[&7]
-            .inbound
-            .clone();
-        pump_channel(tunnel.inner.clone(), 7, socket, inbound, credit);
-        sender.send(Some(vec![b'z'; 8 * 1024 * 1024])).unwrap();
+        let flow = tunnel.inner.shared.lock().unwrap().open(7).unwrap();
+        pump_channel(tunnel.inner.clone(), 7, socket, flow.clone());
+        flow.receive(&vec![b'z'; WINDOW]).unwrap();
         client.write_all(b"outbound").await.unwrap();
         time::timeout(Duration::from_secs(1), async {
             while tunnel.inner.writer.try_lock().is_ok() {
@@ -1041,7 +1072,8 @@ mod tests {
             .unwrap();
     }
 
-    /// A local error after a partial frame fails the link and releases its channel.
+    /// A local error while the channel's frame is half written lets the frame
+    /// finish, then closes only that channel.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn channel_write_error_releases_both_halves() {
         let (link, mut peer) = tokio::io::duplex(1);
@@ -1051,11 +1083,8 @@ mod tests {
             .await
             .unwrap();
         let (socket, _) = listener.accept().await.unwrap();
-        let (inbound, credit) = tunnel.inner.shared.lock().unwrap().open(8).unwrap();
-        let sender = tunnel.inner.shared.lock().unwrap().channels[&8]
-            .inbound
-            .clone();
-        pump_channel(tunnel.inner.clone(), 8, socket, inbound, credit);
+        let flow = tunnel.inner.shared.lock().unwrap().open(8).unwrap();
+        pump_channel(tunnel.inner.clone(), 8, socket, flow.clone());
         client.write_all(b"outbound").await.unwrap();
         let mut first_byte = [0];
         time::timeout(Duration::from_secs(1), peer.read_exact(&mut first_byte))
@@ -1064,36 +1093,39 @@ mod tests {
             .unwrap();
         assert_eq!(first_byte, [b'D']);
         drop(client);
-        sender.send(Some(vec![b'z'; 8 * 1024 * 1024])).unwrap();
+        flow.receive(&vec![b'z'; WINDOW]).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let frame = time::timeout(Duration::from_secs(2), async {
+            let mut rest = [0; 9 + 8 - 1];
+            peer.read_exact(&mut rest).await.unwrap();
+            assert_eq!(&rest[8..], b"outbound");
+            Frame::read(&mut peer).await.unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!((frame.kind, frame.channel), (Kind::Close, 8));
         time::timeout(Duration::from_secs(2), async {
-            while tunnel
-                .inner
-                .shared
-                .lock()
-                .unwrap()
-                .channels
-                .contains_key(&8)
-            {
+            while std::sync::Arc::strong_count(&flow) > 1 {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
         assert!(
-            tunnel
+            !tunnel
+                .inner
+                .shared
+                .lock()
+                .unwrap()
+                .channels
+                .contains_key(&8)
+        );
+        assert!(
+            !tunnel
                 .inner
                 .stopped
                 .load(std::sync::atomic::Ordering::SeqCst)
         );
-        assert!(tunnel.register(12345).await.is_err());
-        time::timeout(Duration::from_secs(1), async {
-            while !tunnel.reader.is_finished() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        tunnel.close();
     }
 
     /// Aborting a registration mid-frame fails the link before another registration.
@@ -1170,7 +1202,7 @@ mod tests {
     async fn overrunning_the_window_fails_the_link() {
         let (link, mut peer) = tokio::io::duplex(1 << 20);
         let tunnel = Tunnel::start(link, Role::Concurro);
-        let (_inbound, _credit) = tunnel.inner.shared.lock().unwrap().open(1).unwrap();
+        let _flow = tunnel.inner.shared.lock().unwrap().open(1).unwrap();
         let chunk = vec![b'x'; super::MAX_PAYLOAD];
         for _ in 0..WINDOW / chunk.len() {
             send(&mut peer, Kind::Data, 1, &chunk).await;
@@ -1194,8 +1226,8 @@ mod tests {
             .await
             .unwrap();
         let (socket, _) = listener.accept().await.unwrap();
-        let (inbound, credit) = tunnel.inner.shared.lock().unwrap().open(3).unwrap();
-        pump_channel(tunnel.inner.clone(), 3, socket, inbound, credit);
+        let flow = tunnel.inner.shared.lock().unwrap().open(3).unwrap();
+        pump_channel(tunnel.inner.clone(), 3, socket, flow);
         let writing = tokio::spawn(async move {
             client.write_all(&vec![b'y'; 2 * WINDOW]).await.unwrap();
             client
@@ -1229,16 +1261,18 @@ mod tests {
             .await
             .unwrap();
         let (socket, _) = listener.accept().await.unwrap();
-        let (inbound, credit) = tunnel.inner.shared.lock().unwrap().open(5).unwrap();
-        pump_channel(tunnel.inner.clone(), 5, socket, inbound, credit);
+        let flow = tunnel.inner.shared.lock().unwrap().open(5).unwrap();
+        pump_channel(tunnel.inner.clone(), 5, socket, flow);
         let chunk = vec![b'z'; super::MAX_PAYLOAD];
         for _ in 0..WINDOW / chunk.len() {
             send(&mut peer, Kind::Data, 5, &chunk).await;
         }
         let mut body = vec![0; WINDOW];
         client.read_exact(&mut body).await.unwrap();
+        // Grants come in batches of at least GRANT, so less than one batch
+        // may stay ungranted.
         let mut granted = 0;
-        while granted < WINDOW {
+        while granted + GRANT <= WINDOW {
             let frame = time::timeout(Duration::from_secs(2), Frame::read(&mut peer))
                 .await
                 .unwrap()
@@ -1246,8 +1280,15 @@ mod tests {
             assert_eq!((frame.kind, frame.channel), (Kind::Credit, 5));
             granted += u32::from_be_bytes(frame.payload.try_into().unwrap()) as usize;
         }
-        assert_eq!(granted, WINDOW);
-        assert_eq!(tunnel.inner.shared.lock().unwrap().channels[&5].held, 0);
+        assert!(granted <= WINDOW);
+        let flow = tunnel.inner.shared.lock().unwrap().channels[&5].clone();
+        time::timeout(Duration::from_secs(2), async {
+            while flow.state.lock().unwrap().queued > 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     /// Frames for a closed channel are dropped; for one never opened, or an
@@ -1383,10 +1424,10 @@ mod tests {
         let _registration = registration.unwrap();
         send(&mut peer, Kind::Open, 1, &number.to_be_bytes()).await;
         send(&mut peer, Kind::Data, 1, b"queued").await;
-        let inbound = time::timeout(Duration::from_secs(2), async {
+        let flow = time::timeout(Duration::from_secs(2), async {
             loop {
-                if let Some(channel) = tunnel.inner.shared.lock().unwrap().channels.get(&1) {
-                    break channel.inbound.clone();
+                if let Some(flow) = tunnel.inner.shared.lock().unwrap().channels.get(&1) {
+                    break flow.clone();
                 }
                 tokio::task::yield_now().await;
             }
@@ -1394,8 +1435,171 @@ mod tests {
         .await
         .unwrap();
         send(&mut peer, Kind::Close, 1, &[]).await;
-        time::timeout(Duration::from_secs(2), inbound.closed())
+        // Only this test holds the flow once its connect attempt ends.
+        time::timeout(Duration::from_secs(2), async {
+            while std::sync::Arc::strong_count(&flow) > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the closed channel kept connecting");
+        assert!(flow.state.lock().unwrap().received.is_empty());
+    }
+
+    /// Empty data, data after the peer's end and a second end fail the link.
+    #[tokio::test]
+    async fn empty_data_and_repeated_ends_fail_the_link() {
+        for (frames, reason) in [
+            (&[(Kind::Data, &b""[..])][..], "empty native tunnel data"),
+            (
+                &[(Kind::End, &b""[..]), (Kind::End, &b""[..])][..],
+                "ended twice",
+            ),
+            (
+                &[(Kind::End, &b""[..]), (Kind::Data, &b"x"[..])][..],
+                "data after its end",
+            ),
+        ] {
+            let (link, mut peer) = tokio::io::duplex(4096);
+            let tunnel = Tunnel::start(link, Role::Concurro);
+            let _flow = tunnel.inner.shared.lock().unwrap().open(1).unwrap();
+            for (kind, payload) in frames {
+                // Frame::write refuses empty data, so write its bytes directly.
+                let mut bytes = vec![*kind as u8];
+                bytes.extend_from_slice(&1u32.to_be_bytes());
+                bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(payload);
+                peer.write_all(&bytes).await.unwrap();
+            }
+            let error = stopped(&tunnel).await;
+            assert!(error.contains(reason), "{reason}: {error}");
+        }
+    }
+
+    /// The peer's Close stops a pump whose helper has finished sending and
+    /// is not reading, freeing its socket and queued bytes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_stops_a_half_closed_pump() {
+        let (link, mut peer) = tokio::io::duplex(1 << 20);
+        let tunnel = Tunnel::start(link, Role::Sponsor);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut helper = TcpStream::connect(listener.local_addr().unwrap())
             .await
-            .expect("the closed channel kept connecting");
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let flow = tunnel.inner.shared.lock().unwrap().open(9).unwrap();
+        pump_channel(tunnel.inner.clone(), 9, socket, flow.clone());
+        helper.shutdown().await.unwrap();
+        let frame = Frame::read(&mut peer).await.unwrap();
+        assert_eq!((frame.kind, frame.channel), (Kind::End, 9));
+        let chunk = vec![b'z'; super::MAX_PAYLOAD];
+        for _ in 0..WINDOW / chunk.len() {
+            send(&mut peer, Kind::Data, 9, &chunk).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        send(&mut peer, Kind::Close, 9, &[]).await;
+        time::timeout(Duration::from_secs(2), async {
+            while std::sync::Arc::strong_count(&flow) > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the pump outlived its channel");
+        assert!(flow.state.lock().unwrap().received.is_empty());
+        let mut rest = Vec::new();
+        time::timeout(Duration::from_secs(2), helper.read_to_end(&mut rest))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    /// Releasing a registration stops channels still connecting to it, so a
+    /// later service on the same port gets nothing.
+    #[tokio::test]
+    async fn released_registration_stops_pending_connects() {
+        let (link, mut peer) = tokio::io::duplex(4096);
+        let tunnel = Tunnel::start(link, Role::Sponsor);
+        let refusing = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let target = refusing.local_addr().unwrap().port();
+        drop(refusing);
+        let (registration, number) = tokio::join!(tunnel.register(target), acknowledge(&mut peer));
+        send(&mut peer, Kind::Open, 1, &number.to_be_bytes()).await;
+        send(&mut peer, Kind::Data, 1, b"queued").await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(registration);
+        let frame = time::timeout(Duration::from_secs(2), Frame::read(&mut peer))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((frame.kind, frame.channel), (Kind::Close, 1));
+        let replacement = TcpListener::bind((Ipv4Addr::LOCALHOST, target))
+            .await
+            .unwrap();
+        assert!(
+            time::timeout(Duration::from_millis(200), replacement.accept())
+                .await
+                .is_err(),
+            "a released registration still connected"
+        );
+    }
+
+    /// A Close arriving while the channel's frame is half written lets the
+    /// frame finish; the tunnel and other channels carry on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_during_a_frame_keeps_the_tunnel() {
+        let (link, mut peer) = tokio::io::duplex(16);
+        let tunnel = Tunnel::start(link, Role::Sponsor);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut closing = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let flow = tunnel.inner.shared.lock().unwrap().open(9).unwrap();
+        pump_channel(tunnel.inner.clone(), 9, socket, flow.clone());
+        let mut other = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let second = tunnel.inner.shared.lock().unwrap().open(10).unwrap();
+        pump_channel(tunnel.inner.clone(), 10, socket, second);
+        closing.write_all(&[b'x'; 1000]).await.unwrap();
+        // The Data frame now waits on the full link, partly written.
+        let mut first = [0; 1];
+        peer.read_exact(&mut first).await.unwrap();
+        assert_eq!(first, [b'D']);
+        time::timeout(Duration::from_secs(1), async {
+            while tunnel.inner.writer.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        send(&mut peer, Kind::Close, 9, &[]).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut rest = vec![0; 9 + 1000 - 1];
+        time::timeout(Duration::from_secs(2), peer.read_exact(&mut rest))
+            .await
+            .unwrap()
+            .unwrap();
+        time::timeout(Duration::from_secs(2), async {
+            while std::sync::Arc::strong_count(&flow) > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the closed channel's pump kept running");
+        assert!(
+            !tunnel
+                .inner
+                .stopped
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        send(&mut peer, Kind::Data, 10, b"alive").await;
+        let mut bytes = [0; 5];
+        time::timeout(Duration::from_secs(2), other.read_exact(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&bytes, b"alive");
     }
 }
