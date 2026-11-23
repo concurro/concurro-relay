@@ -298,7 +298,7 @@ fn zero_limits_are_refused() {
         "--pending-registrations=0",
         "--relay-name-max-bytes=0",
         "--max-credential-bytes=0",
-        "--cached-circuits=0",
+        "--circuit-cache-mib=0",
     ] {
         assert!(Args::try_parse_from(REQUIRED_ARGS.iter().copied().chain([limit])).is_err());
     }

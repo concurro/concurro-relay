@@ -10,7 +10,7 @@ use std::{
     io,
     os::{
         fd::AsRawFd,
-        unix::fs::{DirBuilderExt, MetadataExt},
+        unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
     },
     path::{Path, PathBuf},
     time::SystemTime,
@@ -55,7 +55,7 @@ enum Lease {
 }
 
 /// Return the prefix circuit for these public lengths, generating it once
-/// across sessions and evicting the least recently used beyond the limit.
+/// across sessions and evicting the least recently used beyond the budget.
 pub async fn prefix_circuit(
     runtime: &Runtime,
     route: &str,
@@ -65,14 +65,23 @@ pub async fn prefix_circuit(
 ) -> Result<Circuit> {
     let cache = runtime.circuit_cache.clone();
     let name = format!("{route}-{partial_len}-{offset}-{credential_len}.txt");
-    let limit = runtime.limits.cached_circuits.get();
+    let budget = runtime
+        .limits
+        .circuit_cache_mib
+        .get()
+        .saturating_mul(1 << 20);
     let checked = cache.clone();
     task::spawn_blocking(move || private_directory(&checked)).await??;
     loop {
+        // Each blocking step owns the global lock, so it is released only
+        // once the step ends, even if this future is dropped.
         let global = exclusive(&cache).await?;
         let (directory, entry) = (cache.clone(), name.clone());
-        let lease = task::spawn_blocking(move || lease(&directory, &entry)).await??;
-        drop(global);
+        let lease = task::spawn_blocking(move || {
+            let _global = global;
+            lease(&directory, &entry)
+        })
+        .await??;
         let lock = match lease {
             Lease::Ready(circuit) => return Ok(circuit),
             Lease::Busy => {
@@ -82,14 +91,18 @@ pub async fn prefix_circuit(
             Lease::Missing(lock) => lock,
         };
         generate(runtime, &name, [partial_len, offset, credential_len]).await?;
-        let _global = exclusive(&cache).await?;
+        let global = exclusive(&cache).await?;
         let (directory, entry) = (cache.clone(), name.clone());
-        return task::spawn_blocking(move || publish(&directory, &entry, lock, limit)).await?;
+        return task::spawn_blocking(move || {
+            let _global = global;
+            publish(&directory, &entry, lock, budget)
+        })
+        .await?;
     }
 }
 
 /// Create the cache directory, or accept an existing one only if it is a
-/// directory this user owns that no one else can write to.
+/// directory this user owns, removing write access for anyone else.
 fn private_directory(path: &Path) -> Result<()> {
     DirBuilder::new().recursive(true).mode(0o700).create(path)?;
     let metadata = fs::symlink_metadata(path)?;
@@ -104,10 +117,10 @@ fn private_directory(path: &Path) -> Result<()> {
         metadata.uid() == user,
         "circuit cache {shown} belongs to another user"
     );
-    ensure!(
-        metadata.mode() & 0o022 == 0,
-        "circuit cache {shown} is writable by other users"
-    );
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o022 != 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode & !0o022))?;
+    }
     Ok(())
 }
 
@@ -211,16 +224,16 @@ async fn generate(runtime: &Runtime, name: &str, lengths: [usize; 3]) -> Result<
     Ok(())
 }
 
-/// Lease freshly generated entry `name` and evict beyond `limit`, under the
-/// global lock.
-fn publish(cache: &Path, name: &str, lock: File, limit: usize) -> Result<Circuit> {
+/// Lease freshly generated entry `name` and evict beyond `budget` bytes,
+/// under the global lock.
+fn publish(cache: &Path, name: &str, lock: File, budget: u64) -> Result<Circuit> {
     lock.set_modified(SystemTime::now())?;
     // Nobody else takes this lock without the global one.
     ensure!(
         try_lock(&lock, libc::LOCK_SH)?,
         "circuit cache lease conflict"
     );
-    evict(cache, name, limit)?;
+    evict(cache, name, budget)?;
     Ok(Circuit {
         path: cache.join(name),
         _lease: lock,
@@ -228,8 +241,8 @@ fn publish(cache: &Path, name: &str, lock: File, limit: usize) -> Result<Circuit
 }
 
 /// Remove abandoned entries, and the least recently used published ones
-/// beyond `limit`, skipping `keep` and any entry in use.
-fn evict(cache: &Path, keep: &str, limit: usize) -> Result<()> {
+/// beyond `budget` bytes, skipping `keep` and any entry in use.
+fn evict(cache: &Path, keep: &str, budget: u64) -> Result<()> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(cache)? {
         let entry = entry?;
@@ -241,14 +254,14 @@ fn evict(cache: &Path, keep: &str, limit: usize) -> Result<()> {
             continue;
         }
         let used = entry.metadata()?.modified()?;
-        let published = cache.join(name).try_exists()?;
-        entries.push((used, name.to_owned(), published));
+        entries.push((used, name.to_owned(), size(&cache.join(name))?));
     }
     entries.sort();
     // The kept entry counts too.
-    let mut published = 1 + entries.iter().filter(|entry| entry.2).count();
-    for (_, name, is_published) in entries {
-        if is_published && published <= limit {
+    let mut total = size(&cache.join(keep))?.unwrap_or(0)
+        + entries.iter().filter_map(|entry| entry.2).sum::<u64>();
+    for (_, name, published) in entries {
+        if published.is_some() && total <= budget {
             continue;
         }
         let lock = open_lock(&lock_path(cache, &name))?;
@@ -264,9 +277,18 @@ fn evict(cache: &Path, keep: &str, limit: usize) -> Result<()> {
             _ => {}
         }
         remove(&lock_path(cache, &name))?;
-        published -= usize::from(is_published);
+        total -= published.unwrap_or(0);
     }
     Ok(())
+}
+
+/// The size of a published circuit, if there is one.
+fn size(path: &Path) -> Result<Option<u64>> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata.len())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
 }
 
 /// Remove a file that may not exist.

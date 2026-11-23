@@ -107,10 +107,10 @@ struct Args {
     /// the prefix circuit generated for it.
     #[arg(long, default_value_t = NativeLimits::DEFAULT.credential_bytes)]
     max_credential_bytes: NonZeroUsize,
-    /// Generated prefix circuits kept in the cache; the least recently used
-    /// beyond it are removed.
-    #[arg(long, default_value_t = NativeLimits::DEFAULT.cached_circuits)]
-    cached_circuits: NonZeroUsize,
+    /// MiB of generated prefix circuits kept in the cache; the least recently
+    /// used circuits not in use are removed beyond it.
+    #[arg(long, default_value_t = NativeLimits::DEFAULT.circuit_cache_mib)]
+    circuit_cache_mib: NonZeroU64,
     /// Unix start time; live telemetry before it is unknown.
     #[arg(skip)]
     started: f64,

@@ -1,6 +1,9 @@
 //! Worker command-line configuration and parent-facing events.
 
-use std::{num::NonZeroUsize, path::PathBuf};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
@@ -57,9 +60,9 @@ pub struct WorkerConfig {
     /// Longest Sponsor credential Concurro builds a prefix circuit for.
     #[arg(long, default_value_t = NativeLimits::DEFAULT.credential_bytes)]
     pub max_credential_bytes: NonZeroUsize,
-    /// Generated prefix circuits kept in the cache.
-    #[arg(long, default_value_t = NativeLimits::DEFAULT.cached_circuits)]
-    pub cached_circuits: NonZeroUsize,
+    /// MiB of generated prefix circuits kept in the cache.
+    #[arg(long, default_value_t = NativeLimits::DEFAULT.circuit_cache_mib)]
+    pub circuit_cache_mib: NonZeroU64,
 }
 
 impl WorkerConfig {
@@ -67,7 +70,7 @@ impl WorkerConfig {
     pub fn limits(&self) -> NativeLimits {
         NativeLimits {
             credential_bytes: self.max_credential_bytes,
-            cached_circuits: self.cached_circuits,
+            circuit_cache_mib: self.circuit_cache_mib,
         }
     }
 }

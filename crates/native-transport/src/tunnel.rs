@@ -215,6 +215,19 @@ impl Credit {
         self.changed.notify_waiters();
     }
 
+    /// Wait until the peer abandons the channel.
+    async fn closed(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.closed.load(Ordering::SeqCst) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
     /// Wake the sender of a channel the peer abandoned.
     fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
@@ -339,26 +352,37 @@ impl Inner {
 
     /// Send one frame without interleaving another channel's bytes.
     async fn send(&self, kind: Kind, channel: u32, payload: Vec<u8>) -> Result<()> {
+        self.write(|| {
+            Ok((
+                Frame {
+                    kind,
+                    channel,
+                    payload,
+                },
+                (),
+            ))
+        })
+        .await
+    }
+
+    /// Write the frame `frame` makes while holding the writer, so frames are
+    /// sent in the order `frame` runs.
+    async fn write<T>(&self, frame: impl FnOnce() -> Result<(Frame, T)>) -> Result<T> {
         let result = self
             .until_closed(async {
                 let mut writer = self.writer.lock().await;
                 ensure!(!self.stopped.load(Ordering::SeqCst), "native tunnel closed");
+                let (frame, value) = frame()?;
                 let mut guard = FrameWriteGuard {
                     inner: self,
                     armed: true,
                 };
-                let result = Frame {
-                    kind,
-                    channel,
-                    payload,
-                }
-                .write(&mut *writer)
-                .await;
+                let result = frame.write(&mut *writer).await;
                 if let Err(error) = &result {
                     self.fail(error.to_string());
                 }
                 guard.armed = false;
-                result
+                result.map(|()| value)
             })
             .await;
         if let Err(error) = &result {
@@ -393,15 +417,26 @@ impl Inner {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Open the next local channel.
-    fn open_local(&self) -> Result<(u32, Inbound, Arc<Credit>)> {
-        let mut shared = self.shared.lock().unwrap();
-        let number = shared
-            .highest
-            .checked_add(1)
-            .context("native tunnel channels exhausted")?;
-        let (inbound, credit) = shared.open(number)?;
-        Ok((number, inbound, credit))
+    /// Open the next local channel to `registration`; numbers reach the peer
+    /// in increasing order.
+    async fn open_local(&self, registration: u32) -> Result<(u32, Inbound, Arc<Credit>)> {
+        self.write(|| {
+            let mut shared = self.shared.lock().unwrap();
+            let number = shared
+                .highest
+                .checked_add(1)
+                .context("native tunnel channels exhausted")?;
+            let (inbound, credit) = shared.open(number)?;
+            Ok((
+                Frame {
+                    kind: Kind::Open,
+                    channel: number,
+                    payload: registration.to_be_bytes().to_vec(),
+                },
+                (number, inbound, credit),
+            ))
+        })
+        .await
     }
 
     /// Stop tracking channel `number`, telling the peer when it was still open.
@@ -764,20 +799,8 @@ async fn accept_loop(
         let Some((socket, _)) = accepted else {
             return Ok(());
         };
-        let (number, receiver, credit) = inner.open_local()?;
-        let (ready, started) = oneshot::channel();
-        pump_channel(
-            inner.clone(),
-            number,
-            socket,
-            receiver,
-            credit,
-            Some(started),
-        );
-        inner
-            .send(Kind::Open, number, registration.to_be_bytes().to_vec())
-            .await?;
-        let _ = ready.send(());
+        let (number, receiver, credit) = inner.open_local(registration).await?;
+        pump_channel(inner.clone(), number, socket, receiver, credit);
     }
 }
 
@@ -797,7 +820,7 @@ async fn connect_target(
             .await
         {
             Ok(socket) => {
-                pump_channel(inner, number, socket, receiver, credit, None);
+                pump_channel(inner, number, socket, receiver, credit);
                 return;
             }
             Err(error)
@@ -836,19 +859,20 @@ fn pump_channel(
     socket: TcpStream,
     mut inbound: Inbound,
     credit: Arc<Credit>,
-    ready: Option<oneshot::Receiver<()>>,
 ) {
     tokio::spawn(async move {
         let (mut read, mut write) = socket.into_split();
         let failed = {
             let outbound = async {
-                if let Some(ready) = ready {
-                    inner.until_closed(async { Ok(ready.await?) }).await?;
-                }
                 let mut buffer = vec![0; MAX_PAYLOAD];
                 loop {
                     let count = inner
-                        .until_closed(async { Ok(read.read(&mut buffer).await?) })
+                        .until_closed(async {
+                            tokio::select! {
+                                count = read.read(&mut buffer) => Ok(count?),
+                                () = credit.closed() => bail!("native tunnel channel closed by peer"),
+                            }
+                        })
                         .await?;
                     if count == 0 {
                         inner.send(Kind::End, number, Vec::new()).await?;
@@ -956,7 +980,7 @@ mod tests {
         let sender = tunnel.inner.shared.lock().unwrap().channels[&7]
             .inbound
             .clone();
-        pump_channel(tunnel.inner.clone(), 7, socket, inbound, credit, None);
+        pump_channel(tunnel.inner.clone(), 7, socket, inbound, credit);
         sender.send(Some(vec![b'z'; 8 * 1024 * 1024])).unwrap();
         client.write_all(b"outbound").await.unwrap();
         time::timeout(Duration::from_secs(1), async {
@@ -1002,7 +1026,7 @@ mod tests {
         let sender = tunnel.inner.shared.lock().unwrap().channels[&8]
             .inbound
             .clone();
-        pump_channel(tunnel.inner.clone(), 8, socket, inbound, credit, None);
+        pump_channel(tunnel.inner.clone(), 8, socket, inbound, credit);
         client.write_all(b"outbound").await.unwrap();
         let mut first_byte = [0];
         time::timeout(Duration::from_secs(1), peer.read_exact(&mut first_byte))
@@ -1142,7 +1166,7 @@ mod tests {
             .unwrap();
         let (socket, _) = listener.accept().await.unwrap();
         let (inbound, credit) = tunnel.inner.shared.lock().unwrap().open(3).unwrap();
-        pump_channel(tunnel.inner.clone(), 3, socket, inbound, credit, None);
+        pump_channel(tunnel.inner.clone(), 3, socket, inbound, credit);
         let writing = tokio::spawn(async move {
             client.write_all(&vec![b'y'; 2 * WINDOW]).await.unwrap();
             client
@@ -1177,7 +1201,7 @@ mod tests {
             .unwrap();
         let (socket, _) = listener.accept().await.unwrap();
         let (inbound, credit) = tunnel.inner.shared.lock().unwrap().open(5).unwrap();
-        pump_channel(tunnel.inner.clone(), 5, socket, inbound, credit, None);
+        pump_channel(tunnel.inner.clone(), 5, socket, inbound, credit);
         let chunk = vec![b'z'; super::MAX_PAYLOAD];
         for _ in 0..WINDOW / chunk.len() {
             send(&mut peer, Kind::Data, 5, &chunk).await;

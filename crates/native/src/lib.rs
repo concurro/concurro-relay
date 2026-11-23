@@ -3,7 +3,7 @@
 use std::{
     collections::HashSet,
     env, fs,
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::PathBuf,
     sync::{Mutex, OnceLock},
@@ -188,15 +188,15 @@ pub struct NativeAudit {
 pub struct NativeLimits {
     /// Longest Sponsor credential Concurro builds a prefix circuit for.
     pub credential_bytes: NonZeroUsize,
-    /// Generated prefix circuits kept in the shared cache.
-    pub cached_circuits: NonZeroUsize,
+    /// MiB of generated prefix circuits kept in the shared cache.
+    pub circuit_cache_mib: NonZeroU64,
 }
 
 impl NativeLimits {
     /// Bounds used unless configured.
     pub const DEFAULT: Self = Self {
-        credential_bytes: NonZeroUsize::new(8192).unwrap(),
-        cached_circuits: NonZeroUsize::new(64).unwrap(),
+        credential_bytes: NonZeroUsize::new(4096).unwrap(),
+        circuit_cache_mib: NonZeroU64::new(8192).unwrap(),
     };
 }
 
@@ -312,8 +312,8 @@ where
         .arg(&circuit_cache)
         .arg("--max-credential-bytes")
         .arg(options.limits.credential_bytes.to_string())
-        .arg("--cached-circuits")
-        .arg(options.limits.cached_circuits.to_string());
+        .arg("--circuit-cache-mib")
+        .arg(options.limits.circuit_cache_mib.to_string());
     if let Some(listen) = &options.listen {
         command.arg("--listen").arg(listen);
     }

@@ -273,3 +273,59 @@ async fn cancellation_wakes_registration() {
         );
     }
 }
+
+/// Helpers connecting to two listeners at once reach the Sponsor in the order
+/// their channels were numbered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_opens_across_listeners() {
+    for _ in 0..50 {
+        let (sponsor_link, concurro_link) = tokio::io::duplex(1 << 20);
+        let sponsor = Tunnel::start(sponsor_link, Role::Sponsor);
+        let concurro = Tunnel::start(concurro_link, Role::Concurro);
+        let mut registrations = Vec::new();
+        let mut claims = Vec::new();
+        let mut echoes = Vec::new();
+        for _ in 0..2 {
+            let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let registration = sponsor
+                .register(upstream.local_addr().unwrap().port())
+                .await
+                .unwrap();
+            claims.push(concurro.claim(registration.port()).unwrap());
+            registrations.push(registration);
+            echoes.push(tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = upstream.accept().await.unwrap();
+                    tokio::spawn(async move {
+                        let mut body = Vec::new();
+                        socket.read_to_end(&mut body).await.unwrap();
+                        socket.write_all(&body).await.unwrap();
+                    });
+                }
+            }));
+        }
+        let clients: Vec<_> = (0..16)
+            .map(|index| {
+                let port = registrations[index % 2].port();
+                tokio::spawn(async move {
+                    let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+                        .await
+                        .unwrap();
+                    socket.write_all(b"x").await.unwrap();
+                    socket.shutdown().await.unwrap();
+                    let mut echoed = Vec::new();
+                    socket.read_to_end(&mut echoed).await.unwrap();
+                    echoed
+                })
+            })
+            .collect();
+        for client in clients {
+            let echoed = time::timeout(Duration::from_secs(5), client)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(echoed, b"x");
+        }
+        echoes.iter().for_each(|echo| echo.abort());
+    }
+}

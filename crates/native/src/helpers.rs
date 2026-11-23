@@ -1209,15 +1209,19 @@ mod tests {
         fs::remove_dir_all(runtime.root).unwrap();
     }
 
-    /// Make a fake prefix generator writing its lengths, and a runtime
-    /// keeping `limit` circuits.
-    fn generating(limit: usize) -> Runtime {
+    /// Make a fake prefix generator writing 1 MiB circuits that start with
+    /// their first length, and a runtime keeping `mib` of them.
+    fn generating(mib: u64) -> Runtime {
         let mut runtime = runtime();
-        runtime.limits.cached_circuits = limit.try_into().unwrap();
+        runtime.limits.circuit_cache_mib = mib.try_into().unwrap();
         fs::create_dir_all(runtime.distefano("src/emp-tool")).unwrap();
         fs::create_dir_all(runtime.distefano("src/2pc")).unwrap();
         let helper = runtime.distefano("build/HandoffPrefix");
-        fs::write(&helper, b"#!/bin/sh\nprintf \"$2\" > \"$5\"\n").unwrap();
+        fs::write(
+            &helper,
+            b"#!/bin/sh\n{ printf \"$2\"; head -c 1048574 /dev/zero; } > \"$5\"\n",
+        )
+        .unwrap();
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
         runtime
     }
@@ -1233,7 +1237,7 @@ mod tests {
         names
     }
 
-    /// Beyond the limit the least recently used circuit nobody holds goes,
+    /// Beyond the budget the least recently used circuit nobody holds goes,
     /// along with abandoned generator output; one in use stays.
     #[tokio::test]
     async fn cache_evicts_least_recently_used() {
@@ -1259,7 +1263,7 @@ mod tests {
                 .join("workspace/codex-33-16-1.txt")
                 .exists()
         );
-        assert_eq!(fs::read(held.path()).unwrap(), b"32");
+        assert!(fs::read(held.path()).unwrap().starts_with(b"32"));
         drop(held);
         // Using 34 again makes 32 the least recently used.
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1269,18 +1273,20 @@ mod tests {
         fs::remove_dir_all(runtime.root).unwrap();
     }
 
-    /// A cache directory others can write to, or a link, is refused.
+    /// Others lose write access to an existing cache directory, and a link
+    /// is refused.
     #[tokio::test]
     async fn cache_directory_must_be_private() {
         let runtime = generating(2);
         fs::create_dir_all(&runtime.circuit_cache).unwrap();
         fs::set_permissions(&runtime.circuit_cache, fs::Permissions::from_mode(0o777)).unwrap();
-        let error = prefix_circuit(&runtime, "codex", 32, 16, 1)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("writable by other users"), "{error}");
-        fs::remove_dir(&runtime.circuit_cache).unwrap();
+        prefix_circuit(&runtime, "codex", 32, 16, 1).await.unwrap();
+        let mode = fs::metadata(&runtime.circuit_cache)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
+        fs::remove_dir_all(&runtime.circuit_cache).unwrap();
         let elsewhere = runtime.root.join("elsewhere");
         fs::create_dir(&elsewhere).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &runtime.circuit_cache).unwrap();
