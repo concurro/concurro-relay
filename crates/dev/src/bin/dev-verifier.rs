@@ -10,7 +10,7 @@ use std::{collections::HashMap, fs, net::SocketAddr, path::PathBuf, sync::Arc, t
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use concurro_relay_dev::{gateway::Gateway, registry::DevRegistry, tls};
-use concurro_relay_native::{self as native, NativeOptions, NativeRole};
+use concurro_relay_native::{self as native, NativeLimits, NativeOptions, NativeRole};
 use concurro_relay_protocol::{
     Roots,
     link::{Notice, Order},
@@ -339,6 +339,7 @@ async fn main() -> Result<()> {
                             role: NativeRole::Concurro, route, provider_host, provider_port,
                             provider_ca, listen: Some("127.0.0.1:0".to_owned()),
                             token: None, account: None, audit: None, review: None, ready: Some(ready),
+                            limits: NativeLimits::default(),
                         });
                         tokio::pin!(bridge);
                         tokio::select! {

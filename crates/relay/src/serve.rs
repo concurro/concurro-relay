@@ -18,7 +18,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use concurro_relay_native::{
-    self as native, NativeOptions, NativeRequest, NativeRole, NativeVerdict, Review,
+    self as native, NativeLimits, NativeOptions, NativeRequest, NativeRole, NativeVerdict, Review,
 };
 use concurro_relay_protocol::{
     Roots, identity,
@@ -603,6 +603,7 @@ where
                 audit: Some(audit),
                 review: Some(review),
                 ready: None,
+                limits: NativeLimits::default(),
             },
         )
         .await;

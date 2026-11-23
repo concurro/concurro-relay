@@ -164,10 +164,7 @@ pub async fn start<C: AsyncRead + AsyncWrite + Unpin>(
     options: BootstrapOptions,
 ) -> Result<Session<C>> {
     options.runtime.prepare().await?;
-    let mut peer = Peer {
-        stream: control,
-        events: Vec::new(),
-    };
+    let mut peer = Peer::new(control);
     helpers::exchange_mascot_identity(&mut peer, options.role, &options.runtime).await?;
     continue_start(peer, tunnel, options).await
 }
@@ -179,15 +176,7 @@ pub async fn start_after_identity<C: AsyncRead + AsyncWrite + Unpin>(
     options: BootstrapOptions,
 ) -> Result<Session<C>> {
     options.runtime.prepare().await?;
-    continue_start(
-        Peer {
-            stream: control,
-            events: Vec::new(),
-        },
-        tunnel,
-        options,
-    )
-    .await
+    continue_start(Peer::new(control), tunnel, options).await
 }
 
 /// Share the exact handshake and prefix path between fixture and worker entry points.
@@ -201,7 +190,7 @@ async fn continue_start<C: AsyncRead + AsyncWrite + Unpin>(
         NativeRole::Concurro => concurro(&mut peer, tunnel.as_ref(), &options).await,
     }?;
     let result = BootstrapResult {
-        events: peer.events.clone(),
+        events: peer.take_events(),
         ..result
     };
     let key_commitment = hex::decode(&result.prefix_key_commitment)?
@@ -372,24 +361,21 @@ async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
     options: &BootstrapOptions,
 ) -> Result<(BootstrapResult, Application, [u8; 32], [u8; 32], [u8; 32])> {
     let shape = peer.receive("credential_shape").await?;
+    let length = shape
+        .metadata
+        .get("length")
+        .and_then(Value::as_u64)
+        .and_then(|length| usize::try_from(length).ok())
+        .filter(|length| *length > 0)
+        .context("invalid public credential length")?;
+    let limit = options.runtime.limits.credential_bytes;
     ensure!(
-        shape
-            .metadata
-            .get("length")
-            .and_then(Value::as_u64)
-            .is_some_and(|value| value > 0),
-        "invalid public credential length"
+        length <= limit.get(),
+        "the Sponsor's {length}-byte credential exceeds the {limit}-byte limit"
     );
     let (mut keyshare, offer) = KeyShare::start(&options.runtime).await?;
     let (joint, session) = keyshare.joint(peer, options.role, offer).await?;
-    let prepared = prefix::prepare(
-        peer,
-        tunnel,
-        options,
-        shape.metadata["length"].as_u64().unwrap() as usize,
-        session,
-    )
-    .await?;
+    let prepared = prefix::prepare(peer, tunnel, options, length, session).await?;
     let client = peer.receive("client_hello").await?.data;
     let hello_session =
         handshake::validate_client_hello(options.profile, &client, options.hostname(), &joint)?;
@@ -474,20 +460,13 @@ async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
         handshake_public: &public,
         master_mask,
     };
-    let prefix = prefix::concurro(
-        peer,
-        tunnel,
-        shape.metadata["length"].as_u64().unwrap() as usize,
-        &context,
-        prepared,
-    )
-    .await?;
+    let prefix = prefix::concurro(peer, tunnel, length, &context, prepared).await?;
     Ok((
         result(options, h2, h3, session, &public, &prefix.public, true),
         Application::Concurro {
             records: Box::new(prefix.records),
             tail: prefix.tail,
-            credential_length: shape.metadata["length"].as_u64().unwrap() as usize,
+            credential_length: length,
         },
         h2,
         h3,

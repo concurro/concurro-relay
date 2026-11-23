@@ -18,7 +18,7 @@ use tokio::{
 
 use crate::{
     NativeRole,
-    helpers::{Peer, Runtime},
+    helpers::{self, Peer, Runtime},
 };
 
 /// Directional bytes through Sponsor's authenticated proof proxy.
@@ -46,20 +46,20 @@ pub async fn request<C: AsyncRead + AsyncWrite + Unpin>(
     };
     let log_name = format!("{name}-request-{turn}-proof.log");
     let log = runtime.output.join(&log_name);
-    let port = if role == NativeRole::Concurro {
+    // The tunnel listener this proof uses, held until it finishes.
+    let claimed = if role == NativeRole::Concurro {
         let assignment = peer.receive("proof_port").await?;
         ensure!(
             assignment.metadata.get("turn") == Some(&json!(turn)),
             "request proof turn mismatch"
         );
-        Some(
-            assignment
-                .metadata
-                .get("port")
-                .and_then(Value::as_str)
-                .context("request proof port missing")?
-                .parse::<u16>()?,
-        )
+        let port = assignment
+            .metadata
+            .get("port")
+            .and_then(Value::as_str)
+            .context("request proof port missing")?
+            .parse::<u16>()?;
+        Some(helpers::claim(Some(tunnel), port)?)
     } else {
         None
     };
@@ -73,8 +73,8 @@ pub async fn request<C: AsyncRead + AsyncWrite + Unpin>(
     } else {
         "prover"
     });
-    if let Some(port) = port {
-        command.arg(port.to_string());
+    if let Some(claimed) = &claimed {
+        command.arg(claimed.port().to_string());
     }
     let mut child = command
         .stdin(Stdio::piped())
@@ -120,13 +120,16 @@ pub async fn request<C: AsyncRead + AsyncWrite + Unpin>(
     };
     drop(input);
     let deadline = runtime.benchmark_timeout.max(Duration::from_secs(90));
+    let mut _registration = None;
     let proxy = if role == NativeRole::Sponsor {
         let local = time::timeout(Duration::from_secs(30), ready_rx)
             .await
             .context("request verifier did not bind")?
             .context("request verifier exited before readiness")?;
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
-        let mapped = tunnel.register(listener.local_addr()?.port()).await?;
+        let registration = tunnel.register(listener.local_addr()?.port()).await?;
+        let mapped = registration.port();
+        _registration = Some(registration);
         tasks.spawn(async move {
             let (mut remote, _) = listener.accept().await?;
             let mut verifier = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, local)).await?;
@@ -217,6 +220,7 @@ mod tests {
             root: root.clone(),
             output: root.join("output"),
             circuit_cache: root.join("cache"),
+            limits: crate::NativeLimits::DEFAULT,
             benchmark_timeout: Duration::from_secs(1),
         };
         (root, runtime)
@@ -243,6 +247,45 @@ mod tests {
         )
     }
 
+    /// Send Concurro the port to prove request 1 through.
+    async fn send_port(control: &mut tokio::io::DuplexStream, port: u16) {
+        control::send(
+            control,
+            &Message {
+                kind: "proof_port".into(),
+                data: Vec::new(),
+                metadata: serde_json::from_value(json!({"turn": 1, "port": port.to_string()}))
+                    .unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Concurro refuses a port its tunnel did not open before starting a helper.
+    #[tokio::test]
+    async fn prover_refuses_unregistered_port() {
+        let (root, runtime) = fake_runtime("#!/bin/sh\ntouch \"$(dirname \"$0\")/started\"\n");
+        let (control_local, mut control_remote) = duplex(4096);
+        send_port(&mut control_remote, 9).await;
+        let (aux, _unused) = duplex(4096);
+        let tunnel = Arc::new(Tunnel::start(aux, Role::Concurro));
+        let mut peer = Peer::new(control_local);
+        let error = request(
+            &mut peer,
+            NativeRole::Concurro,
+            &tunnel,
+            &runtime,
+            &claim(),
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("did not open"), "{error:#}");
+        assert!(!root.join("request-proof/target/release/started").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// Cancellation before and after readiness kills the helper and its proxy task.
     #[tokio::test]
     async fn sponsor_cancellation_scopes_tasks() {
@@ -259,10 +302,7 @@ mod tests {
             let other = Tunnel::start(aux_concurro, Role::Concurro);
             let worker_tunnel = tunnel.clone();
             let worker = tokio::spawn(async move {
-                let mut peer = Peer {
-                    stream: control_local,
-                    events: Vec::new(),
-                };
+                let mut peer = Peer::new(control_local);
                 request(
                     &mut peer,
                     NativeRole::Sponsor,
@@ -336,22 +376,12 @@ mod tests {
         ] {
             let (root, runtime) = fake_runtime(script);
             let (control_local, mut control_remote) = duplex(4096);
-            control::send(
-                &mut control_remote,
-                &Message {
-                    kind: "proof_port".into(),
-                    data: Vec::new(),
-                    metadata: serde_json::from_value(json!({"turn": 1, "port": "9"})).unwrap(),
-                },
-            )
-            .await
-            .unwrap();
-            let (aux, _unused) = duplex(4096);
-            let tunnel = Arc::new(Tunnel::start(aux, Role::Concurro));
-            let mut peer = Peer {
-                stream: control_local,
-                events: Vec::new(),
-            };
+            let (aux_sponsor, aux_concurro) = duplex(4096);
+            let sponsor = Tunnel::start(aux_sponsor, Role::Sponsor);
+            let tunnel = Arc::new(Tunnel::start(aux_concurro, Role::Concurro));
+            let registration = sponsor.register(9).await.unwrap();
+            send_port(&mut control_remote, registration.port()).await;
+            let mut peer = Peer::new(control_local);
             let result = request(
                 &mut peer,
                 NativeRole::Concurro,

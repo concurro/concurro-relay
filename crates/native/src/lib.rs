@@ -3,6 +3,7 @@
 use std::{
     collections::HashSet,
     env, fs,
+    num::NonZeroUsize,
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::PathBuf,
     sync::{Mutex, OnceLock},
@@ -182,6 +183,29 @@ pub struct NativeAudit {
     pub session_id: String,
 }
 
+/// Resource bounds for native sessions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeLimits {
+    /// Longest Sponsor credential Concurro builds a prefix circuit for.
+    pub credential_bytes: NonZeroUsize,
+    /// Generated prefix circuits kept in the shared cache.
+    pub cached_circuits: NonZeroUsize,
+}
+
+impl NativeLimits {
+    /// Bounds used unless configured.
+    pub const DEFAULT: Self = Self {
+        credential_bytes: NonZeroUsize::new(8192).unwrap(),
+        cached_circuits: NonZeroUsize::new(64).unwrap(),
+    };
+}
+
+impl Default for NativeLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 impl NativeRole {
     /// The role name understood by the bundled worker.
     fn argument(self) -> &'static str {
@@ -217,6 +241,8 @@ pub struct NativeOptions {
     pub review: Option<UnboundedSender<Review>>,
     /// Concurro-side stream of bound local CLI ingress addresses.
     pub ready: Option<UnboundedSender<String>>,
+    /// Resource bounds for the session.
+    pub limits: NativeLimits,
 }
 
 /// Locate the self-contained worker and native runtime beside the executable.
@@ -237,9 +263,15 @@ where
     P: AsyncRead + AsyncWrite + Unpin,
 {
     let bundle = bundle()?;
-    let output_root = env::var_os("CONCURRO_NATIVE_OUTPUT")
-        .map(PathBuf::from)
-        .unwrap_or_else(env::temp_dir);
+    let output = env::var_os("CONCURRO_NATIVE_OUTPUT").map(PathBuf::from);
+    // Without a configured output root, circuits live in the user's cache
+    // rather than the shared temporary directory.
+    let circuit_cache = output
+        .clone()
+        .or_else(|| dirs::cache_dir().map(|cache| cache.join("concurro-relay")))
+        .unwrap_or_else(env::temp_dir)
+        .join("public-circuits");
+    let output_root = output.unwrap_or_else(env::temp_dir);
     let (mut native_session, session) = NativeSession::create(output_root)?;
     let control_path = native_session.control_path.clone();
     let auxiliary_path = native_session.auxiliary_path.clone();
@@ -275,7 +307,13 @@ where
         .arg("--provider-port")
         .arg(options.provider_port.to_string())
         .arg("--provider-ca")
-        .arg(&options.provider_ca);
+        .arg(&options.provider_ca)
+        .arg("--circuit-cache")
+        .arg(&circuit_cache)
+        .arg("--max-credential-bytes")
+        .arg(options.limits.credential_bytes.to_string())
+        .arg("--cached-circuits")
+        .arg(options.limits.cached_circuits.to_string());
     if let Some(listen) = &options.listen {
         command.arg("--listen").arg(listen);
     }

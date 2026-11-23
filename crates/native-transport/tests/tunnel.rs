@@ -2,7 +2,7 @@
 
 use std::{net::Ipv4Addr, sync::Arc, time::Duration};
 
-use concurro_relay_native_transport::tunnel::{Frame, Kind, MAX_PAYLOAD, Role, Tunnel};
+use concurro_relay_native_transport::tunnel::{Frame, Kind, MAX_PAYLOAD, Role, Tunnel, WINDOW};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -69,15 +69,9 @@ async fn concurrent_channels_and_half_close() {
         let concurro = Tunnel::start(concurro_link, Role::Concurro);
         let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let target = upstream.local_addr().unwrap().port();
-        let waiter = tokio::spawn(async move {
-            let mapped = concurro.wait_target(target).await.unwrap();
-            (concurro, mapped)
-        });
-        tokio::task::yield_now().await;
-        assert!(!waiter.is_finished());
-        let mapped = sponsor.register(target).await.unwrap();
-        let (concurro, waited) = waiter.await.unwrap();
-        assert_eq!(mapped, waited);
+        let registration = sponsor.register(target).await.unwrap();
+        let mapped = registration.port();
+        let claim = concurro.claim(mapped).unwrap();
         let upstream_task = tokio::spawn(async move {
             let mut tasks = Vec::new();
             for _ in 0..2 {
@@ -119,6 +113,7 @@ async fn concurrent_channels_and_half_close() {
         let mut expected = expected.to_vec();
         expected.sort();
         assert_eq!(received, expected);
+        drop((claim, registration));
         sponsor.close();
         concurro.close();
     })
@@ -137,7 +132,7 @@ async fn delayed_target_does_not_block_other_channels() {
         let absent = reserved.local_addr().unwrap().port();
         drop(reserved);
         let slow = sponsor.register(absent).await.unwrap();
-        let _waiting = TcpStream::connect((Ipv4Addr::LOCALHOST, slow))
+        let _waiting = TcpStream::connect((Ipv4Addr::LOCALHOST, slow.port()))
             .await
             .unwrap();
         let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -149,7 +144,7 @@ async fn delayed_target_does_not_block_other_channels() {
             socket.read_exact(&mut bytes).await.unwrap();
             socket.write_all(&bytes).await.unwrap();
         });
-        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, fast))
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, fast.port()))
             .await
             .unwrap();
         client.write_all(b"ok!").await.unwrap();
@@ -164,22 +159,96 @@ async fn delayed_target_does_not_block_other_channels() {
     .unwrap();
 }
 
-/// Closing one tunnel wakes its pending registration waiters.
+/// A cancelled tunnel hands out no listener.
 #[tokio::test]
-async fn cancellation_wakes_waiter() {
+async fn cancellation_refuses_claims() {
     let (left, _right) = tokio::io::duplex(64);
-    let tunnel = Arc::new(Tunnel::start(left, Role::Concurro));
-    let pending = tunnel.clone();
-    let waiter = tokio::spawn(async move { pending.wait_target(12345).await });
-    tokio::task::yield_now().await;
+    let tunnel = Tunnel::start(left, Role::Concurro);
     tunnel.cancel();
     assert!(
-        time::timeout(Duration::from_secs(1), waiter)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_err()
+        tunnel
+            .claim(12345)
+            .unwrap_err()
+            .to_string()
+            .contains("closed")
     );
+}
+
+/// A large transfer to a helper that reads slowly arrives whole, within the
+/// channel's window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_reader_receives_everything() {
+    time::timeout(Duration::from_secs(20), async {
+        let (sponsor_link, concurro_link) = tokio::io::duplex(1 << 16);
+        let sponsor = Tunnel::start(sponsor_link, Role::Sponsor);
+        let concurro = Tunnel::start(concurro_link, Role::Concurro);
+        let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let registration = sponsor
+            .register(upstream.local_addr().unwrap().port())
+            .await
+            .unwrap();
+        let _claim = concurro.claim(registration.port()).unwrap();
+        let body: Vec<u8> = (0..3 * WINDOW).map(|index| index as u8).collect();
+        let sending = body.clone();
+        let port = registration.port();
+        let client = tokio::spawn(async move {
+            let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+                .await
+                .unwrap();
+            socket.write_all(&sending).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let (mut socket, _) = upstream.accept().await.unwrap();
+        let mut received = Vec::new();
+        let mut chunk = vec![0; 8192];
+        loop {
+            time::sleep(Duration::from_micros(50)).await;
+            let count = socket.read(&mut chunk).await.unwrap();
+            if count == 0 {
+                break;
+            }
+            received.extend_from_slice(&chunk[..count]);
+        }
+        assert!(received == body);
+        client.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// A released registration closes the channel opened to it, and the tunnel
+/// keeps serving other registrations.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn released_registration_closes_only_its_channel() {
+    time::timeout(Duration::from_secs(5), async {
+        let (sponsor_link, concurro_link) = tokio::io::duplex(4096);
+        let sponsor = Tunnel::start(sponsor_link, Role::Sponsor);
+        let concurro = Tunnel::start(concurro_link, Role::Concurro);
+        let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let target = upstream.local_addr().unwrap().port();
+        let released = sponsor.register(target).await.unwrap();
+        let port = released.port();
+        let _claim = concurro.claim(port).unwrap();
+        drop(released);
+        let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        let mut rest = Vec::new();
+        socket.read_to_end(&mut rest).await.unwrap();
+        assert!(rest.is_empty());
+        let live = sponsor.register(target).await.unwrap();
+        let _live = concurro.claim(live.port()).unwrap();
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, live.port()))
+            .await
+            .unwrap();
+        let (mut server, _) = upstream.accept().await.unwrap();
+        client.write_all(b"still up").await.unwrap();
+        let mut bytes = [0; 8];
+        server.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"still up");
+    })
+    .await
+    .unwrap();
 }
 
 /// Cancellation wakes writes blocked on the link and on its writer lock.

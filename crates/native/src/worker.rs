@@ -1,12 +1,12 @@
 //! Worker command-line configuration and parent-facing events.
 
-use std::path::PathBuf;
+use std::{num::NonZeroUsize, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use tokio::io::{AsyncBufRead, Lines};
 
-use crate::{NativeAudit, NativeRequest, NativeRole, NativeVerdict, session::Gate};
+use crate::{NativeAudit, NativeLimits, NativeRequest, NativeRole, NativeVerdict, session::Gate};
 
 /// Provider protocol selected for this session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -51,6 +51,25 @@ pub struct WorkerConfig {
     /// Local Concurro CLI ingress address.
     #[arg(long, default_value = "127.0.0.1:7050")]
     pub listen: String,
+    /// Shared generated-circuit cache; beside the output directory by default.
+    #[arg(long)]
+    pub circuit_cache: Option<PathBuf>,
+    /// Longest Sponsor credential Concurro builds a prefix circuit for.
+    #[arg(long, default_value_t = NativeLimits::DEFAULT.credential_bytes)]
+    pub max_credential_bytes: NonZeroUsize,
+    /// Generated prefix circuits kept in the cache.
+    #[arg(long, default_value_t = NativeLimits::DEFAULT.cached_circuits)]
+    pub cached_circuits: NonZeroUsize,
+}
+
+impl WorkerConfig {
+    /// The configured resource bounds.
+    pub fn limits(&self) -> NativeLimits {
+        NativeLimits {
+            credential_bytes: self.max_credential_bytes,
+            cached_circuits: self.cached_circuits,
+        }
+    }
 }
 
 /// A line emitted to the parent bridge on standard output.

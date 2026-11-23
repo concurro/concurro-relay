@@ -1,12 +1,9 @@
 //! Session-owned adapters for the accepted native handshake helpers.
 
 use std::{
-    env, fs, io,
+    env, fs,
     net::{Ipv4Addr, SocketAddrV4, TcpListener as StdTcpListener},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{PermissionsExt, symlink},
-    },
+    os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -15,7 +12,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use concurro_relay_native_transport::{
     control::{self, Message},
-    tunnel::Tunnel,
+    tunnel::{Claim, Registration, Tunnel},
 };
 use num_bigint::{BigInt, BigUint, Sign};
 use ring::{
@@ -31,7 +28,11 @@ use tokio::{
     time::{self, Duration},
 };
 
-use crate::NativeRole;
+use crate::{NativeLimits, NativeRole};
+
+mod cache;
+
+pub use cache::{Circuit, prefix_circuit};
 
 const P256_PRIME: &str =
     "115792089210356248762697446949407573530086143415290314195533631308867097853951";
@@ -46,6 +47,8 @@ pub struct Runtime {
     pub output: PathBuf,
     /// Shared, public generated-circuit cache.
     pub circuit_cache: PathBuf,
+    /// Resource bounds for this session.
+    pub limits: NativeLimits,
     /// Longer helper timeout selected explicitly for benchmark runs.
     pub benchmark_timeout: Duration,
 }
@@ -95,8 +98,30 @@ impl Runtime {
 pub struct Peer<C> {
     /// Authenticated inner control stream.
     pub stream: C,
-    /// Ordered message kinds observed for fixture comparison.
-    pub events: Vec<String>,
+    /// Ordered message kinds observed for fixture comparison, until taken.
+    events: Option<Vec<String>>,
+}
+
+impl<C> Peer<C> {
+    /// Exchange control messages over `stream`, recording their kinds.
+    pub fn new(stream: C) -> Self {
+        Self {
+            stream,
+            events: Some(Vec::new()),
+        }
+    }
+
+    /// Stop recording and return the message kinds recorded so far.
+    pub fn take_events(&mut self) -> Vec<String> {
+        self.events.take().unwrap_or_default()
+    }
+
+    /// Record one message kind while recording.
+    fn record(&mut self, direction: &str, kind: &str) {
+        if let Some(events) = &mut self.events {
+            events.push(format!("{direction}:{kind}"));
+        }
+    }
 }
 
 impl<C: AsyncRead + AsyncWrite + Unpin> Peer<C> {
@@ -116,7 +141,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin> Peer<C> {
             },
         )
         .await?;
-        self.events.push(format!("send:{kind}"));
+        self.record("send", kind);
         Ok(())
     }
 
@@ -128,14 +153,14 @@ impl<C: AsyncRead + AsyncWrite + Unpin> Peer<C> {
             "expected {kind}, got {}",
             message.kind
         );
-        self.events.push(format!("receive:{kind}"));
+        self.record("receive", kind);
         Ok(message)
     }
 
     /// Receive the next message when the protocol permits several kinds.
     pub async fn receive_any(&mut self) -> Result<Message> {
         let message = control::receive(&mut self.stream).await?;
-        self.events.push(format!("receive:{}", message.kind));
+        self.record("receive", &message.kind);
         Ok(message)
     }
 }
@@ -326,13 +351,15 @@ pub async fn arithmetic_share<C: AsyncRead + AsyncWrite + Unpin>(
     session: [u8; 32],
     h2: [u8; 32],
 ) -> Result<[u8; 32]> {
+    // The tunnel listener MASCOT uses, held until it finishes.
+    let mut _registration = None;
+    let mut _claim = None;
     let (coordination, mapped, own) = if role == NativeRole::Sponsor {
         let reservation = StdTcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
         let base = reservation.local_addr()?.port();
-        let mapped = tunnel
-            .context("Sponsor tunnel missing")?
-            .register(base)
-            .await?;
+        let registration = register(tunnel, base).await?;
+        let mapped = registration.port();
+        _registration = Some(registration);
         peer.send(
             "mascot_port",
             &[],
@@ -350,6 +377,7 @@ pub async fn arithmetic_share<C: AsyncRead + AsyncWrite + Unpin>(
             "MASCOT port session differs"
         );
         let mapped = port_field(&assigned, "mapped")?;
+        _claim = Some(claim(tunnel, mapped)?);
         let reservation = StdTcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
         let own = reservation.local_addr()?.port();
         drop(reservation);
@@ -505,6 +533,10 @@ struct MpcRun {
     party: &'static str,
     /// Bound circuit phase.
     phase: String,
+    /// The Sponsor's tunnel registration, held until the helper finishes.
+    _registration: Option<Registration>,
+    /// Concurro's tunnel listener, held until the helper finishes.
+    _claim: Option<Claim>,
 }
 
 impl MpcRun {
@@ -557,19 +589,21 @@ impl MpcRun {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        let mut claimed = None;
         if role == NativeRole::Concurro {
             let assignment = peer.receive("mpc_port").await?;
             ensure!(
                 assignment.metadata.get("phase") == Some(&json!(phase)),
                 "MPC phase mismatch"
             );
-            command.arg(
-                assignment
-                    .metadata
-                    .get("port")
-                    .and_then(Value::as_str)
-                    .context("MPC port missing")?,
-            );
+            let port = assignment
+                .metadata
+                .get("port")
+                .and_then(Value::as_str)
+                .context("MPC port missing")?
+                .parse()?;
+            claimed = Some(claim(tunnel, port)?);
+            command.arg(port.to_string());
         }
         let mut child = command
             .spawn()
@@ -628,21 +662,22 @@ impl MpcRun {
                 } else {
                     Duration::from_secs(120)
                 });
+        let mut registered = None;
         if role == NativeRole::Sponsor {
             let port = time::timeout_at(deadline, ready_rx)
                 .await
                 .context("MPC sponsor did not bind")?
                 .context("MPC sponsor exited before readiness")?;
-            let mapped = tunnel
-                .context("Sponsor tunnel missing")?
-                .register(port)
-                .await?;
+            let registration = register(tunnel, port).await?;
             peer.send(
                 "mpc_port",
                 &[],
-                serde_json::from_value(json!({"port": mapped.to_string(), "phase": phase}))?,
+                serde_json::from_value(
+                    json!({"port": registration.port().to_string(), "phase": phase}),
+                )?,
             )
             .await?;
+            registered = Some(registration);
         }
         if prepared {
             time::timeout_at(deadline, prepared_rx)
@@ -657,6 +692,8 @@ impl MpcRun {
             deadline,
             party,
             phase: phase.to_owned(),
+            _registration: registered,
+            _claim: claimed,
         })
     }
 
@@ -715,7 +752,12 @@ impl MpcRun {
 }
 
 /// A bound prefix MPC whose fresh preprocessing completed before provider connect.
-pub struct PreparedCircuit(MpcRun);
+pub struct PreparedCircuit {
+    /// The prepared helper.
+    run: MpcRun,
+    /// The cached circuit it runs, kept until it finishes.
+    _circuit: Circuit,
+}
 
 impl PreparedCircuit {
     /// Prepare one bound prefix circuit without private TLS or credential inputs.
@@ -724,15 +766,25 @@ impl PreparedCircuit {
         role: NativeRole,
         runtime: &Runtime,
         tunnel: Option<&Arc<Tunnel>>,
-        circuit: &Path,
+        circuit: Circuit,
         session: [u8; 32],
     ) -> Result<Self> {
-        Ok(Self(
-            MpcRun::launch(
-                peer, role, runtime, tunnel, circuit, "prefix", session, true, None,
-            )
-            .await?,
-        ))
+        let run = MpcRun::launch(
+            peer,
+            role,
+            runtime,
+            tunnel,
+            circuit.path(),
+            "prefix",
+            session,
+            true,
+            None,
+        )
+        .await?;
+        Ok(Self {
+            run,
+            _circuit: circuit,
+        })
     }
 
     /// Supply private input after handshake verification and check identical public output.
@@ -741,7 +793,7 @@ impl PreparedCircuit {
         peer: &mut Peer<C>,
         private: &[u8],
     ) -> Result<Vec<u8>> {
-        self.0.finish(peer, Some(private)).await
+        self.run.finish(peer, Some(private)).await
     }
 }
 
@@ -768,77 +820,6 @@ pub async fn circuit_pair<C: AsyncRead + AsyncWrite + Unpin>(
     run.finish(peer, None).await
 }
 
-/// Publish a generated public prefix circuit under the Python-compatible cache key.
-pub async fn prefix_circuit(
-    runtime: &Runtime,
-    route: &str,
-    partial_len: usize,
-    offset: usize,
-    credential_len: usize,
-) -> Result<PathBuf> {
-    tokio::fs::create_dir_all(&runtime.circuit_cache).await?;
-    let name = format!("{route}-{partial_len}-{offset}-{credential_len}.txt");
-    let path = runtime.circuit_cache.join(&name);
-    let lock = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(runtime.circuit_cache.join(format!("{name}.lock")))
-        .await?
-        .into_std()
-        .await;
-    loop {
-        // SAFETY: flock receives a live descriptor; nonblocking mode never parks the executor.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            break;
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::WouldBlock {
-            return Err(error).context("prefix cache lock failed");
-        }
-        time::sleep(Duration::from_millis(20)).await;
-    }
-    if !tokio::fs::try_exists(&path).await? {
-        let work = circuit_workspace(
-            runtime,
-            &runtime.circuit_cache.join("workspace").join(&name),
-        )
-        .await?;
-        let temporary = path.with_extension("tmp");
-        let mut child = Command::new(runtime.distefano("build/HandoffPrefix"))
-            .args([
-                "generate",
-                &partial_len.to_string(),
-                &offset.to_string(),
-                &credential_len.to_string(),
-            ])
-            .arg(&temporary)
-            .current_dir(work)
-            .kill_on_drop(true)
-            .spawn()?;
-        let status = match time::timeout(
-            runtime.benchmark_timeout.max(Duration::from_secs(240)),
-            child.wait(),
-        )
-        .await
-        {
-            Ok(status) => status?,
-            Err(_) => {
-                child.start_kill()?;
-                child.wait().await?;
-                bail!("prefix circuit generation timeout");
-            }
-        };
-        ensure!(
-            status.success(),
-            "prefix circuit generation failed: {status}"
-        );
-        tokio::fs::rename(temporary, &path).await?;
-    }
-    drop(lock);
-    Ok(path)
-}
-
 /// Make the circuit's relative public dependencies available in private work space.
 async fn circuit_workspace(runtime: &Runtime, directory: &Path) -> Result<PathBuf> {
     let runtime = runtime.clone();
@@ -858,6 +839,19 @@ fn circuit_workspace_sync(runtime: &Runtime, directory: &Path) -> Result<PathBuf
         }
     }
     Ok(work)
+}
+
+/// Expose Sponsor-local `port` to Concurro's helper.
+pub async fn register(tunnel: Option<&Arc<Tunnel>>, port: u16) -> Result<Registration> {
+    tunnel
+        .context("Sponsor tunnel missing")?
+        .register(port)
+        .await
+}
+
+/// Take the tunnel listener the Sponsor named for Concurro's helper.
+pub fn claim(tunnel: Option<&Arc<Tunnel>>, port: u16) -> Result<Claim> {
+    tunnel.context("Concurro tunnel missing")?.claim(port)
 }
 
 /// Convert a role into its MASCOT party number.
@@ -902,7 +896,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::{CircuitSpec, KeyShare, Peer, Runtime, circuit_pair, prefix_circuit};
-    use crate::NativeRole;
+    use crate::{NativeLimits, NativeRole};
     use concurro_relay_native_transport::tunnel::{Role, Tunnel};
     use std::{
         fs,
@@ -922,6 +916,7 @@ mod tests {
         Runtime {
             output: root.join("output"),
             circuit_cache: root.join("cache"),
+            limits: NativeLimits::DEFAULT,
             root,
             benchmark_timeout: Duration::ZERO,
         }
@@ -1041,7 +1036,10 @@ mod tests {
         assert!(!path.exists());
         fs::write(&helper, b"#!/bin/sh\nprintf 'public' > \"$5\"\n").unwrap();
         assert_eq!(
-            prefix_circuit(&runtime, "codex", 32, 16, 1).await.unwrap(),
+            prefix_circuit(&runtime, "codex", 32, 16, 1)
+                .await
+                .unwrap()
+                .path(),
             path
         );
         assert_eq!(fs::read(path).unwrap(), b"public");
@@ -1070,15 +1068,15 @@ mod tests {
             prefix_circuit(&runtime, "codex", 33, 16, 1),
         )
         .unwrap();
-        assert_ne!(one, two);
-        assert_eq!(fs::read(&one).unwrap(), b"public");
-        assert_eq!(fs::read(&two).unwrap(), b"public");
+        assert_ne!(one.path(), two.path());
+        assert_eq!(fs::read(one.path()).unwrap(), b"public");
+        assert_eq!(fs::read(two.path()).unwrap(), b"public");
         let (three, again) = tokio::try_join!(
             prefix_circuit(&runtime, "codex", 34, 16, 1),
             prefix_circuit(&runtime, "codex", 34, 16, 1),
         )
         .unwrap();
-        assert_eq!(three, again);
+        assert_eq!(three.path(), again.path());
         let workspaces: Vec<_> = fs::read_to_string(calls)
             .unwrap()
             .lines()
@@ -1116,14 +1114,8 @@ mod tests {
         let (sponsor_aux, concurro_aux) = tokio::io::duplex(1024);
         let sponsor_tunnel = Arc::new(Tunnel::start(sponsor_aux, Role::Sponsor));
         let concurro_tunnel = Arc::new(Tunnel::start(concurro_aux, Role::Concurro));
-        let mut sponsor = Peer {
-            stream: sponsor_control,
-            events: Vec::new(),
-        };
-        let mut concurro = Peer {
-            stream: concurro_control,
-            events: Vec::new(),
-        };
+        let mut sponsor = Peer::new(sponsor_control);
+        let mut concurro = Peer::new(concurro_control);
         let sponsor_spec = CircuitSpec {
             circuit: &circuit,
             private: b"sponsor private",
@@ -1177,10 +1169,7 @@ mod tests {
         let circuit = runtime.root.join("fake-circuit.txt");
         fs::write(&circuit, b"public circuit").unwrap();
         let (stream, _other) = tokio::io::duplex(1024);
-        let mut peer = Peer {
-            stream,
-            events: Vec::new(),
-        };
+        let mut peer = Peer::new(stream);
         let spec = CircuitSpec {
             circuit: &circuit,
             private: b"private",
@@ -1217,6 +1206,89 @@ mod tests {
                 .unwrap()
                 .contains("HANDOFF_READY")
         );
+        fs::remove_dir_all(runtime.root).unwrap();
+    }
+
+    /// Make a fake prefix generator writing its lengths, and a runtime
+    /// keeping `limit` circuits.
+    fn generating(limit: usize) -> Runtime {
+        let mut runtime = runtime();
+        runtime.limits.cached_circuits = limit.try_into().unwrap();
+        fs::create_dir_all(runtime.distefano("src/emp-tool")).unwrap();
+        fs::create_dir_all(runtime.distefano("src/2pc")).unwrap();
+        let helper = runtime.distefano("build/HandoffPrefix");
+        fs::write(&helper, b"#!/bin/sh\nprintf \"$2\" > \"$5\"\n").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        runtime
+    }
+
+    /// The circuits a cache holds, by their first length.
+    fn cached(runtime: &Runtime) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(&runtime.circuit_cache)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.ends_with(".txt"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Beyond the limit the least recently used circuit nobody holds goes,
+    /// along with abandoned generator output; one in use stays.
+    #[tokio::test]
+    async fn cache_evicts_least_recently_used() {
+        let runtime = generating(2);
+        let held = prefix_circuit(&runtime, "codex", 32, 16, 1).await.unwrap();
+        drop(prefix_circuit(&runtime, "codex", 33, 16, 1).await.unwrap());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        fs::write(runtime.circuit_cache.join("codex-99-16-1.tmp"), b"stale").unwrap();
+        fs::write(runtime.circuit_cache.join("codex-99-16-1.txt.lock"), b"").unwrap();
+        // 32 is older but held, so 33 goes.
+        drop(prefix_circuit(&runtime, "codex", 34, 16, 1).await.unwrap());
+        assert_eq!(cached(&runtime), ["codex-32-16-1.txt", "codex-34-16-1.txt"]);
+        assert!(!runtime.circuit_cache.join("codex-99-16-1.tmp").exists());
+        assert!(
+            !runtime
+                .circuit_cache
+                .join("codex-33-16-1.txt.lock")
+                .exists()
+        );
+        assert!(
+            !runtime
+                .circuit_cache
+                .join("workspace/codex-33-16-1.txt")
+                .exists()
+        );
+        assert_eq!(fs::read(held.path()).unwrap(), b"32");
+        drop(held);
+        // Using 34 again makes 32 the least recently used.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(prefix_circuit(&runtime, "codex", 34, 16, 1).await.unwrap());
+        drop(prefix_circuit(&runtime, "codex", 35, 16, 1).await.unwrap());
+        assert_eq!(cached(&runtime), ["codex-34-16-1.txt", "codex-35-16-1.txt"]);
+        fs::remove_dir_all(runtime.root).unwrap();
+    }
+
+    /// A cache directory others can write to, or a link, is refused.
+    #[tokio::test]
+    async fn cache_directory_must_be_private() {
+        let runtime = generating(2);
+        fs::create_dir_all(&runtime.circuit_cache).unwrap();
+        fs::set_permissions(&runtime.circuit_cache, fs::Permissions::from_mode(0o777)).unwrap();
+        let error = prefix_circuit(&runtime, "codex", 32, 16, 1)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("writable by other users"), "{error}");
+        fs::remove_dir(&runtime.circuit_cache).unwrap();
+        let elsewhere = runtime.root.join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &runtime.circuit_cache).unwrap();
+        let error = prefix_circuit(&runtime, "codex", 32, 16, 1)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is not a directory"), "{error}");
         fs::remove_dir_all(runtime.root).unwrap();
     }
 }

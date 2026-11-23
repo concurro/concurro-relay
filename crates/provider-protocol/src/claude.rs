@@ -346,8 +346,8 @@ pub struct SponsorAudit {
     waiting_data: bool,
     /// Accumulated JSON body across proved DATA frames.
     body: Vec<u8>,
-    /// Public templates for first and later requests.
-    templates: Vec<Template>,
+    /// Public templates by client stream, from the last completed one on.
+    templates: Vec<(u32, Template)>,
 }
 
 impl SponsorAudit {
@@ -358,24 +358,27 @@ impl SponsorAudit {
             next_stream: 1,
             waiting_data: true,
             body: Vec::new(),
-            templates: vec![first],
+            templates: vec![(1, first)],
         })
     }
 
     /// Append the template of the next stream before its HEADERS proof;
     /// each stream has one.
     pub fn template(&mut self, template: Template) -> Result<()> {
+        let next = self.next_stream;
         ensure!(
-            self.templates.len() == ((self.next_stream - 1) / 2) as usize,
+            self.templates.iter().all(|(stream, _)| *stream < next),
             "unexpected Claude request template"
         );
-        self.templates.push(template);
+        // Earlier streams are complete; only the last one's is still asked for.
+        self.templates.retain(|(stream, _)| *stream + 2 >= next);
+        self.templates.push((next, template));
         Ok(())
     }
 
-    /// The public template of client stream `stream`.
+    /// The public template of the current or last completed client stream.
     pub fn template_for(&self, stream: u32) -> Option<&Template> {
-        self.templates.get((stream.checked_sub(1)? / 2) as usize)
+        stream_template(&self.templates, stream)
     }
 
     /// The body proved so far on the stream being uploaded.
@@ -425,9 +428,7 @@ impl SponsorAudit {
             self.next_stream += 2;
             Ok(AuditFrame::Prompt(stream, prompt))
         } else {
-            let template = self
-                .templates
-                .get(((self.next_stream - 1) / 2) as usize)
+            let template = stream_template(&self.templates, self.next_stream)
                 .context("missing public request template")?;
             let (stream, expected) = self.state.later_headers(0, template)?;
             ensure!(
@@ -438,6 +439,14 @@ impl SponsorAudit {
             Ok(AuditFrame::Headers(stream))
         }
     }
+}
+
+/// The template of `stream` among `templates`.
+fn stream_template(templates: &[(u32, Template)], stream: u32) -> Option<&Template> {
+    templates
+        .iter()
+        .find(|(number, _)| *number == stream)
+        .map(|(_, template)| template)
 }
 
 /// A complete HTTP/2 frame or a valid partial buffer.
@@ -928,6 +937,15 @@ mod tests {
         assert_eq!(audit.template_for(3), Some(&template));
         std::assert_matches!(audit.accept(&headers).unwrap(), AuditFrame::Headers(3));
         assert!(audit.accept(&frame(0, 1, 5, body).unwrap()).is_err());
+        std::assert_matches!(
+            audit.accept(&frame(0, 1, 3, body).unwrap()).unwrap(),
+            AuditFrame::Prompt(3, _)
+        );
+        // Only the last completed stream's template is kept beside the next.
+        audit.template(template.clone()).unwrap();
+        assert_eq!(audit.template_for(1), None);
+        assert_eq!(audit.template_for(3), Some(&template));
+        assert_eq!(audit.template_for(5), Some(&template));
     }
 
     /// Decode fragmented H2 frames, CONTINUATION, Huffman text and early DATA.

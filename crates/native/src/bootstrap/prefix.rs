@@ -49,7 +49,7 @@ pub async fn prepare<C: AsyncRead + AsyncWrite + Unpin>(
         options.role,
         &options.runtime,
         tunnel,
-        &circuit,
+        circuit,
         session,
     )
     .await?;
@@ -155,7 +155,7 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
             &context.options.runtime,
             tunnel,
             CircuitSpec {
-                circuit: &circuit,
+                circuit: circuit.path(),
                 private: &input,
                 phase: "prefix",
                 session: context.session,
@@ -247,7 +247,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
             &context.options.runtime,
             tunnel,
             CircuitSpec {
-                circuit: &circuit,
+                circuit: circuit.path(),
                 private: &input,
                 phase: "prefix",
                 session: context.session,

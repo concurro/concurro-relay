@@ -541,6 +541,7 @@ dependencies = [
  "concurro-relay-protocol",
  "concurro-relay-provider-protocol",
  "concurro-relay-tls13",
+ "dirs",
  "futures",
  "hex",
  "libc",

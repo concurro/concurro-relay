@@ -61,7 +61,9 @@ with `release.py` under the name dist planned, installs and tests the archive. `
 refuses a package containing the build directory or home path, and records the archive's
 checksum for dist. Set
 `CONCURRO_NATIVE_OUTPUT` to keep session logs and fresh private state in a
-chosen directory.
+chosen directory. Generated prefix circuits are cached in its `public-circuits`
+directory, or without it in `concurro-relay/public-circuits` under the user's cache
+directory. The cache directory must belong to the user and not be writable by others.
 
 Start `dev-verifier` from the Concurro package with the desired `--route`
 (TLS 1.3 is the default), then run the registered Sponsor package's

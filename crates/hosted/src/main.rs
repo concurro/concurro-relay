@@ -21,6 +21,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use concurro_relay_hosted_api::claim::VerificationKeys;
+use concurro_relay_native::NativeLimits;
 use concurro_relay_verifier::accept::{self, Acceptor, Limits};
 use journal::Journal;
 use private::Credentials;
@@ -102,6 +103,14 @@ struct Args {
     /// Bytes a relay's registered name may have.
     #[arg(long, default_value = "256")]
     relay_name_max_bytes: NonZeroUsize,
+    /// Bytes a Sponsor's credential may have; its length sets the size of
+    /// the prefix circuit generated for it.
+    #[arg(long, default_value_t = NativeLimits::DEFAULT.credential_bytes)]
+    max_credential_bytes: NonZeroUsize,
+    /// Generated prefix circuits kept in the cache; the least recently used
+    /// beyond it are removed.
+    #[arg(long, default_value_t = NativeLimits::DEFAULT.cached_circuits)]
+    cached_circuits: NonZeroUsize,
     /// Unix start time; live telemetry before it is unknown.
     #[arg(skip)]
     started: f64,

@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, ensure};
 use concurro_relay_native::{
-    NativeRole,
+    NativeLimits, NativeRole,
     bootstrap::{self, BootstrapOptions},
     helpers::{self, Peer, Runtime},
     proof,
@@ -209,6 +209,7 @@ impl Fixture {
                 .join("native-runtime/runtime"),
             output: run.join(name),
             circuit_cache: self.root.join("public-circuits"),
+            limits: NativeLimits::DEFAULT,
             benchmark_timeout: Duration::from_secs(900),
         }
     }
@@ -299,7 +300,7 @@ async fn rust_bootstrap() -> Result<()> {
             helpers::prefix_circuit(&cache_runtime, fixture.route(), 32, 16, 1)
         )?;
         ensure!(
-            first == second && first.metadata()?.len() > 0,
+            first.path() == second.path() && first.path().metadata()?.len() > 0,
             "public prefix cache failed"
         );
     }
@@ -371,14 +372,8 @@ async fn packaged_request_proof() -> Result<()> {
     let (sponsor_aux, concurro_aux) = tokio::io::duplex(1_000_000);
     let sponsor_tunnel = Arc::new(Tunnel::start(sponsor_aux, Role::Sponsor));
     let concurro_tunnel = Arc::new(Tunnel::start(concurro_aux, Role::Concurro));
-    let mut sponsor = Peer {
-        stream: sponsor_control,
-        events: Vec::new(),
-    };
-    let mut concurro = Peer {
-        stream: concurro_control,
-        events: Vec::new(),
-    };
+    let mut sponsor = Peer::new(sponsor_control);
+    let mut concurro = Peer::new(concurro_control);
     // A synthetic session: the commitment the protected prefix would publish for this key.
     let secret = [7; 32];
     let key = record::expand::<16>(&secret, b"key")?;

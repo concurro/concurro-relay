@@ -967,6 +967,7 @@ mod tests {
             root: output.clone(),
             output: output.clone(),
             circuit_cache: output.clone(),
+            limits: crate::NativeLimits::DEFAULT,
             benchmark_timeout: Duration::from_secs(1),
         };
         let template = Template::fixture_default();
@@ -1008,16 +1009,7 @@ mod tests {
     /// A connected pair of control peers.
     fn peers() -> (Peer<tokio::io::DuplexStream>, Peer<tokio::io::DuplexStream>) {
         let (one, other) = tokio::io::duplex(1 << 16);
-        (
-            Peer {
-                stream: one,
-                events: Vec::new(),
-            },
-            Peer {
-                stream: other,
-                events: Vec::new(),
-            },
-        )
+        (Peer::new(one), Peer::new(other))
     }
 
     /// A prompt beyond one control message arrives whole, with its template.

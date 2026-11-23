@@ -11,7 +11,7 @@ use concurro_relay_hosted_api::{
     },
     owner::Task,
 };
-use concurro_relay_native::{self as native, NativeOptions, NativeRole};
+use concurro_relay_native::{self as native, NativeLimits, NativeOptions, NativeRole};
 use concurro_relay_protocol::{
     link::{Notice, Order},
     route::Route,
@@ -80,6 +80,10 @@ async fn run_lease(
             audit: None,
             review: None,
             ready: Some(ready),
+            limits: NativeLimits {
+                credential_bytes: args.max_credential_bytes,
+                cached_circuits: args.cached_circuits,
+            },
         },
     );
     tokio::pin!(bridge);

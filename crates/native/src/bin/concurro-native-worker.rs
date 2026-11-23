@@ -36,11 +36,15 @@ async fn main() -> Result<()> {
     let runtime = Runtime {
         root: config.runtime.clone(),
         output: config.output.clone(),
-        circuit_cache: config
-            .output
-            .parent()
-            .context("session output has no parent")?
-            .join("public-circuits"),
+        circuit_cache: match &config.circuit_cache {
+            Some(cache) => cache.clone(),
+            None => config
+                .output
+                .parent()
+                .context("session output has no parent")?
+                .join("public-circuits"),
+        },
+        limits: config.limits(),
         benchmark_timeout: Duration::from_secs(
             env::var("HANDOFF_BENCHMARK_TIMEOUT")
                 .ok()
@@ -63,10 +67,7 @@ async fn main() -> Result<()> {
             Role::Concurro
         },
     ));
-    let mut identity_peer = Peer {
-        stream: control,
-        events: Vec::new(),
-    };
+    let mut identity_peer = Peer::new(control);
     helpers::exchange_mascot_identity(&mut identity_peer, config.role, &runtime).await?;
     let mut control = identity_peer.stream;
     if config.role == NativeRole::Sponsor {
@@ -101,10 +102,7 @@ async fn main() -> Result<()> {
         let completion_ack = template.metadata.get("completion_ack") == Some(&json!(true));
         let mut gate = ParentGate { answers };
         let session_id = hex::encode(identity::random::<16>());
-        let mut peer = Peer {
-            stream: control,
-            events: Vec::new(),
-        };
+        let mut peer = Peer::new(control);
         let first = if profile == Profile::ClaudeH2 {
             match session::sponsor_first(&mut peer, &mut gate, &runtime, &session_id).await? {
                 Some(first) => Some(first),
@@ -176,10 +174,7 @@ async fn main() -> Result<()> {
                 },
             )
             .await?;
-            let mut peer = Peer {
-                stream: control,
-                events: Vec::new(),
-            };
+            let mut peer = Peer::new(control);
             let reviewed = tokio::select! {
                 reviewed = session::claude_review_first(&mut peer, &first.body, &first.template, compact) => reviewed,
                 () = first.watch_disconnect() => {
