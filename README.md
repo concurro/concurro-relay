@@ -144,7 +144,7 @@ The relay saves its identity key in a file only your user can read, under `concu
 
 ## Hosted verifier
 
-Sponsor 0.2.0 and the verifier both use relay protocol 5. Protocol 4 Sponsors must
+Sponsor 0.1.2 and later and the verifier use relay protocol 5. Protocol 4 Sponsors must
 upgrade before they can connect. The Sponsor's TLS listener is separate from the
 internal HTTP listener for Accounts, Gateway and Exchange.
 
@@ -180,7 +180,7 @@ acknowledgements until the journal can be reopened after repairing storage.
 
 The [hosted API crate](crates/hosted-api) defines the private wire types and JWS
 codec. See [its API notes](crates/hosted-api/README.md) and the
-[0.2.0 release sequence](docs/releasing.md#protocol-5-release).
+[protocol 5 release sequence](docs/releasing.md#protocol-5-release).
 
 ## Development
 
