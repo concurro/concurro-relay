@@ -836,28 +836,36 @@ async fn connect_target(
 ) {
     let deadline = Instant::now() + REGISTRATION_TIMEOUT;
     loop {
-        match inner
-            .until_closed(async { Ok(TcpStream::connect((Ipv4Addr::LOCALHOST, target)).await?) })
-            .await
-        {
-            Ok(socket) => {
+        // A channel the peer closes stops connecting, releasing what it queued.
+        let attempt = inner
+            .until_closed(async {
+                tokio::select! {
+                    socket = TcpStream::connect((Ipv4Addr::LOCALHOST, target)) => Ok(Some(socket?)),
+                    () = credit.closed() => Ok(None),
+                }
+            })
+            .await;
+        match attempt {
+            Ok(Some(socket)) => {
                 pump_channel(inner, number, socket, receiver, credit);
                 return;
             }
+            Ok(None) => return,
             Err(error)
                 if error
                     .downcast_ref::<std::io::Error>()
                     .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
                     && Instant::now() < deadline =>
             {
-                if inner
+                let waited = inner
                     .until_closed(async {
-                        time::sleep(Duration::from_millis(20)).await;
-                        Ok(())
+                        tokio::select! {
+                            () = time::sleep(Duration::from_millis(20)) => Ok(true),
+                            () = credit.closed() => Ok(false),
+                        }
                     })
-                    .await
-                    .is_err()
-                {
+                    .await;
+                if !matches!(waited, Ok(true)) {
                     return;
                 }
             }
@@ -1360,5 +1368,34 @@ mod tests {
             "a channel within the limit was closed"
         );
         assert!(!tunnel.reader.is_finished());
+    }
+
+    /// A channel closed while its target still refuses stops connecting and
+    /// drops what it queued, so closing channels cannot get past the limit.
+    #[tokio::test]
+    async fn closed_channel_stops_connecting() {
+        let (link, mut peer) = tokio::io::duplex(1 << 20);
+        let tunnel = Tunnel::with_channels(link, Role::Sponsor, 2.try_into().unwrap());
+        let refusing = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let target = refusing.local_addr().unwrap().port();
+        drop(refusing);
+        let (registration, number) = tokio::join!(tunnel.register(target), acknowledge(&mut peer));
+        let _registration = registration.unwrap();
+        send(&mut peer, Kind::Open, 1, &number.to_be_bytes()).await;
+        send(&mut peer, Kind::Data, 1, b"queued").await;
+        let inbound = time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(channel) = tunnel.inner.shared.lock().unwrap().channels.get(&1) {
+                    break channel.inbound.clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        send(&mut peer, Kind::Close, 1, &[]).await;
+        time::timeout(Duration::from_secs(2), inbound.closed())
+            .await
+            .expect("the closed channel kept connecting");
     }
 }
