@@ -76,6 +76,8 @@ Your Concurro registration and provider sign-ins are separate. If a provider log
 | `concurro-relay status` | Show registration and whether each provider is signed in |
 | `concurro-relay logout` | Unregister the relay and delete its saved credentials and identity key |
 
+`--max-tunnel-channels N` limits how many proof-helper connections Concurro may hold open to your machine in one session (64 by default). Connections beyond the limit are closed when Concurro opens them.
+
 ## Auditing and status
 
 Use the arrow keys to choose a request and Enter to open it. The activity view keeps recent request text in memory. When run outside an interactive terminal, the CLI uses text output, just like `run`.

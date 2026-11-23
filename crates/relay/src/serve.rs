@@ -68,6 +68,8 @@ pub struct RelayConfig {
     pub parents: ThreadParents,
     /// Decides whether each native request may reach the provider.
     pub reviewer: Arc<Reviewer>,
+    /// Bounds for native sessions.
+    pub native: NativeLimits,
 }
 
 impl RelayConfig {
@@ -603,7 +605,7 @@ where
                 audit: Some(audit),
                 review: Some(review),
                 ready: None,
-                limits: NativeLimits::default(),
+                limits: config.native,
             },
         )
         .await;
@@ -700,6 +702,7 @@ mod tests {
             roots: Roots::Mozilla,
             parents: Default::default(),
             reviewer: Default::default(),
+            native: Default::default(),
         };
         let (control, mut verifier) = tokio::io::duplex(1 << 16);
         let (proofs, _proofs) = tokio::io::duplex(1 << 16);

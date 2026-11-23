@@ -3,6 +3,7 @@
 
 use std::{
     io::{self, IsTerminal},
+    num::NonZeroUsize,
     path::PathBuf,
     process::Command as Process,
     sync::Arc,
@@ -11,7 +12,7 @@ use std::{
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use concurro_relay::{login, plain, review::Reviewer, state::Store, transport::Server, tui};
-use concurro_relay_native as native;
+use concurro_relay_native::{self as native, NativeLimits};
 use concurro_relay_protocol::route::Route;
 
 /// Returns freed proof buffers to the system instead of retaining them.
@@ -57,11 +58,23 @@ struct ServingArgs {
     /// in `run`. The first line it prints is shown as the reason.
     #[arg(long, env = "CONCURRO_RELAY_REVIEW_COMMAND")]
     review_command: Option<String>,
+    /// How many proof-helper connections Concurro may hold open to this
+    /// machine at once in one session; more are closed as they are opened.
+    #[arg(long, default_value_t = NativeLimits::DEFAULT.tunnel_channels)]
+    max_tunnel_channels: NonZeroUsize,
 }
 
 impl ServingArgs {
     fn reviewer(&self) -> Arc<Reviewer> {
         Arc::new(Reviewer::new(self.review_command.clone()))
+    }
+
+    /// Native session bounds; only the tunnel's applies to a Sponsor.
+    fn native(&self) -> NativeLimits {
+        NativeLimits {
+            tunnel_channels: self.max_tunnel_channels,
+            ..NativeLimits::DEFAULT
+        }
     }
 }
 
@@ -125,12 +138,13 @@ async fn main() -> Result<()> {
                     machine_name(),
                     cli.serving.links,
                     cli.serving.reviewer(),
+                    cli.serving.native(),
                 )
                 .await
             }
             None => {
                 plain::run(
-                    plain::relay(&store, cli.serving.reviewer())?,
+                    plain::relay(&store, cli.serving.reviewer(), cli.serving.native())?,
                     cli.serving.links,
                 )
                 .await
@@ -148,7 +162,8 @@ async fn main() -> Result<()> {
                     .map(|_| ())
             }
             Some(Command::Run { serving }) => {
-                plain::run(plain::relay(&store, serving.reviewer())?, serving.links).await
+                let relay = plain::relay(&store, serving.reviewer(), serving.native())?;
+                plain::run(relay, serving.links).await
             }
             Some(Command::Connect { route }) => plain::connect(&store, route).await,
             Some(Command::Status) => plain::status(&store),

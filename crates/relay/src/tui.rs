@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::Result;
-use concurro_relay_native::NativeRequest;
+use concurro_relay_native::{NativeLimits, NativeRequest};
 use concurro_relay_protocol::{link::DeviceCode, route::Route};
 use ratatui::{
     DefaultTerminal, Frame,
@@ -546,6 +546,7 @@ struct App {
     name: String,
     links: usize,
     reviewer: Arc<Reviewer>,
+    native: NativeLimits,
     messages: UnboundedSender<Message>,
     /// The relay at work, while it is.
     serving: Option<JoinHandle<()>>,
@@ -555,7 +556,7 @@ struct App {
 impl App {
     /// Starts serving as the relay registered in the store.
     fn serve(&mut self) -> Result<()> {
-        let relay = plain::relay(&self.store, self.reviewer.clone())?;
+        let relay = plain::relay(&self.store, self.reviewer.clone(), self.native)?;
         self.state.screen = Screen::Dashboard(Dashboard::new(
             relay.registration.clone(),
             &self.credentials,
@@ -1299,6 +1300,7 @@ pub async fn run(
     name: String,
     links: usize,
     reviewer: Arc<Reviewer>,
+    native: NativeLimits,
 ) -> Result<()> {
     let credentials = Source::Kept(store.clone());
     let (messages, received) = mpsc::unbounded_channel();
@@ -1314,6 +1316,7 @@ pub async fn run(
         name,
         links,
         reviewer,
+        native,
         messages: messages.clone(),
         serving: None,
         quit: false,

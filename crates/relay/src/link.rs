@@ -149,6 +149,7 @@ mod tests {
                 roots: Roots::Mozilla,
                 parents: Default::default(),
                 reviewer: Default::default(),
+                native: Default::default(),
             },
         };
         let (events, mut reported) = mpsc::unbounded_channel();

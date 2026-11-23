@@ -22,6 +22,7 @@ use tokio::{
     time::{self, Duration},
 };
 
+use concurro_relay_native_transport::tunnel;
 use concurro_relay_protocol::{identity, route::Route};
 
 pub mod bootstrap;
@@ -190,6 +191,8 @@ pub struct NativeLimits {
     pub credential_bytes: NonZeroUsize,
     /// MiB of generated prefix circuits kept in the shared cache.
     pub circuit_cache_mib: NonZeroU64,
+    /// Helper channels Concurro may hold open to the Sponsor at once.
+    pub tunnel_channels: NonZeroUsize,
 }
 
 impl NativeLimits {
@@ -197,6 +200,7 @@ impl NativeLimits {
     pub const DEFAULT: Self = Self {
         credential_bytes: NonZeroUsize::new(4096).unwrap(),
         circuit_cache_mib: NonZeroU64::new(8192).unwrap(),
+        tunnel_channels: tunnel::CHANNELS,
     };
 }
 
@@ -313,7 +317,9 @@ where
         .arg("--max-credential-bytes")
         .arg(options.limits.credential_bytes.to_string())
         .arg("--circuit-cache-mib")
-        .arg(options.limits.circuit_cache_mib.to_string());
+        .arg(options.limits.circuit_cache_mib.to_string())
+        .arg("--max-tunnel-channels")
+        .arg(options.limits.tunnel_channels.to_string());
     if let Some(listen) = &options.listen {
         command.arg("--listen").arg(listen);
     }

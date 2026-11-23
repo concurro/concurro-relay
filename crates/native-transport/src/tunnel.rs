@@ -5,6 +5,7 @@ use std::{
     fmt,
     future::Future,
     net::Ipv4Addr,
+    num::NonZeroUsize,
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -29,6 +30,8 @@ const GRANT: usize = WINDOW / 4;
 /// Concurro listeners a Sponsor may register before Concurro claims them; an
 /// honest Sponsor has at most one waiting.
 pub const UNCLAIMED: usize = 4;
+/// Channels Concurro may hold open to the Sponsor at once, unless configured.
+pub const CHANNELS: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Auxiliary frame operation.
@@ -313,6 +316,8 @@ struct Inner {
     closed: Notify,
     /// Whether terminal cleanup already ran.
     stopped: AtomicBool,
+    /// Channels the peer may hold open at once; more are closed as opened.
+    channels: usize,
 }
 
 /// Fail the link if a frame write is dropped before it completes.
@@ -554,6 +559,14 @@ impl Tunnel {
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        Self::with_channels(link, role, CHANNELS)
+    }
+
+    /// Start a tunnel whose peer may hold at most `channels` channels open.
+    pub fn with_channels<T>(link: T, role: Role, channels: NonZeroUsize) -> Self
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let (read, write) = tokio::io::split(link);
         let inner = Arc::new(Inner {
             role,
@@ -562,6 +575,7 @@ impl Tunnel {
             next_id: AtomicU32::new(1),
             closed: Notify::new(),
             stopped: AtomicBool::new(false),
+            channels: channels.get(),
         });
         let receiving = inner.clone();
         let reader = tokio::spawn(async move {
@@ -720,26 +734,33 @@ async fn read_loop<R: AsyncRead + Unpin>(mut read: R, inner: Arc<Inner>) -> Resu
             }
             (Role::Sponsor, Kind::Open) => {
                 let registration = frame.number();
-                let opened = {
+                let (target, full, receiver, credit) = {
                     let mut shared = inner.shared.lock().unwrap();
                     let target = shared.registrations.get(&registration).copied();
+                    let full = shared.channels.len() >= inner.channels;
                     let (receiver, credit) = shared.open(frame.channel)?;
-                    target.map(|target| (target, receiver, credit))
+                    (target, full, receiver, credit)
                 };
-                match opened {
-                    Some((target, receiver, credit)) => {
+                match (target, full) {
+                    (Some(target), false) => {
                         let connecting = inner.clone();
                         tokio::spawn(async move {
                             connect_target(connecting, frame.channel, target, receiver, credit)
                                 .await;
                         });
                     }
-                    None => {
-                        ensure!(
-                            registration < inner.next_id.load(Ordering::Relaxed),
-                            "unknown native tunnel registration"
-                        );
-                        // Released: the opener gets a closed channel.
+                    (None, _) if registration >= inner.next_id.load(Ordering::Relaxed) => {
+                        bail!("unknown native tunnel registration")
+                    }
+                    // Released, or too many open: the opener gets a closed
+                    // channel.
+                    (target, _) => {
+                        if target.is_some() {
+                            eprintln!(
+                                "NATIVE_TUNNEL refused channel {}: {} channels are open",
+                                frame.channel, inner.channels
+                            );
+                        }
                         inner.close_channel(frame.channel).await;
                     }
                 }
@@ -1303,5 +1324,41 @@ mod tests {
                 .contains("more native tunnel listeners")
         );
         assert!(tunnel.claim(ports[1]).is_err());
+    }
+
+    /// Channels opened past the limit are closed at once; the tunnel lives on
+    /// and opens again once one ends.
+    #[tokio::test]
+    async fn channels_past_the_limit_are_closed() {
+        let (link, mut peer) = tokio::io::duplex(4096);
+        let tunnel = Tunnel::with_channels(link, Role::Sponsor, 2.try_into().unwrap());
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let target = listener.local_addr().unwrap().port();
+        let (registration, number) = tokio::join!(tunnel.register(target), acknowledge(&mut peer));
+        let _registration = registration.unwrap();
+        for channel in 1..=3 {
+            send(&mut peer, Kind::Open, channel, &number.to_be_bytes()).await;
+        }
+        let frame = time::timeout(Duration::from_secs(2), Frame::read(&mut peer))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((frame.kind, frame.channel), (Kind::Close, 3));
+        send(&mut peer, Kind::Close, 1, &[]).await;
+        time::timeout(Duration::from_secs(2), async {
+            while tunnel.inner.shared.lock().unwrap().channels.len() > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        send(&mut peer, Kind::Open, 4, &number.to_be_bytes()).await;
+        assert!(
+            time::timeout(Duration::from_millis(200), Frame::read(&mut peer))
+                .await
+                .is_err(),
+            "a channel within the limit was closed"
+        );
+        assert!(!tunnel.reader.is_finished());
     }
 }

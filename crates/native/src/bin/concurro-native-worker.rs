@@ -59,13 +59,14 @@ async fn main() -> Result<()> {
     let auxiliary = UnixStream::connect(&config.aux)
         .await
         .context("connect native auxiliary")?;
-    let tunnel = Arc::new(Tunnel::start(
+    let tunnel = Arc::new(Tunnel::with_channels(
         auxiliary,
         if config.role == NativeRole::Sponsor {
             Role::Sponsor
         } else {
             Role::Concurro
         },
+        config.max_tunnel_channels,
     ));
     let mut identity_peer = Peer::new(control);
     helpers::exchange_mascot_identity(&mut identity_peer, config.role, &runtime).await?;

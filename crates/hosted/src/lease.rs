@@ -83,6 +83,7 @@ async fn run_lease(
             limits: NativeLimits {
                 credential_bytes: args.max_credential_bytes,
                 circuit_cache_mib: args.circuit_cache_mib,
+                ..NativeLimits::DEFAULT
             },
         },
     );

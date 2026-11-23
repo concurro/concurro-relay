@@ -63,6 +63,9 @@ pub struct WorkerConfig {
     /// MiB of generated prefix circuits kept in the cache.
     #[arg(long, default_value_t = NativeLimits::DEFAULT.circuit_cache_mib)]
     pub circuit_cache_mib: NonZeroU64,
+    /// Helper channels Concurro may hold open to the Sponsor at once.
+    #[arg(long, default_value_t = NativeLimits::DEFAULT.tunnel_channels)]
+    pub max_tunnel_channels: NonZeroUsize,
 }
 
 impl WorkerConfig {
@@ -71,6 +74,7 @@ impl WorkerConfig {
         NativeLimits {
             credential_bytes: self.max_credential_bytes,
             circuit_cache_mib: self.circuit_cache_mib,
+            tunnel_channels: self.max_tunnel_channels,
         }
     }
 }

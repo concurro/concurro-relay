@@ -176,6 +176,7 @@ fn config() -> RelayConfig {
         roots: Roots::Fixture,
         parents: Default::default(),
         reviewer: Default::default(),
+        native: Default::default(),
     }
 }
 
@@ -657,6 +658,7 @@ async fn rejected_requests_are_not_performed() {
     let mut reported = verifier
         .relay_with(RelayConfig {
             reviewer: Arc::new(Reviewer::new(Some("echo not today; exit 1".into()))),
+            native: Default::default(),
             ..config()
         })
         .await;

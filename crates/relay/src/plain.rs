@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
+use concurro_relay_native::NativeLimits;
 use concurro_relay_protocol::{FIXTURE_PROVIDER_HOST, Roots, route::Route};
 use tokio::{signal, sync::mpsc};
 
@@ -50,7 +51,7 @@ pub fn logins(credentials: &Source, routes: &[Route]) -> Vec<(Route, Result<Stri
 }
 
 /// The relay registered in `store`, using fixture trust only when requested.
-pub fn relay(store: &Store, reviewer: Arc<Reviewer>) -> Result<Relay> {
+pub fn relay(store: &Store, reviewer: Arc<Reviewer>, native: NativeLimits) -> Result<Relay> {
     let (registration, identity) = store
         .load()?
         .context("this relay is not registered; run `concurro-relay login`")?;
@@ -79,6 +80,7 @@ pub fn relay(store: &Store, reviewer: Arc<Reviewer>) -> Result<Relay> {
         },
         parents: Default::default(),
         reviewer,
+        native,
     };
     Ok(Relay {
         registration,
