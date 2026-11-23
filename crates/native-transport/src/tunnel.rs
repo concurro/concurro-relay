@@ -262,11 +262,13 @@ impl Flow {
         .await
     }
 
-    /// Complete local socket I/O unless the channel is abandoned first.
+    /// Complete local socket I/O unless the channel is abandoned first; an
+    /// abandoned channel does no more I/O even when its socket is ready.
     async fn unless_closed<T>(&self, operation: impl Future<Output = io::Result<T>>) -> Result<T> {
         tokio::select! {
-            result = operation => Ok(result?),
+            biased;
             () = self.closed() => bail!("native tunnel channel closed"),
+            result = operation => Ok(result?),
         }
     }
 
@@ -1099,7 +1101,14 @@ mod tests {
             let mut rest = [0; 9 + 8 - 1];
             peer.read_exact(&mut rest).await.unwrap();
             assert_eq!(&rest[8..], b"outbound");
-            Frame::read(&mut peer).await.unwrap()
+            // The helper's EOF may be read and sent before the failed write
+            // closes the channel.
+            let frame = Frame::read(&mut peer).await.unwrap();
+            if frame.kind == Kind::End {
+                Frame::read(&mut peer).await.unwrap()
+            } else {
+                frame
+            }
         })
         .await
         .unwrap();
