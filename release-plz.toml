@@ -2,8 +2,9 @@
 # dist (dist-workspace.toml) builds the Sponsor bundle and creates the GitHub Release.
 
 [workspace]
-# Nothing goes to crates.io; the latest version comes from git tags.
-git_only = true
+# Nothing goes to crates.io. The released packages below take their latest version from git
+# tags (`git_only`); the rest don't, since a crate added after the last tag isn't in that
+# tag's workspace and would fail the release PR.
 publish = false
 git_release_enable = false
 git_tag_name = "v{{ version }}"
@@ -24,6 +25,7 @@ git_tag_enable = false
 [[package]]
 name = "concurro-relay"
 release = true
+git_only = true
 version_group = "sponsor"
 changelog_update = true
 changelog_path = "CHANGELOG.md"
@@ -39,26 +41,31 @@ changelog_include = [
 [[package]]
 name = "concurro-relay-native"
 release = true
+git_only = true
 version_group = "sponsor"
 
 [[package]]
 name = "concurro-relay-native-transport"
 release = true
+git_only = true
 version_group = "sponsor"
 
 [[package]]
 name = "concurro-relay-protocol"
 release = true
+git_only = true
 version_group = "sponsor"
 
 [[package]]
 name = "concurro-relay-provider-protocol"
 release = true
+git_only = true
 version_group = "sponsor"
 
 [[package]]
 name = "concurro-relay-tls13"
 release = true
+git_only = true
 version_group = "sponsor"
 
 [changelog]
