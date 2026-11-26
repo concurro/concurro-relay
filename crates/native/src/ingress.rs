@@ -21,7 +21,7 @@ use tokio_tungstenite::{
 
 use crate::session::{CodexEvent, CodexTurn};
 
-pub mod claude;
+pub mod tls_key_update;
 
 const PLACEHOLDER: &str = "local-relay-placeholder";
 

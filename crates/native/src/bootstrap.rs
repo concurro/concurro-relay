@@ -4,7 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use concurro_relay_native_transport::tunnel::Tunnel;
-use concurro_relay_provider_protocol::claude;
+use concurro_relay_provider_protocol::{HttpProvider, tls_key_update};
 use concurro_relay_tls13::handshake::{self, Profile, ServerFlight};
 use concurro_relay_tls13::record::ApplicationRecords;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -28,6 +28,8 @@ pub struct BootstrapOptions {
     pub role: NativeRole,
     /// TLS ALPN and provider protocol profile.
     pub profile: Profile,
+    /// HTTP provider identity, independent of the TLS transport profile.
+    pub provider: HttpProvider,
     /// Accepted native helper runtime and private output paths.
     pub runtime: Runtime,
     /// Provider TCP destination, distinct from the certificate hostname.
@@ -42,9 +44,9 @@ pub struct BootstrapOptions {
     pub account: Option<String>,
     /// Public headers admitted from the local Codex upgrade.
     pub codex_headers: Vec<(String, String)>,
-    /// First Claude path and public headers captured before bootstrap: the
+    /// First HTTP provider path and public headers captured before bootstrap: the
     /// ones Concurro sends, and the ones the Sponsor approved and requires.
-    pub claude_template: Option<claude::Template>,
+    pub http_template: Option<tls_key_update::Template>,
 }
 
 impl BootstrapOptions {
@@ -52,15 +54,22 @@ impl BootstrapOptions {
     pub fn hostname(&self) -> &'static str {
         match self.profile {
             Profile::Codex => "chatgpt.com",
-            Profile::ClaudeH2 => "api.anthropic.com",
+            Profile::TlsKeyUpdate => self.provider.hostname(),
         }
     }
 
-    /// Return the route label used by native control messages.
+    /// Return the transport label used in session reports.
     pub fn route(&self) -> &'static str {
         match self.profile {
             Profile::Codex => "codex",
-            Profile::ClaudeH2 => "claude_h2",
+            Profile::TlsKeyUpdate => "tls_key_update",
+        }
+    }
+    /// Cache-entry prefix retained so existing generated circuits are reused.
+    pub fn circuit_route(&self) -> &'static str {
+        match self.profile {
+            Profile::Codex => "codex",
+            Profile::TlsKeyUpdate => "claude_h2",
         }
     }
 }
@@ -70,6 +79,8 @@ impl BootstrapOptions {
 pub struct BootstrapResult {
     /// Route whose certificate and ALPN were authenticated.
     pub route: String,
+    /// HTTP adapter selected for this session, absent for Codex.
+    pub provider: Option<HttpProvider>,
     /// Hash of the two public TLS hello messages.
     pub h2: String,
     /// Hash of the authenticated server Finished transcript.
@@ -102,8 +113,8 @@ pub enum Application {
         provider: TcpStream,
         /// Public Codex request continuation.
         tail: Vec<u8>,
-        /// First public Claude request template.
-        claude_template: Option<claude::Template>,
+        /// First public HTTP request template.
+        http_template: Option<tls_key_update::Template>,
         /// Sponsor's credential length for the shadow HPACK table.
         credential_length: usize,
     },
@@ -345,7 +356,7 @@ async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
         Application::Sponsor {
             provider,
             tail: prefix.tail,
-            claude_template: prefix.claude_template,
+            http_template: prefix.http_template,
             credential_length: credential.len(),
         },
         h2,
@@ -498,6 +509,7 @@ fn result(
 ) -> BootstrapResult {
     BootstrapResult {
         route: options.route().into(),
+        provider: (options.profile == Profile::TlsKeyUpdate).then_some(options.provider),
         h2: hex::encode(h2),
         h3: hex::encode(h3),
         session_id: hex::encode(session),

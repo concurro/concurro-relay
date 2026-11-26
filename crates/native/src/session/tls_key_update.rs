@@ -1,4 +1,4 @@
-//! Claude HTTP/2 turns over the shared proved TLS record connection.
+//! HTTP/2 turns over the shared proved TLS record connection.
 
 use std::{
     sync::Arc,
@@ -7,8 +7,8 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use concurro_relay_native_transport::tunnel::Tunnel;
-use concurro_relay_provider_protocol::claude::{
-    self, IndexedConnection, ResponseEvent, ResponseReader, Template,
+use concurro_relay_provider_protocol::tls_key_update::{
+    IndexedConnection, ResponseEvent, ResponseReader, Template,
 };
 use serde_json::{Map, Value, json};
 use tokio::{
@@ -16,18 +16,17 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 
-use super::{ClaudeEvent, ClaudeTurn, Forwarded, Rejected};
+use super::{
+    Forwarded, HttpEvent, HttpTurn, Rejected,
+    providers::{ProviderState, configure_template},
+};
 use crate::{
     bootstrap::{Application, Session},
     helpers::{self, Peer, Runtime},
     ingress,
 };
 
-mod threads;
-use threads::ThreadState;
-pub use threads::beta_template;
-
-/// One Claude response as it is being authenticated and forwarded.
+/// One HTTP/2 response as it is being authenticated and forwarded.
 struct ResponseState {
     /// Validated HTTP status, when headers arrived.
     status: Option<u16>,
@@ -58,7 +57,7 @@ impl ResponseState {
 async fn deliver<C: AsyncRead + AsyncWrite + Unpin>(
     events: Vec<ResponseEvent>,
     link: &mut Forwarded<'_, C>,
-    reply: &mpsc::Sender<Result<ClaudeEvent>>,
+    reply: &mpsc::Sender<Result<HttpEvent>>,
     response: &mut ResponseState,
     started: Instant,
 ) -> Result<()> {
@@ -67,7 +66,7 @@ async fn deliver<C: AsyncRead + AsyncWrite + Unpin>(
             ResponseEvent::Headers(status, headers) => {
                 ensure!(
                     response.status.is_none(),
-                    "duplicate Claude response headers"
+                    "duplicate HTTP/2 response headers"
                 );
                 let content_type = headers
                     .iter()
@@ -78,9 +77,9 @@ async fn deliver<C: AsyncRead + AsyncWrite + Unpin>(
                 response.headers = headers;
                 if status == 200 {
                     reply
-                        .send(Ok(ClaudeEvent::Start(status, content_type)))
+                        .send(Ok(HttpEvent::Start(status, content_type)))
                         .await
-                        .context("local Claude listener closed")?;
+                        .context("local listener closed")?;
                 }
             }
             ResponseEvent::Data(bytes) => {
@@ -90,9 +89,9 @@ async fn deliver<C: AsyncRead + AsyncWrite + Unpin>(
                 response.body.extend_from_slice(&bytes);
                 if response.status == Some(200) {
                     reply
-                        .send(Ok(ClaudeEvent::Data(bytes)))
+                        .send(Ok(HttpEvent::Data(bytes)))
                         .await
-                        .context("local Claude listener closed")?;
+                        .context("local listener closed")?;
                 }
             }
             ResponseEvent::Send(wire) => link.send(&wire).await?,
@@ -107,7 +106,7 @@ async fn journal(runtime: &Runtime, event: &Value) -> Result<()> {
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(runtime.output.join("claude-turns.jsonl"))
+        .open(runtime.output.join("http-turns.jsonl"))
         .await?;
     file.write_all(&serde_json::to_vec(event)?).await?;
     file.write_all(b"\n").await?;
@@ -119,7 +118,7 @@ async fn exchange<C: AsyncRead + AsyncWrite + Unpin>(
     link: &mut Forwarded<'_, C>,
     state: &mut IndexedConnection,
     reader: &mut ResponseReader,
-    turn: &ClaudeTurn,
+    turn: &HttpTurn,
     template: &Template,
     body: &[u8],
     first: bool,
@@ -151,7 +150,7 @@ async fn exchange<C: AsyncRead + AsyncWrite + Unpin>(
             deliver(events, link, &turn.reply, &mut response, started).await?;
             ensure!(
                 !response.done,
-                "provider ended during Claude request upload"
+                "provider ended during HTTP/2 request upload"
             );
         }
         let size = (body.len() - offset)
@@ -182,40 +181,20 @@ async fn exchange<C: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Answers the local CLI's request with the Sponsor's rejection.
-async fn reject(turn: &ClaudeTurn, error: &anyhow::Error) -> Result<()> {
-    let body = ingress::claude::rejection(&error.to_string())?;
+async fn reject(turn: &HttpTurn, error: &anyhow::Error) -> Result<()> {
+    let body = ingress::tls_key_update::rejection(&error.to_string())?;
     turn.reply
-        .send(Ok(ClaudeEvent::Start(403, "application/json".into())))
+        .send(Ok(HttpEvent::Start(403, "application/json".into())))
         .await
-        .context("local Claude listener closed")?;
+        .context("local listener closed")?;
     turn.reply
-        .send(Ok(ClaudeEvent::Data(body)))
+        .send(Ok(HttpEvent::Data(body)))
         .await
-        .context("local Claude listener closed")?;
+        .context("local listener closed")?;
     turn.reply
-        .send(Ok(ClaudeEvent::Done))
+        .send(Ok(HttpEvent::Done))
         .await
-        .context("local Claude listener closed")
-}
-
-/// The provider request made of a CLI `body` sent with `template`, as a
-/// Message Thread when `threads` keeps them.
-fn prepare(
-    threads: Option<&ThreadState>,
-    body: &[u8],
-    template: &Template,
-) -> Result<threads::Prepared> {
-    match threads {
-        Some(threads) => threads.prepare(body, template),
-        None => Ok(threads::Prepared {
-            original: serde_json::from_slice(body).context("Claude request body is not JSON")?,
-            body: body.to_vec(),
-            mode: "full",
-            parent: None,
-            decision: "disabled",
-            mismatch: None,
-        }),
-    }
+        .context("local listener closed")
 }
 
 /// Has the Sponsor approve a session's first request, `body` sent with
@@ -227,17 +206,17 @@ pub async fn review_first<C: AsyncRead + AsyncWrite + Unpin>(
     template: &Template,
     compact: bool,
 ) -> Result<()> {
-    let threads = compact.then(ThreadState::default);
-    let prepared = prepare(threads.as_ref(), body, template)?;
+    let provider = ProviderState::new(template.provider, compact);
+    let prepared = provider.prepare(body, template)?;
     super::ask_review(peer, 0, &prepared.body, Some(template)).await
 }
 
-/// Complete successive Claude HTTP/2 streams without another TLS bootstrap.
+/// Complete successive HTTP/2 streams without another TLS bootstrap.
 pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
     session: Session<C>,
     tunnel: Arc<Tunnel>,
     runtime: Runtime,
-    mut turns: mpsc::Receiver<ClaudeTurn>,
+    mut turns: mpsc::Receiver<HttpTurn>,
     completion_ack: bool,
     compact: bool,
 ) -> Result<()> {
@@ -276,15 +255,16 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
     let mut responses = Vec::new();
     let mut turn_index = 0usize;
     let mut request_index = 0usize;
-    let mut threads = compact.then(ThreadState::default);
+    let provider = result
+        .provider
+        .context("HTTP provider missing from session")?;
+    let mut provider_state = ProviderState::new(provider, compact);
     while let Some(turn) = turns.recv().await {
         let outcome = async {
             let mut template = turn.template.clone();
-            if compact {
-                beta_template(&mut template);
-            }
+            configure_template(&mut template, compact);
             let source_bytes = turn.body.len();
-            let mut prepared = prepare(threads.as_ref(), &turn.body, &template)?;
+            let mut prepared = provider_state.prepare(&turn.body, &template)?;
             loop {
                 let started = Instant::now();
                 let proofs_before = link.turn;
@@ -324,7 +304,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                         return Err(error);
                     }
                 };
-                let status = response.status.context("Claude response status missing")?;
+                let status = response.status.context("HTTP/2 response status missing")?;
                 let error: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
                 journal(
                     &runtime,
@@ -339,11 +319,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                 )
                 .await?;
                 request_index += 1;
-                if status == 404
-                    && prepared.mode == "continue"
-                    && error["error"]["details"]["error_code"] == "thread_not_found"
-                {
-                    threads.as_ref().unwrap().replay(&mut prepared)?;
+                if provider_state.replay(&mut prepared, status, &error)? {
                     continue;
                 }
                 let content_type = response
@@ -365,37 +341,35 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                     )
                     .await?;
                     turn.reply
-                        .send(Ok(ClaudeEvent::Start(status, content_type.clone())))
+                        .send(Ok(HttpEvent::Start(status, content_type.clone())))
                         .await
-                        .context("local Claude listener closed")?;
+                        .context("local listener closed")?;
                     turn.reply
-                        .send(Ok(ClaudeEvent::Data(response.body)))
+                        .send(Ok(HttpEvent::Data(response.body)))
                         .await
-                        .context("local Claude listener closed")?;
+                        .context("local listener closed")?;
                     let (finished, acknowledged) = oneshot::channel();
                     turn.reply
-                        .send(Ok(ClaudeEvent::ProviderError(finished)))
+                        .send(Ok(HttpEvent::ProviderError(finished)))
                         .await
-                        .context("local Claude listener closed")?;
+                        .context("local listener closed")?;
                     acknowledged
                         .await
-                        .context("local Claude error response unfinished")?;
+                        .context("local HTTP error response unfinished")?;
                     bail!("provider returned HTTP {status} {content_type}");
                 }
-                let summary = claude::summarize_sse(status, &response.headers, &response.body)?;
-                if let Some(threads) = &mut threads {
-                    threads.complete(
-                        &prepared,
-                        &template,
-                        summary.message_id.clone(),
-                        &response.body,
-                    );
-                }
+                let summary = provider.summarize(status, &response.headers, &response.body)?;
+                provider_state.complete(
+                    &prepared,
+                    &template,
+                    summary.message_id.clone(),
+                    &response.body,
+                );
                 journal(
                     &runtime,
                     &json!({"event":"message_complete", "turn":turn_index,
                     "attempt":request_index - 1, "message_id":summary.message_id,
-                    "thread_parent_ready":threads.as_ref().is_some_and(ThreadState::ready),
+                    "thread_parent_ready":provider_state.ready(),
                     "usage":summary.usage, "provider_tool_uses":summary.tool_uses}),
                 )
                 .await?;
@@ -415,9 +389,9 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                     "proof_seconds":(link.proof_time - proof_time_before).as_secs_f64(),
                     "provider_tool_uses":summary.tool_uses}));
                 turn.reply
-                    .send(Ok(ClaudeEvent::Done))
+                    .send(Ok(HttpEvent::Done))
                     .await
-                    .context("local Claude listener closed")?;
+                    .context("local listener closed")?;
                 break;
             }
             Ok::<(), anyhow::Error>(())
@@ -430,7 +404,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
             Err(error) if error.is::<Rejected>() => reject(&turn, &error).await?,
             Err(error) => {
                 let _ = turn.reply.send(Err(error)).await;
-                return Err(anyhow::anyhow!("Claude turn failed"));
+                return Err(anyhow::anyhow!("HTTP/2 turn failed"));
             }
         }
         turn_index += 1;
@@ -439,7 +413,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
     if completion_ack {
         link.peer.receive("complete_ack").await?;
     }
-    let report = json!({"route":"claude_h2", "status":200, "responses":responses,
+    let report = json!({"route":"tls_key_update", "provider":provider, "status":200, "responses":responses,
         "h2":result.h2, "h3":result.h3, "session_id":result.session_id,
         "prefix_key_commitment":result.prefix_key_commitment,
         "client_records_sent":link.turn, "protected_bootstrap_count":1});

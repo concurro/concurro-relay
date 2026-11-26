@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
     let config = WorkerConfig::parse();
     let profile = match config.route {
         WorkerRoute::Codex => Profile::Codex,
-        WorkerRoute::ClaudeH2 => Profile::ClaudeH2,
+        WorkerRoute::TlsKeyUpdate => Profile::TlsKeyUpdate,
     };
     let runtime = Runtime {
         root: config.runtime.clone(),
@@ -104,8 +104,16 @@ async fn main() -> Result<()> {
         let mut gate = ParentGate { answers };
         let session_id = hex::encode(identity::random::<16>());
         let mut peer = Peer::new(control);
-        let first = if profile == Profile::ClaudeH2 {
-            match session::sponsor_first(&mut peer, &mut gate, &runtime, &session_id).await? {
+        let first = if profile == Profile::TlsKeyUpdate {
+            match session::sponsor_first(
+                &mut peer,
+                &mut gate,
+                &runtime,
+                &session_id,
+                config.provider,
+            )
+            .await?
+            {
                 Some(first) => Some(first),
                 // Nothing of the session reached the provider. Concurro ends
                 // the link once it has the rejection.
@@ -122,6 +130,7 @@ async fn main() -> Result<()> {
         let options = BootstrapOptions {
             role: config.role,
             profile,
+            provider: config.provider,
             runtime: runtime.clone(),
             provider_host: config.provider_host,
             provider_port: config.provider_port,
@@ -129,7 +138,7 @@ async fn main() -> Result<()> {
             credential: Some(token),
             account,
             codex_headers: Vec::new(),
-            claude_template: first.as_ref().and_then(|first| first.template().cloned()),
+            http_template: first.as_ref().and_then(|first| first.template().cloned()),
         };
         let session =
             bootstrap::start_after_identity(peer.stream, Some(tunnel.clone()), options).await?;
@@ -156,12 +165,10 @@ async fn main() -> Result<()> {
         let completion_ack = shape.metadata.get("completion_ack") == Some(&json!(true));
         let listener = ingress::bind(&config.listen).await?;
         println!("NATIVE_READY {}", listener.local_addr()?);
-        if config.route == WorkerRoute::ClaudeH2 {
+        if config.route == WorkerRoute::TlsKeyUpdate {
             let compact = env::var("CONCURRO_CLAUDE_MESSAGE_THREADS").as_deref() != Ok("0");
-            let mut first = ingress::claude::accept(&listener).await?;
-            if compact {
-                session::claude_beta_template(&mut first.template);
-            }
+            let mut first = ingress::tls_key_update::accept(&listener, config.provider).await?;
+            session::configure_template(&mut first.template, compact);
             control::send(
                 &mut control,
                 &Message {
@@ -177,7 +184,7 @@ async fn main() -> Result<()> {
             .await?;
             let mut peer = Peer::new(control);
             let reviewed = tokio::select! {
-                reviewed = session::claude_review_first(&mut peer, &first.body, &first.template, compact) => reviewed,
+                reviewed = session::http_review_first(&mut peer, &first.body, &first.template, compact) => reviewed,
                 () = first.watch_disconnect() => {
                     println!("NATIVE_CANCEL cli_disconnect");
                     bail!("NATIVE_CANCEL cli_disconnect");
@@ -194,6 +201,7 @@ async fn main() -> Result<()> {
             let options = BootstrapOptions {
                 role: config.role,
                 profile,
+                provider: config.provider,
                 runtime: runtime.clone(),
                 provider_host: config.provider_host,
                 provider_port: config.provider_port,
@@ -201,7 +209,7 @@ async fn main() -> Result<()> {
                 credential: None,
                 account,
                 codex_headers: Vec::new(),
-                claude_template: Some(first.template.clone()),
+                http_template: Some(first.template.clone()),
             };
             let session = tokio::select! {
                 result = bootstrap::start_after_identity(peer.stream, Some(tunnel.clone()), options) => result?,
@@ -211,7 +219,7 @@ async fn main() -> Result<()> {
                 }
             };
             let (turns_tx, turns_rx) = mpsc::channel(8);
-            let mut coordinator = tokio::spawn(session::claude_concurro(
+            let mut coordinator = tokio::spawn(session::tls_key_update_concurro(
                 session,
                 tunnel,
                 runtime,
@@ -225,7 +233,7 @@ async fn main() -> Result<()> {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0);
             tokio::select! {
-                served = ingress::claude::serve(&listener, first, turns_tx.clone(), test_turns) => {
+                served = ingress::tls_key_update::serve(&listener, first, turns_tx.clone(), test_turns) => {
                     drop(turns_tx);
                     match served {
                         Ok(()) => coordinator.await??,
@@ -260,6 +268,7 @@ async fn main() -> Result<()> {
         let options = BootstrapOptions {
             role: config.role,
             profile,
+            provider: config.provider,
             runtime: runtime.clone(),
             provider_host: config.provider_host,
             provider_port: config.provider_port,
@@ -267,7 +276,7 @@ async fn main() -> Result<()> {
             credential: None,
             account,
             codex_headers: first.headers.clone(),
-            claude_template: None,
+            http_template: None,
         };
         let session = tokio::select! {
             result = bootstrap::start_after_identity(control, Some(tunnel.clone()), options) => result?,

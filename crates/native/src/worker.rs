@@ -9,6 +9,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use tokio::io::{AsyncBufRead, Lines};
 
+use concurro_relay_provider_protocol::HttpProvider;
+
 use crate::{NativeAudit, NativeLimits, NativeRequest, NativeRole, NativeVerdict, session::Gate};
 
 /// Provider protocol selected for this session.
@@ -16,9 +18,9 @@ use crate::{NativeAudit, NativeLimits, NativeRequest, NativeRole, NativeVerdict,
 pub enum WorkerRoute {
     /// Codex WebSocket.
     Codex,
-    /// Claude HTTP/2.
-    #[value(name = "claude_h2")]
-    ClaudeH2,
+    /// Shared HTTP/2 transport with a protected bearer and TLS KeyUpdate.
+    #[value(name = "tls_key_update", alias = "claude_h2")]
+    TlsKeyUpdate,
 }
 
 /// Arguments supplied to the bundled native worker.
@@ -30,6 +32,9 @@ pub struct WorkerConfig {
     /// Provider protocol.
     #[arg(long, value_enum)]
     pub route: WorkerRoute,
+    /// HTTP provider adapter; independent of the shared transport.
+    #[arg(long, default_value = "claude")]
+    pub provider: HttpProvider,
     /// Parent-side control socket.
     #[arg(long)]
     pub control: PathBuf,
@@ -124,6 +129,7 @@ impl<R: AsyncBufRead + Unpin> Gate for ParentGate<R> {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use concurro_relay_provider_protocol::HttpProvider;
 
     use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -150,8 +156,29 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(config.role, NativeRole::Sponsor);
-        assert_eq!(config.route, WorkerRoute::ClaudeH2);
+        assert_eq!(config.route, WorkerRoute::TlsKeyUpdate);
         assert_eq!(config.provider_port, 443);
+        assert_eq!(config.provider, HttpProvider::Claude);
+        let google = WorkerConfig::try_parse_from([
+            "concurro-native-worker",
+            "--role",
+            "concurro",
+            "--route",
+            "tls_key_update",
+            "--provider",
+            "antigravity",
+            "--control",
+            "/tmp/c.sock",
+            "--aux",
+            "/tmp/a.sock",
+            "--runtime",
+            "/tmp/r",
+            "--output",
+            "/tmp/o",
+        ])
+        .unwrap();
+        assert_eq!(google.route, WorkerRoute::TlsKeyUpdate);
+        assert_eq!(google.provider, HttpProvider::Antigravity);
         assert_eq!(
             WorkerEvent::Ready("127.0.0.1:7050".into()).line().unwrap(),
             "NATIVE_READY 127.0.0.1:7050"

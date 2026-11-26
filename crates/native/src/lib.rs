@@ -296,7 +296,7 @@ where
         .arg("--route")
         .arg(match options.route {
             Route::ChatgptSubscription => "codex",
-            Route::ClaudeSubscription => "claude_h2",
+            Route::ClaudeSubscription => "tls_key_update",
         })
         .arg("--control")
         .arg(&control_path)

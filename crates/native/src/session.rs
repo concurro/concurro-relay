@@ -12,8 +12,9 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use concurro_relay_native_transport::{control::Message, tunnel::Tunnel};
 use concurro_relay_protocol::{identity, ws};
 use concurro_relay_provider_protocol::{
-    claude::{self as claude_protocol, AuditFrame},
+    HttpProvider,
     codex::{self, RequestBinding, RequestClaim, Responses},
+    tls_key_update::{self as http_protocol, AuditFrame},
 };
 use concurro_relay_tls13::record::{self, ApplicationRecords};
 use serde_json::{Map, Value, json};
@@ -30,10 +31,11 @@ use crate::{
     worker::WorkerEvent,
 };
 
-mod claude;
-pub use claude::beta_template as claude_beta_template;
-pub use claude::concurro as claude_concurro;
-pub use claude::review_first as claude_review_first;
+mod providers;
+mod tls_key_update;
+pub use providers::configure_template;
+pub use tls_key_update::concurro as tls_key_update_concurro;
+pub use tls_key_update::review_first as http_review_first;
 
 /// One request from the local Codex WebSocket and its authenticated event reply.
 pub struct CodexTurn {
@@ -53,18 +55,18 @@ pub enum CodexEvent {
     Done,
 }
 
-/// One local Claude request and its authenticated streaming reply.
-pub struct ClaudeTurn {
+/// One local HTTP/2 request and its authenticated streaming reply.
+pub struct HttpTurn {
     /// Public path and headers for this request.
-    pub template: claude_protocol::Template,
+    pub template: http_protocol::Template,
     /// Exact JSON request body.
     pub body: Vec<u8>,
     /// Immediate authenticated response events.
-    pub reply: mpsc::Sender<Result<ClaudeEvent>>,
+    pub reply: mpsc::Sender<Result<HttpEvent>>,
 }
 
-/// One authenticated Claude response effect for local ingress.
-pub enum ClaudeEvent {
+/// One authenticated HTTP/2 response effect for local ingress.
+pub enum HttpEvent {
     /// Validated HTTP status and content type.
     Start(u16, String),
     /// Authenticated provider body bytes before stream completion.
@@ -85,7 +87,7 @@ pub trait Gate {
 struct Approved {
     request: u64,
     body: Vec<u8>,
-    template: Option<claude_protocol::Template>,
+    template: Option<http_protocol::Template>,
 }
 
 /// Which request the Sponsor reviews next and what it last approved.
@@ -109,7 +111,7 @@ impl Approvals {
     }
 
     /// Admits the public template of the approved request.
-    fn template(&self, template: &claude_protocol::Template) -> Result<()> {
+    fn template(&self, template: &http_protocol::Template) -> Result<()> {
         let approved = self
             .approved
             .as_ref()
@@ -122,7 +124,7 @@ impl Approvals {
     }
 
     /// Admits `sent`, the body proved so far, sent with `template`.
-    fn partial(&self, sent: &[u8], template: Option<&claude_protocol::Template>) -> Result<()> {
+    fn partial(&self, sent: &[u8], template: Option<&http_protocol::Template>) -> Result<()> {
         let approved = self
             .approved
             .as_ref()
@@ -135,11 +137,7 @@ impl Approvals {
     }
 
     /// Admits the complete proved `body`, returning its review number.
-    fn complete(
-        &mut self,
-        body: &[u8],
-        template: Option<&claude_protocol::Template>,
-    ) -> Result<u64> {
+    fn complete(&mut self, body: &[u8], template: Option<&http_protocol::Template>) -> Result<u64> {
         self.partial(body, template)?;
         let approved = self
             .approved
@@ -164,18 +162,23 @@ async fn review_request<C: AsyncRead + AsyncWrite + Unpin>(
     gate: &mut impl Gate,
     runtime: &Runtime,
     session_id: &str,
-    claude: bool,
+    provider: Option<HttpProvider>,
     approvals: &mut Approvals,
 ) -> Result<Value> {
     let (number, prompt, metadata) = receive_review(peer, first).await?;
     approvals.review(number)?;
-    let template = if claude {
-        Some(claude_protocol::Template::from_metadata(
+    let template = if let Some(provider) = provider {
+        let template = http_protocol::Template::from_metadata(
             metadata
                 .get("template")
                 .and_then(Value::as_object)
-                .context("reviewed Claude template missing")?,
-        )?)
+                .context("reviewed HTTP/2 template missing")?,
+        )?;
+        ensure!(
+            template.provider == provider,
+            "reviewed HTTP provider differs from session"
+        );
+        Some(template)
     } else {
         None
     };
@@ -240,7 +243,7 @@ async fn review_request<C: AsyncRead + AsyncWrite + Unpin>(
     Ok(entry)
 }
 
-/// A Claude session's first request, approved before the TLS bootstrap.
+/// An HTTP/2 session's first request, approved before the TLS bootstrap.
 pub struct FirstApproval {
     approvals: Approvals,
     entry: Value,
@@ -249,12 +252,12 @@ pub struct FirstApproval {
 impl FirstApproval {
     /// The approved path and public headers, which the bootstrap prefix
     /// must carry.
-    pub fn template(&self) -> Option<&claude_protocol::Template> {
+    pub fn template(&self) -> Option<&http_protocol::Template> {
         self.approvals.approved.as_ref()?.template.as_ref()
     }
 }
 
-/// Has the Sponsor review a Claude session's first request before the TLS
+/// Has the Sponsor review an HTTP/2 session's first request before the TLS
 /// bootstrap, whose prefix carries that request's HEADERS. Returns the
 /// approval, or `None` when the request was rejected and the session ends.
 pub async fn sponsor_first<C: AsyncRead + AsyncWrite + Unpin>(
@@ -262,6 +265,7 @@ pub async fn sponsor_first<C: AsyncRead + AsyncWrite + Unpin>(
     gate: &mut impl Gate,
     runtime: &Runtime,
     session_id: &str,
+    provider: HttpProvider,
 ) -> Result<Option<FirstApproval>> {
     let message = peer.receive("request_review").await?;
     let mut approvals = Approvals::default();
@@ -271,7 +275,7 @@ pub async fn sponsor_first<C: AsyncRead + AsyncWrite + Unpin>(
         gate,
         runtime,
         session_id,
-        true,
+        Some(provider),
         &mut approvals,
     )
     .await?;
@@ -283,7 +287,7 @@ pub async fn sponsor_first<C: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Sponsor gates every provider write on its approval and a matching
-/// request proof. A Claude session's `first` request was approved before
+/// request proof. An HTTP/2 session's `first` request was approved before
 /// the bootstrap.
 pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
     session: Session<C>,
@@ -294,6 +298,7 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
     session_id: &str,
     first: Option<FirstApproval>,
 ) -> Result<()> {
+    let session_provider = session.result.provider;
     let Session {
         mut peer,
         result,
@@ -306,18 +311,18 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
     let Application::Sponsor {
         mut provider,
         tail,
-        claude_template,
+        http_template,
         credential_length,
     } = application
     else {
         bail!("Sponsor session role mismatch")
     };
-    let mut claude_audit = claude_template
-        .map(|template| claude_protocol::SponsorAudit::new(credential_length, template))
+    let mut http_audit = http_template
+        .map(|template| http_protocol::SponsorAudit::new(credential_length, template))
         .transpose()?;
     ensure!(
-        claude_audit.is_none() || first.is_some(),
-        "Claude session without an approved first request"
+        http_audit.is_none() || first.is_some(),
+        "HTTP/2 session without an approved first request"
     );
     let (mut approvals, mut prompts) = match first {
         Some(first) => (first.approvals, vec![first.entry]),
@@ -334,7 +339,6 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
         let message = peer.receive_any().await?;
         match message.kind.as_str() {
             "request_review" => {
-                let claude = claude_audit.is_some();
                 prompts.push(
                     review_request(
                         &mut peer,
@@ -342,7 +346,7 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
                         gate,
                         &runtime,
                         session_id,
-                        claude,
+                        session_provider,
                         &mut approvals,
                     )
                     .await?,
@@ -384,7 +388,7 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
                 )
                 .await?;
                 let mut completed = None;
-                let release = if let Some(audit) = &mut claude_audit {
+                let release = if let Some(audit) = &mut http_audit {
                     match audit.accept(&plaintext)? {
                         AuditFrame::Control => true,
                         AuditFrame::Headers(stream) => {
@@ -440,10 +444,10 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
                 .await?;
                 next += 1;
             }
-            "h2_template" if claude_audit.is_some() => {
-                let template = claude_protocol::Template::from_metadata(&message.metadata)?;
+            "h2_template" if http_audit.is_some() => {
+                let template = http_protocol::Template::from_metadata(&message.metadata)?;
                 approvals.template(&template)?;
-                claude_audit.as_mut().unwrap().template(template)?;
+                http_audit.as_mut().unwrap().template(template)?;
             }
             "need_server_record" => {
                 ensure!(
@@ -493,7 +497,7 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
             other => bail!("unexpected sponsor control message {other}"),
         }
     }
-    let report = json!({"route": result.route, "h2": result.h2, "h3": result.h3,
+    let report = json!({"route": result.route, "provider": result.provider, "h2": result.h2, "h3": result.h3,
         "session_id": result.session_id, "prefix_key_commitment": result.prefix_key_commitment,
         "prompts": prompts, "usage": usage, "request_proof_records": next,
         "protected_bootstrap_count": 1, "provider_connection_count": 1,
@@ -745,7 +749,7 @@ async fn send_review<C: AsyncRead + AsyncWrite + Unpin>(
     peer: &mut Peer<C>,
     number: u64,
     prompt: &[u8],
-    template: Option<&claude_protocol::Template>,
+    template: Option<&http_protocol::Template>,
 ) -> Result<()> {
     let mut parts = prompt.chunks(REVIEW_PART);
     let mut metadata = helpers::metadata("request", json!(number));
@@ -772,7 +776,7 @@ async fn ask_review<C: AsyncRead + AsyncWrite + Unpin>(
     peer: &mut Peer<C>,
     number: u64,
     prompt: &[u8],
-    template: Option<&claude_protocol::Template>,
+    template: Option<&http_protocol::Template>,
 ) -> Result<()> {
     send_review(peer, number, prompt, template).await?;
     let answer = peer.receive_any().await?;
@@ -840,7 +844,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin> Forwarded<'_, C> {
     async fn review(
         &mut self,
         prompt: &[u8],
-        template: Option<&claude_protocol::Template>,
+        template: Option<&http_protocol::Template>,
     ) -> Result<u64> {
         let number = self.reviews;
         self.reviews += 1;
@@ -921,7 +925,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin> Forwarded<'_, C> {
 
 #[cfg(test)]
 mod tests {
-    use concurro_relay_provider_protocol::claude::Template;
+    use concurro_relay_provider_protocol::{HttpProvider, tls_key_update::Template};
     use serde_json::json;
 
     use std::{env, time::Duration};
@@ -929,7 +933,7 @@ mod tests {
     use anyhow::Result;
 
     use super::{
-        Approvals, Approved, Gate, Rejected, claude_review_first, receive_review, send_review,
+        Approvals, Approved, Gate, Rejected, http_review_first, receive_review, send_review,
         sponsor_first,
     };
     use crate::{
@@ -954,7 +958,7 @@ mod tests {
         }
     }
 
-    /// The first Claude request is reviewed, recorded and answered before
+    /// The first HTTP/2 request is reviewed, recorded and answered before
     /// any bootstrap, as the provider body Concurro will send.
     #[tokio::test]
     async fn the_first_claude_request_is_reviewed_before_bootstrap() {
@@ -977,16 +981,22 @@ mod tests {
             let asking = {
                 let template = template.clone();
                 tokio::spawn(async move {
-                    claude_review_first(&mut concurro, body, &template, true).await
+                    http_review_first(&mut concurro, body, &template, true).await
                 })
             };
             let mut gate = Fixed {
                 accept,
                 asked: Vec::new(),
             };
-            let first = sponsor_first(&mut sponsor, &mut gate, &runtime, "session")
-                .await
-                .unwrap();
+            let first = sponsor_first(
+                &mut sponsor,
+                &mut gate,
+                &runtime,
+                "session",
+                HttpProvider::Claude,
+            )
+            .await
+            .unwrap();
             let asked = asking.await.unwrap();
             let request = &gate.asked[0];
             assert_eq!(request.request, 0);
@@ -1010,6 +1020,49 @@ mod tests {
     fn peers() -> (Peer<tokio::io::DuplexStream>, Peer<tokio::io::DuplexStream>) {
         let (one, other) = tokio::io::duplex(1 << 16);
         (Peer::new(one), Peer::new(other))
+    }
+
+    /// Provider mismatches are refused before the Sponsor is asked to approve.
+    #[tokio::test]
+    async fn reviews_are_bound_to_session_provider() {
+        for request in [0, 1] {
+            let (mut sender, mut receiver) = peers();
+            let template = Template {
+                provider: HttpProvider::Antigravity,
+                path: b"/v1internal:streamGenerateContent?alt=sse".to_vec(),
+                headers: Vec::new(),
+            };
+            send_review(&mut sender, request, b"{}", Some(&template))
+                .await
+                .unwrap();
+            let first = receiver.receive("request_review").await.unwrap();
+            let mut approvals = Approvals::default();
+            approvals.reviewed = request;
+            let mut gate = Fixed {
+                accept: true,
+                asked: Vec::new(),
+            };
+            let runtime = Runtime {
+                root: env::temp_dir(),
+                output: env::temp_dir(),
+                circuit_cache: env::temp_dir(),
+                limits: crate::NativeLimits::DEFAULT,
+                benchmark_timeout: Duration::from_secs(30),
+            };
+            let error = super::review_request(
+                &mut receiver,
+                first,
+                &mut gate,
+                &runtime,
+                "session",
+                Some(HttpProvider::Claude),
+                &mut approvals,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("provider differs from session"));
+            assert!(gate.asked.is_empty());
+        }
     }
 
     /// A prompt beyond one control message arrives whole, with its template.

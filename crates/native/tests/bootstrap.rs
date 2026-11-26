@@ -8,7 +8,10 @@ use concurro_relay_native::{
     proof,
 };
 use concurro_relay_native_transport::tunnel::{Role, Tunnel};
-use concurro_relay_provider_protocol::codex::{RequestBinding, RequestClaim};
+use concurro_relay_provider_protocol::{
+    HttpProvider,
+    codex::{RequestBinding, RequestClaim},
+};
 use concurro_relay_tls13::{
     handshake::Profile,
     record::{self, Epoch},
@@ -216,6 +219,7 @@ impl Fixture {
     /// Build an explicitly selected development bootstrap configuration.
     fn options(&self, run: &Path, name: &str, role: NativeRole, port: u16) -> BootstrapOptions {
         BootstrapOptions {
+            provider: HttpProvider::Claude,
             role,
             profile: self.profile,
             runtime: self.runtime(run, name, role),
@@ -225,7 +229,7 @@ impl Fixture {
             credential: None,
             account: None,
             codex_headers: Vec::new(),
-            claude_template: None,
+            http_template: None,
         }
     }
 }
@@ -237,7 +241,7 @@ async fn rust_bootstrap() -> Result<()> {
     let bundle = PathBuf::from(
         env::var_os("CONCURRO_PHASE3_FIXTURE_BUNDLE").context("accepted bundle path missing")?,
     );
-    for profile in [Profile::Codex, Profile::ClaudeH2] {
+    for profile in [Profile::Codex, Profile::TlsKeyUpdate] {
         let fixture = Fixture::new(bundle.clone(), profile)?;
         let pair = run_case(&fixture, "both-rust").await?;
         ensure!(
@@ -315,7 +319,7 @@ async fn untrusted_provider_aborts_bootstrap() -> Result<()> {
         env::var_os("CONCURRO_PHASE3_FIXTURE_BUNDLE").context("accepted bundle path missing")?,
     );
     let fixture = Fixture::new(bundle.clone(), Profile::Codex)?;
-    let unrelated_ca = Fixture::new(bundle, Profile::ClaudeH2)?.ca;
+    let unrelated_ca = Fixture::new(bundle, Profile::TlsKeyUpdate)?.ca;
     let run = fixture.root.join("untrusted-provider");
     fs::create_dir_all(&run)?;
     let (mut provider, port) = fixture.provider(&run).await?;

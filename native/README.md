@@ -2,14 +2,37 @@
 
 Both role packages launch the bundled Rust worker by default.
 `CONCURRO_NATIVE_RUST_WORKER` selects a development worker binary explicitly.
-The worker handles Codex WebSocket continuations and successive Claude HTTP/2
-requests over one protected session. Frozen TLS and control-wire test inputs are
+The worker handles Codex WebSocket continuations and provider-independent HTTP/2
+requests over one protected TLS KeyUpdate session. Frozen TLS and control-wire test inputs are
 in `native/fixtures`; the Python worker used during the port is retained in Git
 history at `aa8c3d0`.
 
 Claude Message Threads use compact continuations by default. Set
 `CONCURRO_CLAUDE_MESSAGE_THREADS=0` on Concurro for full-context diagnostics.
 The hosted fixture also accepts `--claude-full-context`.
+
+## Shared HTTP/2 transport
+
+The worker selects `--route tls_key_update` and an independent
+`--provider claude|antigravity` (default: `claude`). Both roles must select the
+same provider. `claude_h2` remains a command-line alias and the circuit-cache
+filename prefix, so existing generated circuits are reused.
+
+`provider-protocol::tls_key_update` owns HPACK bearer reuse, HTTP/2 framing,
+flow control and Sponsor request auditing. The native `session::tls_key_update`
+loop owns proved exchanges. `HttpProvider` supplies the TLS hostname, HTTP
+authority, inference paths and response decoder; native `session::providers`
+owns request preparation and continuation state. Claude retains Message Threads
+and missing-parent replay. Antigravity sends full GenerateContent request bodies
+and normalizes its subscription SSE responses.
+
+Request review binds the provider, path, public headers and exact body before
+forwarding. Session reports identify the transport and provider separately;
+turn journals are written to `http-turns.jsonl`.
+
+The Antigravity adapter is available to the native worker. Hosted route admission,
+Sponsor registration and credential loading still expose Claude and ChatGPT;
+those need separate Antigravity integration.
 
 ## Building the native runtime
 

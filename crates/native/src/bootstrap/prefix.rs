@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use concurro_relay_native_transport::tunnel::Tunnel;
-use concurro_relay_provider_protocol::{claude, codex};
+use concurro_relay_provider_protocol::{codex, tls_key_update};
 use concurro_relay_tls13::{handshake::Profile, record::ApplicationRecords};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::Map;
@@ -34,7 +34,7 @@ pub async fn prepare<C: AsyncRead + AsyncWrite + Unpin>(
     let (head, slot) = codex::request_head(&vec![0; credential_len], b"");
     let circuit = helpers::prefix_circuit(
         &options.runtime,
-        options.route(),
+        options.circuit_route(),
         slot + credential_len + 2,
         slot,
         credential_len,
@@ -80,8 +80,8 @@ pub struct SponsorPrefix {
     pub public: Vec<u8>,
     /// HTTP headers after the protected credential prefix.
     pub tail: Vec<u8>,
-    /// First public Claude request template, when this is an H2 session.
-    pub claude_template: Option<claude::Template>,
+    /// First public HTTP request template, when this is an H2 session.
+    pub http_template: Option<tls_key_update::Template>,
 }
 
 /// Protected prefix and Concurro's application record epochs.
@@ -104,23 +104,27 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
     prepared: Option<PreparedCircuit>,
 ) -> Result<SponsorPrefix> {
     let mut websocket_key = Vec::new();
-    let mut claude_template = None;
+    let mut http_template = None;
     let (head, slot) = if context.options.profile == Profile::Codex {
         websocket_key = peer.receive("websocket_key").await?.data;
         codex::request_head(credential, &websocket_key)
     } else {
         let template = peer.receive("h2_template").await?;
-        let template = claude::Template::from_metadata(&template.metadata)?;
+        let template = tls_key_update::Template::from_metadata(&template.metadata)?;
+        ensure!(
+            template.provider == context.options.provider,
+            "HTTP provider differs from bootstrap identity"
+        );
         // The prefix carries the first request's HEADERS, which the Sponsor
         // approved with that request.
-        if let Some(approved) = &context.options.claude_template {
+        if let Some(approved) = &context.options.http_template {
             ensure!(
                 template == *approved,
                 "first request template differs from the approved one"
             );
         }
-        let result = claude::bootstrap(credential, &template)?;
-        claude_template = Some(template);
+        let result = tls_key_update::bootstrap(credential, &template)?;
+        http_template = Some(template);
         result
     };
     let partial = if context.options.profile == Profile::Codex {
@@ -143,7 +147,7 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
     } else {
         let circuit = helpers::prefix_circuit(
             &context.options.runtime,
-            context.options.route(),
+            context.options.circuit_route(),
             partial.len(),
             slot,
             credential.len(),
@@ -165,7 +169,7 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
     };
     ensure!(public.len() > 97, "protected prefix shape mismatch");
     ensure!(
-        context.options.profile == Profile::ClaudeH2 || [75, 84, 85].contains(&slot),
+        context.options.profile == Profile::TlsKeyUpdate || [75, 84, 85].contains(&slot),
         "protected prefix shape mismatch"
     );
     provider.write_all(&public[97..]).await?;
@@ -173,7 +177,7 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
     Ok(SponsorPrefix {
         public,
         tail,
-        claude_template,
+        http_template,
     })
 }
 
@@ -198,11 +202,15 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
     } else {
         let template = context
             .options
-            .claude_template
+            .http_template
             .clone()
-            .unwrap_or_else(claude::Template::fixture_default);
+            .unwrap_or_else(tls_key_update::Template::fixture_default);
+        ensure!(
+            template.provider == context.options.provider,
+            "HTTP provider differs from bootstrap identity"
+        );
         peer.send("h2_template", &[], template.metadata()?).await?;
-        claude::bootstrap(&zero_credential, &template)?
+        tls_key_update::bootstrap(&zero_credential, &template)?
     };
     let partial = if context.options.profile == Profile::Codex {
         &head[..slot + credential_len + 2]
@@ -235,7 +243,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
     } else {
         let circuit = helpers::prefix_circuit(
             &context.options.runtime,
-            context.options.route(),
+            context.options.circuit_route(),
             partial.len(),
             slot,
             credential_len,

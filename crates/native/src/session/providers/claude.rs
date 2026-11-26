@@ -3,26 +3,12 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, ensure};
-use concurro_relay_provider_protocol::claude::Template;
+use concurro_relay_provider_protocol::tls_key_update::Template;
 use serde_json::{Map, Value, json};
 
-const BETA: &[u8] = b"message-threads-2026-08-12";
+use super::Prepared;
 
-/// The provider request selected from one complete CLI request.
-pub struct Prepared {
-    /// The complete CLI request retained for replay and lineage checks.
-    pub original: Value,
-    /// Bytes proved to Sponsor and sent to the provider.
-    pub body: Vec<u8>,
-    /// Whether this request creates, continues, or replays a thread.
-    pub mode: &'static str,
-    /// Authenticated response ID used by a continuation.
-    pub parent: Option<String>,
-    /// Why a full create was selected when a prior response exists.
-    pub decision: &'static str,
-    /// Content-free shape of a mismatched assistant response.
-    pub mismatch: Option<Value>,
-}
+const BETA: &[u8] = b"message-threads-2026-08-12";
 
 /// Last completed provider response and the CLI history that produced it.
 struct Head {
@@ -301,7 +287,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{ThreadState, beta_template};
-    use concurro_relay_provider_protocol::claude::Template;
+    use concurro_relay_provider_protocol::tls_key_update::Template;
 
     /// A completed tool response that the CLI includes in its next request.
     fn tool_response() -> Vec<u8> {

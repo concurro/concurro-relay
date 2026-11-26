@@ -39,7 +39,10 @@ fn full_server_flights_match_python() {
     let point = bytes(&fixture["joint_point"]);
     let server_secret: [u8; 32] = bytes(&fixture["server_secret"]).try_into().unwrap();
     let client_secret: [u8; 32] = bytes(&fixture["client_secret"]).try_into().unwrap();
-    for (name, profile) in [("codex", Profile::Codex), ("claude_h2", Profile::ClaudeH2)] {
+    for (name, profile) in [
+        ("codex", Profile::Codex),
+        ("claude_h2", Profile::TlsKeyUpdate),
+    ] {
         let case = &fixture[name];
         let client = bytes(&case["client"]);
         let server = bytes(&case["server"]);
@@ -80,7 +83,10 @@ fn authentication_rejects_altered_server_flights() {
     let point = bytes(&fixture["joint_point"]);
     let secret: [u8; 32] = bytes(&fixture["server_secret"]).try_into().unwrap();
     let ca = fixture["ca_pem"].as_str().unwrap();
-    for (name, profile) in [("codex", Profile::Codex), ("claude_h2", Profile::ClaudeH2)] {
+    for (name, profile) in [
+        ("codex", Profile::Codex),
+        ("claude_h2", Profile::TlsKeyUpdate),
+    ] {
         let case = &fixture[name];
         let client = bytes(&case["client"]);
         let server = bytes(&case["server"]);
@@ -118,7 +124,7 @@ fn authentication_rejects_altered_server_flights() {
                 .feed(&bytes(&case["bad_alpn_record"]))
                 .unwrap_err()
                 .to_string()
-                .contains(if profile == Profile::ClaudeH2 {
+                .contains(if profile == Profile::TlsKeyUpdate {
                     "ALPN"
                 } else {
                     "EncryptedExtensions"
@@ -228,7 +234,9 @@ fn profile_and_negotiation_rejections() {
     let point = bytes(&fixture["joint_point"]);
     let codex = bytes(&fixture["codex"]["client"]);
     let h2 = bytes(&fixture["claude_h2"]["client"]);
-    assert!(validate_client_hello(Profile::ClaudeH2, &codex, "fixture.example", &point).is_err());
+    assert!(
+        validate_client_hello(Profile::TlsKeyUpdate, &codex, "fixture.example", &point).is_err()
+    );
     assert!(validate_client_hello(Profile::Codex, &h2, "fixture.example", &point).is_err());
     assert!(validate_client_hello(Profile::Codex, &codex, "wrong.example", &point).is_err());
     let mut changed = codex.clone();

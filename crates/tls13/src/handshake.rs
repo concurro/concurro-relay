@@ -30,8 +30,8 @@ const HELLO_RETRY_RANDOM: [u8; 32] = [
 pub enum Profile {
     /// Codex offers no ALPN extension and uses HTTP/1.1/WebSocket.
     Codex,
-    /// Claude offers and requires `h2` ALPN.
-    ClaudeH2,
+    /// The shared HTTP/2 transport offers and requires `h2` ALPN.
+    TlsKeyUpdate,
 }
 
 /// Public ClientHello bytes and their echoed legacy session identifier.
@@ -126,7 +126,7 @@ pub fn client_hello_with_random(
     for (kind, value) in [(0, server_name), (10, groups), (13, signatures)] {
         ext.extend(extension(kind, &value)?);
     }
-    if profile == Profile::ClaudeH2 {
+    if profile == Profile::TlsKeyUpdate {
         ext.extend(extension(16, &packed(&packed(b"h2", 1)?, 2)?)?);
     }
     ext.extend(extension(43, &[2, 3, 4])?);
@@ -182,7 +182,7 @@ pub fn validate_client_hello(
         "ClientHello profile mismatch"
     );
     let ext = extensions(ext_raw)?;
-    let expected: &[u16] = if profile == Profile::ClaudeH2 {
+    let expected: &[u16] = if profile == Profile::TlsKeyUpdate {
         &[0, 10, 13, 16, 43, 51]
     } else {
         &[0, 10, 13, 43, 51]
@@ -214,7 +214,7 @@ pub fn validate_client_hello(
         2,
     )?;
     ensure!(ext[&51] == key_share, "ClientHello joint point mismatch");
-    if profile == Profile::ClaudeH2 {
+    if profile == Profile::TlsKeyUpdate {
         ensure!(
             ext[&16] == packed(&packed(b"h2", 1)?, 2)?,
             "ClientHello ALPN mismatch"
@@ -486,7 +486,7 @@ impl ServerFlight {
                 "invalid EncryptedExtensions supported groups"
             );
         }
-        if self.profile == Profile::ClaudeH2 {
+        if self.profile == Profile::TlsKeyUpdate {
             ensure!(
                 ext.remove(&16).as_deref() == Some(packed(&packed(b"h2", 1)?, 2)?.as_slice()),
                 "server did not select h2 ALPN"
