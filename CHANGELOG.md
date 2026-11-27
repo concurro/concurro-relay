@@ -4,6 +4,16 @@ User-facing changes to the Sponsor relay per release.
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/concurro/concurro-relay/compare/v0.1.2...v0.1.3) - 2026-11-27
+
+### Added
+
+- add Antigravity subscription sponsorship and relay support
+
+### Changed
+
+- share TLS KeyUpdate transport across providers
+
 ## [0.1.2](https://github.com/concurro/concurro-relay/compare/v0.1.1...v0.1.2) - 2026-11-23
 
 ### Added
