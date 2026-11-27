@@ -16,11 +16,18 @@ fn text(value: &Value) -> String {
                 .collect();
             texts.join("\n")
         }
-        Value::Object(fields) => ["text", "content", "output"]
-            .iter()
-            .find_map(|name| fields.get(*name))
-            .map(text)
-            .unwrap_or_default(),
+        Value::Object(fields) => [
+            "text",
+            "content",
+            "output",
+            "parts",
+            "functionResponse",
+            "response",
+        ]
+        .iter()
+        .find_map(|name| fields.get(*name))
+        .map(text)
+        .unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -31,9 +38,14 @@ pub fn request_text(body: &str) -> String {
     let Ok(request) = serde_json::from_str::<Value>(body) else {
         return body.to_owned();
     };
-    let newest = match [&request["messages"], &request["input"]]
-        .into_iter()
-        .find(|items| !items.is_null())
+    let newest = match [
+        &request["messages"],
+        &request["input"],
+        &request["request"]["contents"],
+        &request["contents"],
+    ]
+    .into_iter()
+    .find(|items| !items.is_null())
     {
         Some(Value::Array(items)) => items.last().map(text),
         Some(other) => Some(text(other)),
@@ -56,6 +68,24 @@ pub fn response_text(body: &str) -> String {
         let Ok(event) = serde_json::from_str::<Value>(data.trim()) else {
             continue;
         };
+        let google = event.get("response").unwrap_or(&event);
+        if let Some(candidates) = google["candidates"].as_array() {
+            for candidate in candidates {
+                if let Some(parts) = candidate["content"]["parts"].as_array() {
+                    for part in parts {
+                        if let Some(text) = part["text"].as_str() {
+                            said.push_str(text);
+                        }
+                        if let Some(name) = part["functionCall"]["name"].as_str() {
+                            said.push_str(&format!(
+                                "\n[tool {name}] {}",
+                                part["functionCall"]["args"]
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         // Where a tool call starts, one provider names the tool in a
         // block and the other in an item.
         let starts = event["type"]

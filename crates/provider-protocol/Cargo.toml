@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+flate2.workspace = true
 concurro-relay-protocol.workspace = true
 anyhow.workspace = true
 hex.workspace = true

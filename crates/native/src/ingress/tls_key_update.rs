@@ -33,19 +33,23 @@ impl Request {
     /// Answers this request with the Sponsor's rejection, `reason`, when no
     /// session was started for it.
     pub async fn refuse(mut self, reason: &str) -> Result<()> {
-        respond(&mut self.stream, "403 Forbidden", &rejection(reason)?).await
+        respond(
+            &mut self.stream,
+            "403 Forbidden",
+            &rejection(self.template.provider, reason)?,
+        )
+        .await
     }
 }
 
 /// The error body which tells a CLI the Sponsor rejected its request.
-pub fn rejection(reason: &str) -> Result<Vec<u8>> {
-    error_body("permission_error", reason)
+pub fn rejection(provider: HttpProvider, reason: &str) -> Result<Vec<u8>> {
+    error_body(provider, 403, reason)
 }
 
 /// An error body of the provider's `kind`, saying `message`.
-fn error_body(kind: &str, message: &str) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec(&serde_json::json!({"type": "error",
-        "error": {"type": kind, "message": message}}))?)
+fn error_body(provider: HttpProvider, status: u16, message: &str) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&provider.error(status, message))?)
 }
 
 /// Answers on `stream` with `status` and the JSON error `body`, and closes it.
@@ -112,7 +116,9 @@ async fn read(mut stream: TcpStream, provider: HttpProvider) -> Result<Option<Re
             | "transfer-encoding"
             | "accept-encoding"
             | "proxy-authorization"
-            | "x-api-key" => {}
+            | "x-api-key"
+            | "x-goog-api-key"
+            | "x-goog-user-project" => {}
             _ => headers.push((lower.into_bytes(), value.as_bytes().to_vec())),
         }
     }
@@ -120,15 +126,16 @@ async fn read(mut stream: TcpStream, provider: HttpProvider) -> Result<Option<Re
     let length = length.context("local HTTP Content-Length missing")?;
     let mut body = vec![0; length];
     stream.read_exact(&mut body).await?;
-    serde_json::from_slice::<serde_json::Value>(&body).context("local HTTP request is not JSON")?;
     let template = Template {
         provider,
         path: path.as_bytes().to_vec(),
         headers,
     };
+    let body = template.decoded_body(&body)?;
+    serde_json::from_slice::<serde_json::Value>(&body).context("local HTTP request is not JSON")?;
     if let Err(error) = template.public_headers() {
         // The CLI may have gone; the session carries on either way.
-        let body = error_body("invalid_request_error", &format!("{error:#}"))?;
+        let body = error_body(provider, 400, &format!("{error:#}"))?;
         let _ = respond(&mut stream, "400 Bad Request", &body).await;
         return Ok(None);
     }

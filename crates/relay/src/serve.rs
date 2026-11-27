@@ -13,7 +13,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{Context, Result, bail};
@@ -551,12 +551,28 @@ where
             let _ = events.send(Event::Refused { link, reason });
             return Ok(0);
         }
-        let credential = config.credentials.load(*route)?;
+        let credential = config.credentials.for_native(*route).await?;
+        // A new link rereads agy's bearer; end this one before its fixed bearer expires.
+        let renew_in = (route == &Route::AntigravitySubscription)
+            .then(|| credential.expiry())
+            .flatten()
+            .map(|expiry| {
+                expiry
+                    .duration_since(SystemTime::now())
+                    .unwrap_or_default()
+                    .saturating_sub(Duration::from_secs(60))
+            });
         let account = credential
-            .headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("chatgpt-account-id"))
-            .map(|(_, value)| value.clone());
+            .antigravity
+            .as_ref()
+            .map(|binding| binding.project.clone())
+            .or_else(|| {
+                credential
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("chatgpt-account-id"))
+                    .map(|(_, value)| value.clone())
+            });
         wire::send(&mut control, &Notice::NativeReady).await?;
         let (audit, mut reported) = mpsc::unbounded_channel();
         let (review, mut reviews) = mpsc::unbounded_channel::<Review>();
@@ -588,7 +604,7 @@ where
                 }
             }
         });
-        let result = native::bridge(
+        let session = native::bridge(
             control,
             proofs,
             NativeOptions {
@@ -607,8 +623,14 @@ where
                 ready: None,
                 limits: config.native,
             },
-        )
-        .await;
+        );
+        let result = match renew_in {
+            Some(remaining) => time::timeout(remaining, session)
+                .await
+                .context("Antigravity link ended for provider credential renewal")
+                .and_then(|result| result),
+            None => session.await,
+        };
         // A review still waiting has nothing left to decide.
         reviewing.abort();
         forward.await?;
@@ -727,6 +749,65 @@ mod tests {
             reported.recv().await,
             Some(Event::Refused { link: 1, .. })
         ));
+    }
+
+    /// A real native worker is cancelled before its fixed Google bearer expires.
+    #[tokio::test]
+    #[ignore = "requires the native worker bundle"]
+    async fn antigravity_link_ends_before_bearer_expiry() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        use tokio::{io::AsyncReadExt, time};
+
+        let expires_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 62;
+        let mut credential = Credential::token(&"X".repeat(44));
+        credential.expires_at = Some(expires_at);
+        let config = RelayConfig {
+            served: vec![Served::builtin(Route::AntigravitySubscription)],
+            credentials: Source::Fixed(credential),
+            roots: Roots::Mozilla,
+            parents: Default::default(),
+            reviewer: Default::default(),
+            native: Default::default(),
+        };
+        let (control, mut verifier) = tokio::io::duplex(1 << 16);
+        let (proofs, _proofs) = tokio::io::duplex(1 << 16);
+        let (events, _reported) = mpsc::unbounded_channel();
+        let serving = tokio::spawn(async move {
+            serve_link(control, proofs, &config, 1, &Counters::default(), &events).await
+        });
+        wire::send(
+            &mut verifier,
+            &Order::NativeStart {
+                route: Route::AntigravitySubscription,
+                provider_host: "daily-cloudcode-pa.googleapis.com".into(),
+                provider_port: 443,
+            },
+        )
+        .await
+        .unwrap();
+        std::assert_matches!(
+            wire::recv::<_, Notice>(&mut verifier).await.unwrap(),
+            Notice::NativeReady
+        );
+        let error = time::timeout(Duration::from_secs(5), serving)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("credential renewal"),
+            "{error:#}"
+        );
+        assert!(SystemTime::now() < UNIX_EPOCH + Duration::from_secs(expires_at));
+        let mut pending = Vec::new();
+        time::timeout(Duration::from_secs(1), verifier.read_to_end(&mut pending))
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     /// A review waiting for the Sponsor ends with the link, and its question

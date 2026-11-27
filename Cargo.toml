@@ -10,6 +10,7 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+flate2 = "=1.1.11"
 concurro-relay-hosted-api = { path = "crates/hosted-api" }
 concurro-relay-protocol = { path = "crates/protocol" }
 concurro-relay = { path = "crates/relay" }

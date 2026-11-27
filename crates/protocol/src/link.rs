@@ -17,7 +17,7 @@ use crate::{
 
 /// Version of these messages and of the proof stack beneath them. A relay
 /// and a verifier work together only at the same version.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// What the verifier tells the relay to do on a link.
 ///

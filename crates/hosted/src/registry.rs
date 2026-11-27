@@ -9,7 +9,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use concurro_relay_hosted_api::dispatch::{CHATGPT_SUBSCRIPTION, CLAUDE_SUBSCRIPTION};
+use concurro_relay_hosted_api::dispatch::{
+    ANTIGRAVITY_SUBSCRIPTION, CHATGPT_SUBSCRIPTION, CLAUDE_SUBSCRIPTION,
+};
 use concurro_relay_hosted_api::owner;
 use concurro_relay_protocol::{
     identity,
@@ -416,6 +418,7 @@ fn vault_route(route: Route) -> &'static str {
     match route {
         Route::ClaudeSubscription => CLAUDE_SUBSCRIPTION,
         Route::ChatgptSubscription => CHATGPT_SUBSCRIPTION,
+        Route::AntigravitySubscription => ANTIGRAVITY_SUBSCRIPTION,
     }
 }
 

@@ -163,6 +163,7 @@ async fn review_request<C: AsyncRead + AsyncWrite + Unpin>(
     runtime: &Runtime,
     session_id: &str,
     provider: Option<HttpProvider>,
+    account: Option<&str>,
     approvals: &mut Approvals,
 ) -> Result<Value> {
     let (number, prompt, metadata) = receive_review(peer, first).await?;
@@ -182,7 +183,21 @@ async fn review_request<C: AsyncRead + AsyncWrite + Unpin>(
     } else {
         None
     };
-    let prompt = String::from_utf8(prompt).context("reviewed request is not text")?;
+    let wire_body = prompt;
+    let decoded = match &template {
+        Some(template) => template.decoded_body(&wire_body)?,
+        None => wire_body.clone(),
+    };
+    let prompt = String::from_utf8(decoded).context("reviewed request is not text")?;
+    if provider == Some(HttpProvider::Antigravity)
+        && let Some(project) = account
+    {
+        let body: Value = serde_json::from_str(&prompt)?;
+        ensure!(
+            body["project"].as_str() == Some(project),
+            "Google subscription project differs from Sponsor account"
+        );
+    }
     let request = NativeRequest {
         request: number,
         sha256: hex::encode(helpers::sha256(prompt.as_bytes())),
@@ -226,7 +241,7 @@ async fn review_request<C: AsyncRead + AsyncWrite + Unpin>(
     if verdict.accept {
         approvals.approved = Some(Approved {
             request: number,
-            body: request.prompt.into_bytes(),
+            body: wire_body,
             template,
         });
         peer.send(
@@ -266,6 +281,7 @@ pub async fn sponsor_first<C: AsyncRead + AsyncWrite + Unpin>(
     runtime: &Runtime,
     session_id: &str,
     provider: HttpProvider,
+    account: Option<&str>,
 ) -> Result<Option<FirstApproval>> {
     let message = peer.receive("request_review").await?;
     let mut approvals = Approvals::default();
@@ -276,6 +292,7 @@ pub async fn sponsor_first<C: AsyncRead + AsyncWrite + Unpin>(
         runtime,
         session_id,
         Some(provider),
+        account,
         &mut approvals,
     )
     .await?;
@@ -347,6 +364,7 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
                         &runtime,
                         session_id,
                         session_provider,
+                        result.account.as_deref(),
                         &mut approvals,
                     )
                     .await?,
@@ -402,7 +420,11 @@ pub async fn sponsor<C: AsyncRead + AsyncWrite + Unpin>(
                         }
                         AuditFrame::Prompt(stream, body) => {
                             let number = approvals.complete(&body, audit.template_for(stream))?;
-                            completed = Some((number, helpers::sha256(&body)));
+                            let decoded = audit
+                                .template_for(stream)
+                                .context("audited HTTP template missing")?
+                                .decoded_body(&body)?;
+                            completed = Some((number, helpers::sha256(&decoded)));
                             true
                         }
                     }
@@ -961,7 +983,7 @@ mod tests {
     /// The first HTTP/2 request is reviewed, recorded and answered before
     /// any bootstrap, as the provider body Concurro will send.
     #[tokio::test]
-    async fn the_first_claude_request_is_reviewed_before_bootstrap() {
+    async fn compressed_requests_are_reviewed_before_bootstrap() {
         let output = env::temp_dir().join(format!(
             "first-review-{}",
             hex::encode(concurro_relay_protocol::identity::random::<8>())
@@ -974,45 +996,87 @@ mod tests {
             limits: crate::NativeLimits::DEFAULT,
             benchmark_timeout: Duration::from_secs(1),
         };
-        let template = Template::fixture_default();
-        let body = br#"{"messages":[{"role":"user","content":"hi"}]}"#;
-        for accept in [true, false] {
-            let (mut concurro, mut sponsor) = peers();
-            let asking = {
-                let template = template.clone();
-                tokio::spawn(async move {
-                    http_review_first(&mut concurro, body, &template, true).await
-                })
-            };
-            let mut gate = Fixed {
-                accept,
-                asked: Vec::new(),
-            };
-            let first = sponsor_first(
-                &mut sponsor,
-                &mut gate,
-                &runtime,
-                "session",
-                HttpProvider::Claude,
-            )
-            .await
-            .unwrap();
-            let asked = asking.await.unwrap();
-            let request = &gate.asked[0];
-            assert_eq!(request.request, 0);
-            assert_eq!(request.path.as_deref(), Some("/v1/messages"));
-            assert!(request.prompt.contains(r#""thread":{"type":"create"}"#));
-            assert_eq!(request.headers.len(), template.headers.len());
-            if accept {
-                asked.unwrap();
-                assert_eq!(first.unwrap().template(), Some(&template));
+        for provider in [HttpProvider::Claude, HttpProvider::Antigravity] {
+            let mut template = Template::fixture_default();
+            template.provider = provider;
+            let body = if provider == HttpProvider::Claude {
+                br#"{"messages":[{"role":"user","content":"hi"}]}"#.as_slice()
             } else {
-                assert!(asked.unwrap_err().is::<Rejected>());
-                assert!(first.is_none());
+                template.path = b"/v1internal:streamGenerateContent?alt=sse".to_vec();
+                br#"{"project":"caller-project","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}"#.as_slice()
+            };
+            super::configure_template(&mut template, true);
+            let configured = template.clone();
+            super::configure_template(&mut template, true);
+            assert_eq!(template, configured, "first and later templates must match");
+            for accept in [true, false] {
+                let (mut concurro, mut sponsor) = peers();
+                let asking = {
+                    let template = template.clone();
+                    tokio::spawn(async move {
+                        http_review_first(
+                            &mut concurro,
+                            body,
+                            &template,
+                            true,
+                            Some("sponsor-project"),
+                        )
+                        .await
+                    })
+                };
+                let mut gate = Fixed {
+                    accept,
+                    asked: Vec::new(),
+                };
+                let first = sponsor_first(
+                    &mut sponsor,
+                    &mut gate,
+                    &runtime,
+                    "session",
+                    provider,
+                    Some("sponsor-project"),
+                )
+                .await
+                .unwrap();
+                let asked = asking.await.unwrap();
+                let request = &gate.asked[0];
+                assert_eq!(request.request, 0);
+                assert_eq!(request.path.as_deref().unwrap().as_bytes(), template.path);
+                if provider == HttpProvider::Claude {
+                    assert!(request.prompt.contains(r#""thread":{"type":"create"}"#));
+                } else {
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&request.prompt).unwrap()["project"],
+                        "sponsor-project"
+                    );
+                }
+                assert_eq!(request.headers.len(), template.headers.len());
+                if accept {
+                    asked.unwrap();
+                    let approved = first.unwrap();
+                    assert_eq!(approved.template(), Some(&template));
+                    assert_eq!(
+                        template
+                            .decoded_body(&approved.approvals.approved.as_ref().unwrap().body)
+                            .unwrap(),
+                        request.prompt.as_bytes()
+                    );
+                    let wire_body = approved.approvals.approved.as_ref().unwrap().body.clone();
+                    let mut approvals = approved.approvals;
+                    assert!(
+                        approvals
+                            .complete(request.prompt.as_bytes(), Some(&template))
+                            .is_err()
+                    );
+                    assert_eq!(approvals.complete(&wire_body, Some(&template)).unwrap(), 0);
+                } else {
+                    assert!(asked.unwrap_err().is::<Rejected>());
+                    assert!(first.is_none());
+                }
             }
         }
         let recorded = std::fs::read_to_string(output.join("sponsor-requests.jsonl")).unwrap();
-        assert_eq!(recorded.lines().count(), 2);
+        assert_eq!(recorded.lines().count(), 4);
         std::fs::remove_dir_all(output).unwrap();
     }
 
@@ -1036,8 +1100,10 @@ mod tests {
                 .await
                 .unwrap();
             let first = receiver.receive("request_review").await.unwrap();
-            let mut approvals = Approvals::default();
-            approvals.reviewed = request;
+            let mut approvals = Approvals {
+                reviewed: request,
+                ..Approvals::default()
+            };
             let mut gate = Fixed {
                 accept: true,
                 asked: Vec::new(),
@@ -1056,6 +1122,7 @@ mod tests {
                 &runtime,
                 "session",
                 Some(HttpProvider::Claude),
+                None,
                 &mut approvals,
             )
             .await

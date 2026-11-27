@@ -135,7 +135,9 @@ struct TokenEntry {
 }
 
 /// Codex signing in to ChatGPT for the relay.
-struct CodexLogin {
+struct ProviderLogin {
+    /// Provider whose own tooling is signing in.
+    route: Route,
     /// What Codex has printed.
     said: Vec<String>,
     signing_in: JoinHandle<()>,
@@ -511,7 +513,7 @@ impl Dashboard {
 enum Screen {
     Setup,
     Token(TokenEntry),
-    Codex(CodexLogin),
+    ProviderLogin(ProviderLogin),
     Approval(Approval),
     Dashboard(Dashboard),
 }
@@ -528,9 +530,9 @@ enum Message {
     Key(KeyEvent),
     Tick,
     /// Codex printed a line while signing in.
-    CodexSaid(String),
+    LoginSaid(String),
     /// Codex's sign-in ended, and its login was kept if it succeeded.
-    CodexDone(Result<()>),
+    LoginDone(Result<()>),
     /// Concurro answered a registration with a code, or did not.
     Begun(Result<Pending>),
     /// The person approved the registration, or it failed.
@@ -613,20 +615,20 @@ impl App {
                     self.fail(format!("{error:#}"));
                 }
             }
-            Message::CodexSaid(line) => {
-                if let Screen::Codex(codex) = &mut self.state.screen
+            Message::LoginSaid(line) => {
+                if let Screen::ProviderLogin(codex) = &mut self.state.screen
                     && !line.trim().is_empty()
                 {
                     codex.said.push(line);
                 }
             }
-            Message::CodexDone(Ok(())) => {
+            Message::LoginDone(Ok(())) => {
                 self.state.screen = Screen::Setup;
                 self.advance();
             }
             Message::Begun(Err(error))
             | Message::Approved(Err(error))
-            | Message::CodexDone(Err(error)) => {
+            | Message::LoginDone(Err(error)) => {
                 self.fail(format!("{error:#}"));
             }
             Message::Relay(event) => {
@@ -688,7 +690,7 @@ impl App {
                 }
                 _ => {}
             },
-            Screen::Codex(codex) => {
+            Screen::ProviderLogin(codex) => {
                 if key.code == KeyCode::Esc {
                     // Ends Codex and removes its directory.
                     codex.signing_in.abort();
@@ -715,7 +717,7 @@ impl App {
                     let shown = messages.clone();
                     tokio::spawn(async move {
                         while let Some(line) = printed.recv().await {
-                            if shown.send(Message::CodexSaid(line)).is_err() {
+                            if shown.send(Message::LoginSaid(line)).is_err() {
                                 return;
                             }
                         }
@@ -724,10 +726,25 @@ impl App {
                         let credential = DeviceLogin::start(Some(said))?.finished().await?;
                         store.save_credential(Route::ChatgptSubscription, &credential)
                     };
-                    let _ = messages.send(Message::CodexDone(signed_in.await));
+                    let _ = messages.send(Message::LoginDone(signed_in.await));
                 });
-                self.state.screen = Screen::Codex(CodexLogin {
+                self.state.screen = Screen::ProviderLogin(ProviderLogin {
+                    route: Route::ChatgptSubscription,
                     said: Vec::new(),
+                    signing_in,
+                });
+            }
+            Some(Route::AntigravitySubscription) => {
+                let (store, messages) = (self.store.clone(), self.messages.clone());
+                let signing_in = tokio::spawn(async move {
+                    let result = crate::antigravity::connect(&store).await.map(|_| ());
+                    let _ = messages.send(Message::LoginDone(result));
+                });
+                self.state.screen = Screen::ProviderLogin(ProviderLogin {
+                    route: Route::AntigravitySubscription,
+                    said: vec![
+                        "Using the active agy login. Sign in with agy first if needed.".into(),
+                    ],
                     signing_in,
                 });
             }
@@ -889,7 +906,7 @@ fn token_lines(entry: &TokenEntry) -> (Vec<Line<'static>>, &'static str) {
 /// How many of the lines Codex printed are shown.
 const CODEX_LINES_SHOWN: usize = 14;
 
-fn codex_lines(codex: &CodexLogin, ticks: usize) -> (Vec<Line<'static>>, &'static str) {
+fn login_lines(codex: &ProviderLogin, ticks: usize) -> (Vec<Line<'static>>, &'static str) {
     let mut lines = vec![
         Line::from("ChatGPT sign-in".bold()),
         Line::default(),
@@ -897,6 +914,14 @@ fn codex_lines(codex: &CodexLogin, ticks: usize) -> (Vec<Line<'static>>, &'stati
         Line::from("  Your own Codex login is not touched.".dim()),
         Line::default(),
     ];
+    if codex.route == Route::AntigravitySubscription {
+        lines = vec![
+            Line::from("Antigravity sign-in".bold()),
+            Line::default(),
+            Line::from("  agy is checking its active login and subscription project.".dim()),
+            Line::default(),
+        ];
+    }
     let skipped = codex.said.len().saturating_sub(CODEX_LINES_SHOWN);
     lines.extend(
         codex
@@ -908,7 +933,12 @@ fn codex_lines(codex: &CodexLogin, ticks: usize) -> (Vec<Line<'static>>, &'stati
     lines.push(Line::default());
     lines.push(Line::from(vec![
         format!("  {} ", spinner(ticks)).cyan(),
-        "Waiting for you to finish in the browser…".into(),
+        if codex.route == Route::AntigravitySubscription {
+            "Checking the agy subscription…"
+        } else {
+            "Waiting for you to finish in the browser…"
+        }
+        .into(),
     ]));
     (lines, "esc cancel")
 }
@@ -1237,7 +1267,7 @@ fn draw(frame: &mut Frame, state: &State) {
             let (lines, hints) = match screen {
                 Screen::Setup => setup_lines(&state.setup, state.ticks),
                 Screen::Token(entry) => token_lines(entry),
-                Screen::Codex(codex) => codex_lines(codex, state.ticks),
+                Screen::ProviderLogin(codex) => login_lines(codex, state.ticks),
                 Screen::Approval(approval) => approval_lines(approval, state.ticks),
                 Screen::Dashboard(_) => unreachable!("the dashboard is drawn above"),
             };
@@ -1353,6 +1383,8 @@ mod tests {
 
     fn credentials() -> Source {
         Source::Fixed(Credential {
+            expires_at: None,
+            antigravity: None,
             token: "token".into(),
             headers: Vec::new(),
         })
@@ -1437,12 +1469,13 @@ mod tests {
             "Open this link in your browser".to_owned(),
             "   https://auth.example/device".to_owned(),
         ];
-        let codex = CodexLogin {
+        let codex = ProviderLogin {
+            route: Route::ChatgptSubscription,
             said,
             signing_in: tokio::spawn(async {}),
         };
         let screen = shown(&State {
-            screen: Screen::Codex(codex),
+            screen: Screen::ProviderLogin(codex),
             setup: setup(),
             ticks: 0,
         });

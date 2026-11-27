@@ -1,6 +1,6 @@
 # concurro-relay
 
-Securely sponsor [Concurro](https://github.com/concurro/concurro) tasks with your Claude or ChatGPT subscription using self-custodied provider credentials.
+Securely sponsor [Concurro](https://github.com/concurro/concurro) tasks with your Claude, ChatGPT or Antigravity subscription using self-custodied provider credentials.
 
 ## Highlights
 
@@ -17,6 +17,7 @@ The project includes the Sponsor CLI, a hosted verifier, and local development t
 | ---- | ---- | ---- |
 | Claude | Claude Code | HTTP/2 |
 | ChatGPT | Codex | WebSockets |
+| Antigravity | agy | HTTP/2 |
 
 The relay keeps provider connections open between turns. Each new connection needs a cryptographic setup step, called a bootstrap. Use `--links` to choose how many sessions can run at once.
 
@@ -59,8 +60,9 @@ The relay opens outbound connections to Concurro and the provider; you don't nee
 | ---- | ---- |
 | Claude | Run `claude setup-token` and paste the token into the relay's sign-in prompt |
 | ChatGPT | The relay starts `codex login --device-auth` with its own temporary Codex home |
+| Antigravity | Sign in with `agy`; Sponsor binds that account and its subscription project |
 
-The relay keeps its own credentials without changing your existing CLI logins. On macOS, it stores provider credentials in Keychain; on Linux, in files only your user can read. If you set `CLAUDE_CODE_OAUTH_TOKEN`, the relay uses that token instead of the saved Claude credential.
+The relay keeps its own Claude and ChatGPT credentials without changing your existing CLI logins. Antigravity uses agy’s existing login, runs `agy models` to refresh it before a new link when needed, and rereads the bearer. An account switch requires reconnecting the Antigravity route. On macOS, it stores provider credentials in Keychain; on Linux, in files only your user can read. If you set `CLAUDE_CODE_OAUTH_TOKEN`, the relay uses that token instead of the saved Claude credential.
 
 Your Concurro registration and provider sign-ins are separate. If a provider login expires, use its `connect` command below to sign in again. Your Concurro registration stays in place. The relay doesn't refresh ChatGPT access tokens automatically.
 
@@ -73,6 +75,7 @@ Your Concurro registration and provider sign-ins are separate. If a provider log
 | `concurro-relay run --links N` | Run up to N sessions at once, printing activity to the terminal |
 | `concurro-relay connect claude_subscription` | Sign in to Claude again |
 | `concurro-relay connect chatgpt_subscription` | Sign in to ChatGPT again |
+| `concurro-relay connect antigravity_subscription` | Bind the current agy login and subscription project |
 | `concurro-relay status` | Show registration and whether each provider is signed in |
 | `concurro-relay logout` | Unregister the relay and delete its saved credentials and identity key |
 
@@ -136,7 +139,7 @@ GitHub runner → Concurro gateway and verifier → Sponsor relay → Provider
 
 Concurro and the Sponsor set up TLS 1.3 with the provider together. The Sponsor sends its credential in a protected part of the connection, then hands off keys so Concurro can send requests and authenticate responses without learning the credential. A QuickSilver proof lets the Sponsor check that each encrypted request matches the text it shows for auditing. The provider uses ordinary TLS, with no protocol changes.
 
-Claude uses HTTP/2 with compact Message Threads continuations by default. Codex uses WebSockets with `previous_response_id` continuations.
+Claude uses HTTP/2 with compact Message Threads continuations by default. Antigravity shares the `TlsKeyUpdate` HTTP/2 transport and sends full conversation history. Both compress request bodies with gzip; review decodes JSON while request proofs bind the exact transmitted bytes. Codex uses WebSockets with `previous_response_id` continuations.
 
 Concurro can see prompts, responses, and some account metadata, but not the provider token. The provider sees the Sponsor's IP address. Bootstrap costs CPU time and bandwidth; keeping connections open and sending only new conversation content helps keep later turns fast.
 
@@ -144,7 +147,7 @@ The relay saves its identity key in a file only your user can read, under `concu
 
 ## Hosted verifier
 
-Sponsor 0.1.2 and later and the verifier use relay protocol 5. Protocol 4 Sponsors must
+This integration uses relay protocol 6. Sponsors using protocol 5 (including 0.1.2) or earlier must
 upgrade before they can connect. The Sponsor's TLS listener is separate from the
 internal HTTP listener for Accounts, Gateway and Exchange.
 
@@ -210,7 +213,7 @@ The script creates `upstream/`, which is excluded from Git, and won't overwrite 
 | `crates/verifier` | Shared verifier and TLSNotary integration |
 | `crates/protocol` | Relay identity, messages, and provider routes |
 | `crates/tls13` | TLS handshake authentication and record processing |
-| `crates/provider-protocol` | Claude and Codex message formats and response handling |
+| `crates/provider-protocol` | Claude, Codex and Antigravity message formats and response handling |
 | `crates/native` | Native helper control, bootstrap, request proofs, and provider sessions |
 | `crates/native-transport` | Native worker transport |
 | `crates/dev` | Development verifier, gateway, and mock provider tools |

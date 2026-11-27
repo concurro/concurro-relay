@@ -6,11 +6,14 @@ use anyhow::{Context, Result, bail};
 use concurro_relay_hosted_api::{
     claim::SessionClaim,
     dispatch::{
-        CHATGPT_SUBSCRIPTION, CLAIM_HEADER, CLAUDE_SUBSCRIPTION, ModelRequest, REQUEST_HEADER,
+        ANTIGRAVITY_SUBSCRIPTION, CHATGPT_SUBSCRIPTION, CLAIM_HEADER, CLAUDE_SUBSCRIPTION,
+        ModelRequest, REQUEST_HEADER,
     },
 };
 use concurro_relay_protocol::ws::FINAL_EVENTS;
-use concurro_relay_provider_protocol::{claude::SseSummarizer, codex};
+use concurro_relay_provider_protocol::{
+    HttpProvider, antigravity, codex, sse::Summary as SseSummarizer,
+};
 use futures::{SinkExt, StreamExt};
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -42,6 +45,8 @@ const MAX_BODY: usize = 48 * 1024 * 1024;
 pub enum Provider {
     Claude,
     Codex,
+    /// Google subscription GenerateContent.
+    Antigravity,
 }
 
 impl Provider {
@@ -50,6 +55,7 @@ impl Provider {
         match self {
             Self::Claude => CLAUDE_SUBSCRIPTION,
             Self::Codex => CHATGPT_SUBSCRIPTION,
+            Self::Antigravity => ANTIGRAVITY_SUBSCRIPTION,
         }
     }
 }
@@ -107,13 +113,20 @@ pub async fn handle(app: Arc<App>, provider: Provider, request: Request<Incoming
             )
         })?
         .to_owned();
-    let body = http::bytes(body, MAX_BODY).await?;
+    let mut body = http::bytes(body, MAX_BODY).await?;
     let model: ModelRequest = serde_json::from_slice(&body).map_err(|_| invalid_body())?;
     if !claim.models.contains(&model.model) {
         return Err(lease::claim_refused());
     }
+    if matches!(provider, Provider::Antigravity) {
+        let mut envelope: Value = serde_json::from_slice(&body).map_err(|_| invalid_body())?;
+        let wire_model = antigravity::subscription_model(&model.model, &envelope["request"])
+            .map_err(|_| invalid_body())?;
+        envelope["model"] = Value::String(wire_model);
+        body = Bytes::from(serde_json::to_vec(&envelope).map_err(|_| invalid_body())?);
+    }
     let codex = match provider {
-        Provider::Claude => None,
+        Provider::Claude | Provider::Antigravity => None,
         Provider::Codex => Some(CodexRequest::parse(&body)?),
     };
 
@@ -134,18 +147,35 @@ pub async fn handle(app: Arc<App>, provider: Provider, request: Request<Incoming
     };
     match codex {
         Some(request) => dispatch_codex(endpoint, request, call).await,
-        None => dispatch_claude(endpoint, parts.headers, body, call).await,
+        None => {
+            dispatch_http(
+                endpoint,
+                parts.headers,
+                body,
+                call,
+                match provider {
+                    Provider::Antigravity => HttpProvider::Antigravity,
+                    _ => HttpProvider::Claude,
+                },
+            )
+            .await
+        }
     }
 }
 
 /// Forward the original Messages JSON and stream the native response with an SSE usage tap.
-async fn dispatch_claude(
+async fn dispatch_http(
     endpoint: SocketAddr,
     headers: HeaderMap,
     body: Bytes,
     call: Call,
+    provider: HttpProvider,
 ) -> Outcome {
-    let mut request = Request::post("/v1/messages")
+    let path = match provider {
+        HttpProvider::Claude => "/v1/messages",
+        HttpProvider::Antigravity => "/v1internal:streamGenerateContent?alt=sse",
+    };
+    let mut request = Request::post(path)
         .body(Full::new(body))
         .map_err(|error| Failure::unavailable(error.into()))?;
     for (name, value) in &headers {
@@ -161,6 +191,12 @@ async fn dispatch_claude(
     request
         .headers_mut()
         .insert(header::AUTHORIZATION, LOCAL_BEARER);
+    if provider == HttpProvider::Antigravity {
+        request.headers_mut().insert(
+            header::USER_AGENT,
+            HeaderValue::from_static(antigravity::USER_AGENT),
+        );
+    }
     let stream = TcpStream::connect(endpoint)
         .await
         .map_err(|error| Failure::unavailable(error.into()))?;
@@ -181,7 +217,7 @@ async fn dispatch_claude(
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.contains("text/event-stream")))
-    .then(SseSummarizer::default);
+    .then(|| SseSummarizer::new(provider));
     if tap.is_some() {
         parts.headers.remove(header::CONTENT_LENGTH);
     }
@@ -213,10 +249,10 @@ async fn dispatch_claude(
                     return Ok(());
                 }
             }
-            let terminal = tap.as_mut().filter(|_| parse_ok).and_then(|tap| {
-                tap.finish().ok()?;
-                tap.completed()
-            });
+            let terminal = tap
+                .as_mut()
+                .filter(|_| parse_ok)
+                .and_then(|tap| tap.finish().ok());
             if let Some(summary) = terminal {
                 call.charge(Some(&summary.usage), true)?;
                 tap = None;

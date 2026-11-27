@@ -4,6 +4,7 @@ pub mod antigravity;
 pub mod claude;
 pub mod codex;
 mod provider;
+pub mod sse;
 pub mod tls_key_update;
 pub use provider::HttpProvider;
 

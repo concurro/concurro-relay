@@ -1,6 +1,7 @@
 """Synthetic Claude H2 provider for a sustained, tool-driven directory summary."""
 
 import argparse
+import gzip
 import hashlib
 import json
 import runpy
@@ -106,7 +107,7 @@ def serve(listener, certs, source, steps, stop_file, result, expire_once_at):
                 elif isinstance(event, StreamEnded):
                     received = pending.pop(event.stream_id)
                     body = bytes(received["body"])
-                    request = json.loads(body)
+                    request = json.loads(gzip.decompress(body) if received["headers"].get(b"content-encoding") == b"gzip" else body)
                     thread = request.get("thread") or {}
                     mode = thread.get("type", "full")
                     if mode != "full":

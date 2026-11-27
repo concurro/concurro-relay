@@ -2,6 +2,7 @@
 //! login there, and performs the inference requests Concurro orders,
 //! proving each one without revealing the credential.
 
+pub mod antigravity;
 pub mod codex;
 pub mod credentials;
 pub mod events;

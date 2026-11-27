@@ -998,7 +998,7 @@ mod tests {
         fs::write(
             &helper,
             format!(
-                "#!/bin/sh\necho $$ > '{}'\nexec sleep 60\n",
+                "#!/bin/sh\necho $$ > '{0}.tmp'\nmv '{0}.tmp' '{0}'\nexec sleep 60\n",
                 pid_file.display()
             ),
         )

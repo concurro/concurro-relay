@@ -30,9 +30,18 @@ use crate::{
 /// Whether the relay can serve `route` with the credential it has: how
 /// ready it is, or why it is not.
 pub fn readiness(credentials: &Source, route: Route) -> Result<String, String> {
-    let credential = credentials
-        .load(route)
-        .map_err(|error| format!("{error:#}"))?;
+    let credential = match (credentials, route) {
+        (Source::Kept(store), Route::AntigravitySubscription) => crate::antigravity::load(store),
+        _ => credentials.load(route),
+    }
+    .map_err(|error| format!("{error:#}"))?;
+    if route == Route::AntigravitySubscription
+        && credential
+            .expiry()
+            .is_some_and(|expiry| expiry <= SystemTime::now())
+    {
+        return Ok("ready; agy will refresh before the next link".into());
+    }
     let left = credential
         .expiry()
         .and_then(|expiry| expiry.duration_since(SystemTime::now()).ok());
@@ -121,6 +130,12 @@ fn read_secret(prompt: &str) -> Result<String> {
 /// in `store` as the relay's own.
 pub async fn connect(store: &Store, route: Route) -> Result<()> {
     match route {
+        Route::AntigravitySubscription => {
+            println!(
+                "Using the account signed in through agy. Run agy first if you need to sign in or switch accounts."
+            );
+            crate::antigravity::connect(store).await?;
+        }
         Route::ClaudeSubscription => {
             println!(
                 "The relay keeps a Claude token of its own. Run `claude setup-token` in another terminal"

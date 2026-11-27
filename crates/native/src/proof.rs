@@ -291,9 +291,9 @@ mod tests {
     async fn sponsor_cancellation_scopes_tasks() {
         for ready in [false, true] {
             let script = if ready {
-                "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/pid\"\necho 'REQUEST_READY 9' >&2\nexec sleep 60\n"
+                "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/pid.tmp\"\nmv \"$(dirname \"$0\")/pid.tmp\" \"$(dirname \"$0\")/pid\"\necho 'REQUEST_READY 9' >&2\nexec sleep 60\n"
             } else {
-                "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/pid\"\nexec sleep 60\n"
+                "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/pid.tmp\"\nmv \"$(dirname \"$0\")/pid.tmp\" \"$(dirname \"$0\")/pid\"\nexec sleep 60\n"
             };
             let (root, runtime) = fake_runtime(script);
             let (control_local, mut control_remote) = duplex(4096);

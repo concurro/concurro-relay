@@ -1,7 +1,7 @@
 //! Provider-specific request preparation and continuation state.
 
 use anyhow::{Context, Result, ensure};
-use concurro_relay_provider_protocol::{HttpProvider, tls_key_update::Template};
+use concurro_relay_provider_protocol::{HttpProvider, header_key, tls_key_update::Template};
 use serde_json::Value;
 
 mod claude;
@@ -27,20 +27,30 @@ pub struct Prepared {
 pub struct ProviderState {
     provider: HttpProvider,
     threads: Option<ThreadState>,
+    project: Option<String>,
 }
 
-/// Apply only the headers required by the selected provider's continuation mode.
+/// Apply gzip transport encoding and provider continuation headers.
 pub fn configure_template(template: &mut Template, compact: bool) {
     if template.provider == HttpProvider::Claude && compact {
         claude::beta_template(template);
     }
+    template
+        .headers
+        .retain(|(name, _)| header_key(name) != b"content-encoding");
+    template
+        .headers
+        .push((b"content-encoding".to_vec(), b"gzip".to_vec()));
 }
 
 impl ProviderState {
     /// Start independent provider state for one native session.
-    pub fn new(provider: HttpProvider, compact: bool) -> Self {
+    pub fn new(provider: HttpProvider, compact: bool, account: Option<&str>) -> Self {
         Self {
             provider,
+            project: (provider == HttpProvider::Antigravity)
+                .then(|| account.map(str::to_owned))
+                .flatten(),
             threads: (provider == HttpProvider::Claude && compact).then(ThreadState::default),
         }
     }
@@ -51,6 +61,22 @@ impl ProviderState {
             template.provider == self.provider,
             "HTTP provider changed within a session"
         );
+        if let Some(project) = &self.project {
+            let mut original: Value =
+                serde_json::from_slice(body).context("HTTP request is not JSON")?;
+            original
+                .as_object_mut()
+                .context("Google request must be an object")?
+                .insert("project".into(), Value::String(project.clone()));
+            return Ok(Prepared {
+                body: serde_json::to_vec(&original)?,
+                original,
+                mode: "full",
+                parent: None,
+                decision: "local_history",
+                mismatch: None,
+            });
+        }
         match &self.threads {
             Some(threads) => threads.prepare(body, template),
             None => Ok(Prepared {
@@ -106,8 +132,11 @@ mod tests {
             headers: Vec::new(),
         };
         configure_template(&mut template, true);
-        assert!(template.headers.is_empty());
-        let mut state = ProviderState::new(HttpProvider::Antigravity, true);
+        assert_eq!(
+            template.headers,
+            vec![(b"content-encoding".to_vec(), b"gzip".to_vec())]
+        );
+        let mut state = ProviderState::new(HttpProvider::Antigravity, true, None);
         let body = br#"{ "request": {"contents": [{"role":"user","parts":[{"text":"hello"}]}]} }"#;
         let mut prepared = state.prepare(body, &template).unwrap();
         assert_eq!(prepared.body, body);
@@ -124,5 +153,26 @@ mod tests {
         state.complete(&prepared, &template, "response-1".into(), b"");
         assert!(!state.ready());
         assert!(state.prepare(body, &Template::fixture_default()).is_err());
+    }
+    /// The Sponsor's project replaces caller routing while preserving signed conversation parts.
+    #[test]
+    fn google_project_is_sponsor_owned() {
+        let template = Template {
+            provider: HttpProvider::Antigravity,
+            path: b"/v1internal:streamGenerateContent?alt=sse".to_vec(),
+            headers: Vec::new(),
+        };
+        let state = ProviderState::new(HttpProvider::Antigravity, true, Some("sponsor-project"));
+        let input = json!({"project":"caller-project","model":"gemini-4-neon-low","request":{
+        "sessionId":"retained-session","contents":[{"role":"model","parts":[{
+            "thoughtSignature":"opaque-signature","functionCall":{"name":"read_file","args":{"Path":"README.md"}}
+        }]}]}});
+        let prepared = state
+            .prepare(&serde_json::to_vec(&input).unwrap(), &template)
+            .unwrap();
+        let output: serde_json::Value = serde_json::from_slice(&prepared.body).unwrap();
+        assert_eq!(output["project"], "sponsor-project");
+        assert_eq!(output["request"], input["request"]);
+        assert_eq!(output["model"], input["model"]);
     }
 }

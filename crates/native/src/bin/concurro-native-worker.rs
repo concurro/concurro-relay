@@ -111,6 +111,7 @@ async fn main() -> Result<()> {
                 &runtime,
                 &session_id,
                 config.provider,
+                account.as_deref(),
             )
             .await?
             {
@@ -184,7 +185,7 @@ async fn main() -> Result<()> {
             .await?;
             let mut peer = Peer::new(control);
             let reviewed = tokio::select! {
-                reviewed = session::http_review_first(&mut peer, &first.body, &first.template, compact) => reviewed,
+                reviewed = session::http_review_first(&mut peer, &first.body, &first.template, compact, account.as_deref()) => reviewed,
                 () = first.watch_disconnect() => {
                     println!("NATIVE_CANCEL cli_disconnect");
                     bail!("NATIVE_CANCEL cli_disconnect");

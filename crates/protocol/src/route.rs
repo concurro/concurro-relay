@@ -9,16 +9,23 @@ use serde::{Deserialize, Serialize};
 pub enum Route {
     ClaudeSubscription,
     ChatgptSubscription,
+    /// Google Antigravity personal subscription.
+    AntigravitySubscription,
 }
 
 impl Route {
-    pub const ALL: [Self; 2] = [Self::ClaudeSubscription, Self::ChatgptSubscription];
+    pub const ALL: [Self; 3] = [
+        Self::ClaudeSubscription,
+        Self::ChatgptSubscription,
+        Self::AntigravitySubscription,
+    ];
 
     /// The route's name in Concurro's records.
     pub fn id(self) -> &'static str {
         match self {
             Self::ClaudeSubscription => "claude_subscription",
             Self::ChatgptSubscription => "chatgpt_subscription",
+            Self::AntigravitySubscription => "antigravity_subscription",
         }
     }
 
@@ -27,6 +34,7 @@ impl Route {
         match self {
             Self::ClaudeSubscription => "Claude subscription",
             Self::ChatgptSubscription => "ChatGPT subscription",
+            Self::AntigravitySubscription => "Antigravity subscription",
         }
     }
 
@@ -34,6 +42,7 @@ impl Route {
         match self {
             Self::ClaudeSubscription => "api.anthropic.com",
             Self::ChatgptSubscription => "chatgpt.com",
+            Self::AntigravitySubscription => "daily-cloudcode-pa.googleapis.com",
         }
     }
 }

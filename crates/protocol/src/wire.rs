@@ -27,7 +27,7 @@ pub const CONTENT_ENCODING: &str = "content-encoding";
 pub const ZSTD: &str = "zstd";
 
 /// Largest body a compressed job may expand to.
-const MAX_DECODED_BODY: usize = 64 << 20;
+pub const MAX_DECODED_BODY: usize = 64 << 20;
 
 impl Job {
     /// The body with any compression removed.

@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail};
 use concurro_relay_hosted_api::{
     claim::SessionClaim,
     dispatch::{
-        ALLOWANCE_SPENT_CODE, CHATGPT_SUBSCRIPTION, CLAIM_REFUSED_CODE, CLAUDE_SUBSCRIPTION,
-        REQUEST_REUSED_CODE,
+        ALLOWANCE_SPENT_CODE, ANTIGRAVITY_SUBSCRIPTION, CHATGPT_SUBSCRIPTION, CLAIM_REFUSED_CODE,
+        CLAUDE_SUBSCRIPTION, REQUEST_REUSED_CODE,
     },
     owner::Task,
 };
@@ -47,6 +47,11 @@ async fn run_lease(
             Route::ChatgptSubscription,
             &args.codex_provider_host,
             args.codex_provider_port,
+        ),
+        ANTIGRAVITY_SUBSCRIPTION => (
+            Route::AntigravitySubscription,
+            &args.antigravity_provider_host,
+            args.antigravity_provider_port,
         ),
         _ => bail!("unsupported hosted route"),
     };

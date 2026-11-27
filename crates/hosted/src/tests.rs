@@ -5,8 +5,9 @@ use std::{path::Path, time::Duration};
 use concurro_relay_hosted_api::{
     claim::{self, SessionClaim},
     dispatch::{
-        ALLOWANCE_SPENT_CODE, CHATGPT_SUBSCRIPTION, CLAIM_HEADER, CLAIM_REFUSED_CODE,
-        CLAUDE_SUBSCRIPTION, MESSAGES_PATH, REQUEST_HEADER, REQUEST_REUSED_CODE, RESPONSES_PATH,
+        ALLOWANCE_SPENT_CODE, ANTIGRAVITY_PATH, CHATGPT_SUBSCRIPTION, CLAIM_HEADER,
+        CLAIM_REFUSED_CODE, CLAUDE_SUBSCRIPTION, MESSAGES_PATH, REQUEST_HEADER,
+        REQUEST_REUSED_CODE, RESPONSES_PATH,
     },
     owner::{self, APPROVALS_PATH, REGISTRATIONS_PREFIX, RELAYS_PATH},
     release::{CLAIMS_PREFIX, ReleaseClaim},
@@ -121,6 +122,7 @@ impl Fixture {
         let route = match route {
             Route::ClaudeSubscription => CLAUDE_SUBSCRIPTION,
             Route::ChatgptSubscription => CHATGPT_SUBSCRIPTION,
+            Route::AntigravitySubscription => "antigravity-subscription",
         };
         let approval = approval(&code, route);
         let relay_id = self.app.registry.approve(approval).unwrap();
@@ -136,7 +138,14 @@ impl Fixture {
             record_id: "2".repeat(64),
             version: 1,
             route: route.into(),
-            models: vec![MODEL.into()],
+            models: vec![
+                if route == "antigravity-subscription" {
+                    "gemini-4-neon"
+                } else {
+                    MODEL
+                }
+                .into(),
+            ],
             calls: 3,
             tokens: 10,
             repository: "fixture/example".into(),
@@ -148,11 +157,13 @@ impl Fixture {
     async fn dispatch(&self, claim: &SessionClaim, request: &str) -> Response<Incoming> {
         let path = if claim.route == CLAUDE_SUBSCRIPTION {
             MESSAGES_PATH
+        } else if claim.route == "antigravity-subscription" {
+            ANTIGRAVITY_PATH
         } else {
             RESPONSES_PATH
         };
         let signed = claim::sign(claim, KID, &self.key).unwrap();
-        self.call(dispatch_request(path, &signed, request, MODEL))
+        self.call(dispatch_request(path, &signed, request, &claim.models[0]))
             .await
     }
 
@@ -262,7 +273,7 @@ fn dispatch_request(
         "POST",
         path,
         INFERENCE,
-        Bytes::from(json!({"model":model,"stream":true}).to_string()),
+        Bytes::from(json!({"model":model,"stream":true,"request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"LOW"}}}}).to_string()),
     );
     request
         .headers_mut()
@@ -568,7 +579,7 @@ async fn claude_usage_serializes_and_survives_restart() {
     let native = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (_published, worker) = fixture.retained(&claim, native.local_addr().unwrap()).await;
     let (finish, delayed) = oneshot::channel();
-    let native_task = claude_ingress(native, delayed);
+    let native_task = http_ingress(native, delayed, Route::ClaudeSubscription);
 
     let first = fixture.dispatch(&claim, "first").await;
     assert_eq!(first.status(), StatusCode::OK);
@@ -642,9 +653,10 @@ async fn claude_usage_serializes_and_survives_restart() {
 }
 
 /// Native ingress fixture that reports input usage before the caller lets it finish.
-fn claude_ingress(
+fn http_ingress(
     native: TcpListener,
     delayed: oneshot::Receiver<()>,
+    route: Route,
 ) -> JoinHandle<Result<(), hyper::Error>> {
     tokio::spawn(async move {
         let (connection, _) = native.accept().await.unwrap();
@@ -653,17 +665,18 @@ fn claude_ingress(
             .serve_connection(TokioIo::new(connection), service_fn(|request: Request<Incoming>| {
                 let delayed = delayed.lock().unwrap().take().unwrap();
                 async move {
-                assert_eq!(request.uri().path(), "/v1/messages");
+                assert_eq!(request.uri().path(), if route == Route::ClaudeSubscription { "/v1/messages" } else { "/v1internal:streamGenerateContent" });
                 assert_eq!(request.headers()["authorization"], "Bearer local-relay-placeholder");
                 assert!(!request.headers().contains_key(CLAIM_HEADER));
                 assert!(!request.headers().contains_key(REQUEST_HEADER));
                 let body = request.into_body().collect().await.unwrap().to_bytes();
-                assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["model"], MODEL);
+                assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["model"], if route == Route::ClaudeSubscription { MODEL } else { "gemini-4-neon-low" });
                 let (send, body) = http::streaming();
                 let mut response = Response::new(body);
                 response.headers_mut().insert("content-type", "text/event-stream".parse().unwrap());
                 let frame = |value: &'static str| Ok(Frame::data(Bytes::from_static(value.as_bytes())));
-                send.send(frame("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"usage\":{\"input_tokens\":6}}}\n\n"))
+                let start = if route == Route::ClaudeSubscription { "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"usage\":{\"input_tokens\":6}}}\n\n" } else { "data: {\"response\":{\"responseId\":\"g1\",\"usageMetadata\":{\"promptTokenCount\":6},\"candidates\":[{\"finishReason\":\"STOP\"}]}}\n\n" };
+                send.send(frame(start))
                     .await.unwrap();
                 tokio::spawn(async move {
                     let finished = tokio::select! {
@@ -671,6 +684,10 @@ fn claude_ingress(
                         () = send.closed() => false,
                     };
                     if !finished {
+                        return;
+                    }
+                    if route == Route::AntigravitySubscription {
+                        send.send(frame("data: {\"response\":{\"usageMetadata\":{\"promptTokenCount\":6,\"candidatesTokenCount\":3,\"thoughtsTokenCount\":4}}}\n\n")).await.unwrap();
                         return;
                     }
                     send.send(frame("data: {\"type\":\"message_delta\",\"us")).await.unwrap();
@@ -693,7 +710,7 @@ async fn claude_cancellation_records_partial_usage() {
     let native = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (_published, worker) = fixture.retained(&claim, native.local_addr().unwrap()).await;
     let (_finish, delayed) = oneshot::channel();
-    let native_task = claude_ingress(native, delayed);
+    let native_task = http_ingress(native, delayed, Route::ClaudeSubscription);
     let mut stream = fixture.dispatch(&claim, "partial").await.into_body();
     let seen = stream.frame().await.unwrap().unwrap().into_data().unwrap();
     assert!(
@@ -910,4 +927,42 @@ async fn journal_reopens_after_a_torn_append() {
         Err(journal::Refusal::Spent)
     );
     assert_eq!(fs::read(file).unwrap(), durable);
+}
+
+/// Signed Google dispatch preserves envelopes and charges final usage after finishReason.
+#[tokio::test]
+async fn antigravity_dispatch_charges_final_subscription_usage() {
+    let fixture = Fixture::new();
+    let claim = fixture.approved_claim(Route::AntigravitySubscription);
+    let native = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (_published, worker) = fixture.retained(&claim, native.local_addr().unwrap()).await;
+    let (finish, delayed) = oneshot::channel();
+    let native_task = http_ingress(native, delayed, Route::AntigravitySubscription);
+    let first = fixture.dispatch(&claim, "google-first").await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let mut stream = first.into_body();
+    let initial = stream.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(String::from_utf8_lossy(&initial).contains("finishReason"));
+    assert_eq!(
+        fs::read_to_string(fixture.dir.join("claims.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "finishReason must not settle usage before the final usage snapshot"
+    );
+    finish.send(()).unwrap();
+    stream.collect().await.unwrap();
+    let log = fs::read_to_string(fixture.dir.join("claims.jsonl")).unwrap();
+    let accounted: Value = serde_json::from_str(log.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(accounted["tokens"], 13);
+    assert_eq!(accounted["complete"], true);
+    refused(
+        fixture.dispatch(&claim, "google-second").await,
+        StatusCode::TOO_MANY_REQUESTS,
+        ALLOWANCE_SPENT_CODE,
+    )
+    .await;
+    worker.abort();
+    native_task.abort();
 }

@@ -46,7 +46,12 @@ const KEYCHAIN_LIMIT: Duration = Duration::from_secs(30);
 /// Runs the keychain tool with `arguments` and `input`, returning what it
 /// printed if it succeeded.
 fn keychain(arguments: &[&str], input: &str) -> Result<Option<String>> {
-    let mut tool = Command::new(KEYCHAIN_TOOL)
+    secret_tool(KEYCHAIN_TOOL, arguments, input)
+}
+
+/// Run a platform credential tool with the same bounded lifetime as relay keychain access.
+fn secret_tool(program: &str, arguments: &[&str], input: &str) -> Result<Option<String>> {
+    let mut tool = Command::new(program)
         .args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -74,6 +79,32 @@ fn keychain(arguments: &[&str], input: &str) -> Result<Option<String>> {
         .context("the keychain tool has no output")?
         .read_to_string(&mut printed)?;
     Ok(status.success().then_some(printed))
+}
+
+/// Read a provider-owned secret; no write or delete is performed on that store.
+pub fn provider_secret(service: &str, account: &str) -> Result<Option<String>> {
+    let result = if cfg!(target_os = "macos") {
+        keychain(
+            &["find-generic-password", "-s", service, "-a", account, "-w"],
+            "",
+        )
+    } else {
+        secret_tool(
+            "secret-tool",
+            &["lookup", "service", service, "username", account],
+            "",
+        )
+    };
+    match result {
+        Err(error)
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|e| e.kind() == io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        other => other,
+    }
 }
 
 /// The directory holding the relay's state.
@@ -290,6 +321,8 @@ mod tests {
             .save_credential(route, &Credential::token("first"))
             .unwrap();
         let credential = Credential {
+            expires_at: None,
+            antigravity: None,
             token: "to.k\"en".into(),
             headers: vec![("account".into(), "a b".into())],
         };

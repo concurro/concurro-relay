@@ -71,6 +71,8 @@ fn login(home: &Path) -> Result<Credential> {
     let account = login["tokens"]["account_id"].as_str();
     Ok(Credential {
         token: token.to_owned(),
+        expires_at: None,
+        antigravity: None,
         headers: account
             .map(|account| (CHATGPT_ACCOUNT_HEADER.to_owned(), account.to_owned()))
             .into_iter()

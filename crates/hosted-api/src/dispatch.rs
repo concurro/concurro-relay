@@ -10,6 +10,11 @@ pub const REQUEST_HEADER: &str = "x-concurro-request";
 pub const MESSAGES_PATH: &str = "/dispatch/v2/messages";
 /// Dispatch a Codex Responses request.
 pub const RESPONSES_PATH: &str = "/dispatch/v2/responses";
+/// Dispatch an Antigravity GenerateContent subscription request.
+pub const ANTIGRAVITY_PATH: &str = "/dispatch/v2/antigravity";
+/// An approved Antigravity subscription route in the hosted registry.
+pub const ANTIGRAVITY_SUBSCRIPTION: &str = "antigravity-subscription";
+
 /// An approved Claude subscription route in the hosted registry.
 pub const CLAUDE_SUBSCRIPTION: &str = "claude-subscription";
 /// An approved ChatGPT subscription route in the hosted registry.

@@ -35,7 +35,7 @@ impl Served {
 /// messages it will send on them.
 fn websocket(route: Route) -> Option<Policy> {
     let (paths, headers, body_fields): (&[&str], &[&str], &[&str]) = match route {
-        Route::ClaudeSubscription => return None,
+        Route::ClaudeSubscription | Route::AntigravitySubscription => return None,
         Route::ChatgptSubscription => (
             &["/backend-api/codex/responses"],
             &[
@@ -114,6 +114,18 @@ fn policy(route: Route) -> Policy {
                 "thinking",
                 "thread",
                 "tools",
+            ],
+        ),
+        Route::AntigravitySubscription => (
+            &["/v1internal:streamGenerateContent?alt=sse"],
+            &["accept", "content-type", "user-agent"],
+            &[
+                "project",
+                "model",
+                "request",
+                "requestId",
+                "userAgent",
+                "requestType",
             ],
         ),
         Route::ChatgptSubscription => (

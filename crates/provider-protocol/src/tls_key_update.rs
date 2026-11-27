@@ -1,5 +1,10 @@
 //! HTTP/2 framing and exact request auditing for TLS KeyUpdate sessions.
 
+use std::io::{Read, Write};
+
+use concurro_relay_protocol::wire::MAX_DECODED_BODY;
+use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
+
 use anyhow::{Context, Result, bail, ensure};
 use httlib_hpack::Decoder;
 
@@ -17,9 +22,11 @@ pub const MAX_HEADER_LIST_SIZE: usize = 65_536;
 /// Header names a public template may not carry: the credential's, the
 /// authority's and the body length's, which the relay sets, and those
 /// HTTP/2 forbids (RFC 9113, section 8.2.2).
-const RESERVED_HEADERS: [&[u8]; 10] = [
+const RESERVED_HEADERS: [&[u8]; 12] = [
     b"authorization",
     b"x-api-key",
+    b"x-goog-api-key",
+    b"x-goog-user-project",
     b"host",
     b"content-length",
     b"connection",
@@ -113,6 +120,47 @@ impl Template {
         };
         template.public_headers()?;
         Ok(template)
+    }
+
+    /// Encode JSON using the approved template's wire content encoding.
+    pub fn encoded_body(&self, body: &[u8]) -> Result<Vec<u8>> {
+        if !self.gzip()? {
+            return Ok(body.to_vec());
+        }
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(body)?;
+        Ok(encoder.finish()?)
+    }
+
+    /// Decode the complete approved wire body before semantic review.
+    pub fn decoded_body(&self, body: &[u8]) -> Result<Vec<u8>> {
+        if !self.gzip()? {
+            return Ok(body.to_vec());
+        }
+        let mut decoded = Vec::new();
+        MultiGzDecoder::new(body)
+            .take(MAX_DECODED_BODY as u64 + 1)
+            .read_to_end(&mut decoded)?;
+        ensure!(
+            decoded.len() <= MAX_DECODED_BODY,
+            "decoded request exceeds body limit"
+        );
+        Ok(decoded)
+    }
+
+    /// Require one unambiguous supported content encoding.
+    fn gzip(&self) -> Result<bool> {
+        let mut encodings = self
+            .headers
+            .iter()
+            .filter(|(name, _)| header_key(name) == b"content-encoding");
+        let encoding = encodings.next().map(|(_, value)| value.as_slice());
+        ensure!(encodings.next().is_none(), "duplicate content encoding");
+        match encoding {
+            None | Some(b"identity") => Ok(false),
+            Some(b"gzip") => Ok(true),
+            _ => bail!("unsupported content encoding"),
+        }
     }
 
     /// Encode public fields without mutating the request HPACK table.
@@ -425,7 +473,10 @@ impl SponsorAudit {
             if parsed.flags == 0 {
                 return Ok(AuditFrame::Partial(self.next_stream));
             }
-            serde_json::from_slice::<Value>(&self.body)
+            let template = self
+                .template_for(self.next_stream)
+                .context("missing public request template")?;
+            serde_json::from_slice::<Value>(&template.decoded_body(&self.body)?)
                 .context("proved HTTP/2 prompt is not JSON")?;
             let prompt = std::mem::take(&mut self.body);
             self.waiting_data = false;
@@ -706,6 +757,35 @@ mod tests {
     };
 
     /// Both adapters bind their authority and path into the same protected prefix.
+    /// Gzip preserves bytes and rejects corrupt, trailing and ambiguous encodings.
+    #[test]
+    fn compressed_body_is_exact_and_complete() {
+        let mut template = Template::fixture_default();
+        template
+            .headers
+            .push((b"content-encoding".to_vec(), b"gzip".to_vec()));
+        let body = br#"{"messages":[{"role":"user","content":"hello"}]}"#;
+        let encoded = template.encoded_body(body).unwrap();
+        assert_eq!(template.encoded_body(body).unwrap(), encoded);
+        assert_eq!(template.decoded_body(&encoded).unwrap(), body);
+        let mut audit = SponsorAudit::new(18, template.clone()).unwrap();
+        std::assert_matches!(audit.accept(&frame(0, 1, 1, &encoded).unwrap()).unwrap(), AuditFrame::Prompt(1, wire) if wire == encoded);
+        assert!(
+            template
+                .decoded_body(&encoded[..encoded.len() - 1])
+                .is_err()
+        );
+        assert!(
+            template
+                .decoded_body(&[encoded.as_slice(), b"junk"].concat())
+                .is_err()
+        );
+        template
+            .headers
+            .push((b"Content-Encoding".to_vec(), b"identity".to_vec()));
+        assert!(template.decoded_body(&encoded).is_err());
+    }
+
     #[test]
     fn provider_templates_share_transport() {
         for (provider, path) in [

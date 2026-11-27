@@ -1,11 +1,12 @@
 //! The provider credentials the relay uses.
 //!
 //! The relay keeps a credential of its own for each route, given to it at
-//! sign-in, and does not borrow the logins of the providers' own tools: a
+//! sign-in: a
 //! token from `claude setup-token` for Claude, and for ChatGPT the login
 //! Codex's device sign-in produces. A credential is read again for every
 //! request, so a renewed one is picked up without restarting the relay,
-//! and it is sent nowhere but to the provider.
+//! and it is sent nowhere but to the provider. Antigravity instead binds the
+//! selected agy account and reads its provider-managed access token for each link.
 
 use std::{
     env, fmt,
@@ -18,7 +19,7 @@ use concurro_relay_protocol::route::Route;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::state::Store;
+use crate::{antigravity, state::Store};
 
 /// Request header naming the ChatGPT account a token is used for.
 pub const CHATGPT_ACCOUNT_HEADER: &str = "chatgpt-account-id";
@@ -31,6 +32,12 @@ pub const CLAUDE_TOKEN_VAR: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credential {
     pub token: String,
+    /// Provider-reported expiry for opaque access tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    /// Account and routing project selected during Antigravity onboarding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antigravity: Option<antigravity::Account>,
     /// Headers which must accompany the token. Unlike the token they are
     /// revealed to Concurro.
     pub headers: Vec<(String, String)>,
@@ -51,12 +58,17 @@ impl Credential {
     pub fn token(token: &str) -> Self {
         Self {
             token: token.to_owned(),
+            expires_at: None,
+            antigravity: None,
             headers: Vec::new(),
         }
     }
 
     /// When the token says it stops being valid, if it says.
     pub fn expiry(&self) -> Option<SystemTime> {
+        if let Some(expires) = self.expires_at {
+            return UNIX_EPOCH.checked_add(Duration::from_secs(expires));
+        }
         let claims = URL_SAFE_NO_PAD.decode(self.token.split('.').nth(1)?).ok()?;
         let expires = serde_json::from_slice::<Value>(&claims).ok()?["exp"].as_u64()?;
         Some(UNIX_EPOCH + Duration::from_secs(expires))
@@ -73,10 +85,21 @@ pub enum Source {
 }
 
 impl Source {
+    /// Read a link credential, letting agy renew its own stored OAuth grant when needed.
+    pub async fn for_native(&self, route: Route) -> Result<Credential> {
+        if route == Route::AntigravitySubscription
+            && let Self::Kept(store) = self
+        {
+            antigravity::refresh_if_needed(store).await?;
+        }
+        self.load(route)
+    }
+
     /// The credential for `route` as it is now.
     pub fn load(&self, route: Route) -> Result<Credential> {
         let credential = match (self, route) {
             (Self::Fixed(credential), _) => credential.clone(),
+            (Self::Kept(store), Route::AntigravitySubscription) => antigravity::load(store)?,
             (Self::Kept(store), Route::ChatgptSubscription) => store
                 .credential(route)?
                 .context("needs a ChatGPT sign-in")?,

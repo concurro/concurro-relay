@@ -99,6 +99,9 @@ async fn handle(app: Arc<App>, request: Request<Incoming>) -> Outcome {
         (&Method::POST, api_dispatch::MESSAGES_PATH) => {
             Operation::Dispatch(dispatch::Provider::Claude)
         }
+        (&Method::POST, api_dispatch::ANTIGRAVITY_PATH) => {
+            Operation::Dispatch(dispatch::Provider::Antigravity)
+        }
         (&Method::POST, api_dispatch::RESPONSES_PATH) => {
             Operation::Dispatch(dispatch::Provider::Codex)
         }

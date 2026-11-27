@@ -81,6 +81,9 @@ pub struct BootstrapResult {
     pub route: String,
     /// HTTP adapter selected for this session, absent for Codex.
     pub provider: Option<HttpProvider>,
+    /// Sponsor-selected account or subscription routing project.
+    #[serde(default)]
+    pub account: Option<String>,
     /// Hash of the two public TLS hello messages.
     pub h2: String,
     /// Hash of the authenticated server Finished transcript.
@@ -510,6 +513,7 @@ fn result(
     BootstrapResult {
         route: options.route().into(),
         provider: (options.profile == Profile::TlsKeyUpdate).then_some(options.provider),
+        account: options.account.clone(),
         h2: hex::encode(h2),
         h3: hex::encode(h3),
         session_id: hex::encode(session),

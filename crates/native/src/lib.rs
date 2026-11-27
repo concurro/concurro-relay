@@ -137,12 +137,12 @@ pub enum NativeRole {
 }
 
 /// A request Concurro asks the Sponsor to approve before any of it reaches
-/// the provider. Every byte later released must match `prompt`.
+/// the provider. Released bytes must match the retained wire body decoded into `prompt`.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct NativeRequest {
     /// Review number on this TLS connection.
     pub request: u64,
-    /// Request body or WebSocket message text.
+    /// Decoded HTTP request body or WebSocket message text.
     pub prompt: String,
     /// Digest of the prompt bytes.
     pub sha256: String,
@@ -236,7 +236,7 @@ pub struct NativeOptions {
     pub listen: Option<String>,
     /// Sponsor-only provider credential.
     pub token: Option<String>,
-    /// Public ChatGPT account identifier, when present.
+    /// Sponsor-selected ChatGPT account or Antigravity subscription project.
     pub account: Option<String>,
     /// Sponsor-side stream of per-request native audit events.
     pub audit: Option<UnboundedSender<NativeAudit>>,
@@ -296,7 +296,13 @@ where
         .arg("--route")
         .arg(match options.route {
             Route::ChatgptSubscription => "codex",
-            Route::ClaudeSubscription => "tls_key_update",
+            Route::ClaudeSubscription | Route::AntigravitySubscription => "tls_key_update",
+        })
+        .arg("--provider")
+        .arg(if options.route == Route::AntigravitySubscription {
+            "antigravity"
+        } else {
+            "claude"
         })
         .arg("--control")
         .arg(&control_path)

@@ -11,6 +11,7 @@ use concurro_relay_native_transport::tunnel::{Role, Tunnel};
 use concurro_relay_provider_protocol::{
     HttpProvider,
     codex::{RequestBinding, RequestClaim},
+    tls_key_update::Template,
 };
 use concurro_relay_tls13::{
     handshake::Profile,
@@ -41,11 +42,13 @@ struct Fixture {
     ca: PathBuf,
     key: PathBuf,
     profile: Profile,
+    /// HTTP provider whose certificate and prefix are exercised.
+    http_provider: HttpProvider,
 }
 
 impl Fixture {
     /// Generate a CA and route-specific leaf so both roles authenticate real TLS.
-    fn new(bundle: PathBuf, profile: Profile) -> Result<Self> {
+    fn new(bundle: PathBuf, profile: Profile, http_provider: HttpProvider) -> Result<Self> {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let root = env::var_os("CONCURRO_PHASE3_EVIDENCE")
             .map(PathBuf::from)
@@ -55,7 +58,7 @@ impl Fixture {
                 if profile == Profile::Codex {
                     "codex"
                 } else {
-                    "claude"
+                    http_provider.hostname()
                 }
             ));
         fs::create_dir_all(&root)?;
@@ -68,7 +71,7 @@ impl Fixture {
         let host = if profile == Profile::Codex {
             "chatgpt.com"
         } else {
-            "api.anthropic.com"
+            http_provider.hostname()
         };
         // An installed openssl.cnf can add its own CA extensions; LibreSSL then repeats the
         // ones below, and webpki rejects a repeated extension. Only these flags apply.
@@ -157,6 +160,7 @@ impl Fixture {
             ca,
             key,
             profile,
+            http_provider,
         })
     }
     /// Provider ALPN profile label.
@@ -219,7 +223,7 @@ impl Fixture {
     /// Build an explicitly selected development bootstrap configuration.
     fn options(&self, run: &Path, name: &str, role: NativeRole, port: u16) -> BootstrapOptions {
         BootstrapOptions {
-            provider: HttpProvider::Claude,
+            provider: self.http_provider,
             role,
             profile: self.profile,
             runtime: self.runtime(run, name, role),
@@ -229,7 +233,14 @@ impl Fixture {
             credential: None,
             account: None,
             codex_headers: Vec::new(),
-            http_template: None,
+            http_template: (self.profile == Profile::TlsKeyUpdate).then(|| {
+                let mut template = Template::fixture_default();
+                template.provider = self.http_provider;
+                if self.http_provider == HttpProvider::Antigravity {
+                    template.path = b"/v1internal:streamGenerateContent?alt=sse".to_vec();
+                }
+                template
+            }),
         }
     }
 }
@@ -241,8 +252,12 @@ async fn rust_bootstrap() -> Result<()> {
     let bundle = PathBuf::from(
         env::var_os("CONCURRO_PHASE3_FIXTURE_BUNDLE").context("accepted bundle path missing")?,
     );
-    for profile in [Profile::Codex, Profile::TlsKeyUpdate] {
-        let fixture = Fixture::new(bundle.clone(), profile)?;
+    for (profile, provider) in [
+        (Profile::Codex, HttpProvider::Claude),
+        (Profile::TlsKeyUpdate, HttpProvider::Claude),
+        (Profile::TlsKeyUpdate, HttpProvider::Antigravity),
+    ] {
+        let fixture = Fixture::new(bundle.clone(), profile, provider)?;
         let pair = run_case(&fixture, "both-rust").await?;
         ensure!(
             pair.0["h2"] == pair.1["h2"]
@@ -318,8 +333,8 @@ async fn untrusted_provider_aborts_bootstrap() -> Result<()> {
     let bundle = PathBuf::from(
         env::var_os("CONCURRO_PHASE3_FIXTURE_BUNDLE").context("accepted bundle path missing")?,
     );
-    let fixture = Fixture::new(bundle.clone(), Profile::Codex)?;
-    let unrelated_ca = Fixture::new(bundle, Profile::TlsKeyUpdate)?.ca;
+    let fixture = Fixture::new(bundle.clone(), Profile::Codex, HttpProvider::Claude)?;
+    let unrelated_ca = Fixture::new(bundle, Profile::TlsKeyUpdate, HttpProvider::Claude)?.ca;
     let run = fixture.root.join("untrusted-provider");
     fs::create_dir_all(&run)?;
     let (mut provider, port) = fixture.provider(&run).await?;
@@ -366,7 +381,7 @@ async fn packaged_request_proof() -> Result<()> {
     let bundle = PathBuf::from(
         env::var_os("CONCURRO_PHASE3_FIXTURE_BUNDLE").context("accepted bundle path missing")?,
     );
-    let fixture = Fixture::new(bundle, Profile::Codex)?;
+    let fixture = Fixture::new(bundle, Profile::Codex, HttpProvider::Claude)?;
     let run = fixture.root.join("request-proof");
     let sponsor_runtime = fixture.runtime(&run, "sponsor", NativeRole::Sponsor);
     let concurro_runtime = fixture.runtime(&run, "concurro", NativeRole::Concurro);

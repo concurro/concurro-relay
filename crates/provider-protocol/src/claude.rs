@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 
-use crate::ResponseSummary;
+use crate::{ResponseSummary, sse::Lines};
 
 /// Validate a completed SSE response after its bytes were streamed locally.
 pub fn summarize_sse(
@@ -30,7 +30,7 @@ pub fn summarize_sse(
 /// Incrementally summarize the same raw SSE body without retaining its content deltas.
 #[derive(Default)]
 pub struct SseSummarizer {
-    partial: Vec<u8>,
+    lines: Lines,
     start: Option<Value>,
     delta: Option<Value>,
     stopped: bool,
@@ -40,30 +40,14 @@ pub struct SseSummarizer {
 impl SseSummarizer {
     /// Accept a body fragment; an event may span more than one fragment.
     pub fn push(&mut self, bytes: &[u8]) -> Result<()> {
-        for part in bytes.split_inclusive(|byte| *byte == b'\n') {
-            if let Some(line) = part.strip_suffix(b"\n") {
-                if self.partial.is_empty() {
-                    self.event(line)?;
-                } else {
-                    let mut complete = std::mem::take(&mut self.partial);
-                    complete.extend_from_slice(line);
-                    self.event(&complete)?;
-                    complete.clear();
-                    self.partial = complete;
-                }
-            } else {
-                self.partial.extend_from_slice(part);
-            }
-        }
-        Ok(())
+        let mut lines = std::mem::take(&mut self.lines);
+        let result = lines.push(bytes, |event| self.event(event));
+        self.lines = lines;
+        result
     }
 
     /// Collect identity, usage and tool names from one complete SSE data line.
-    fn event(&mut self, line: &[u8]) -> Result<()> {
-        let Some(value) = line.strip_prefix(b"data: ") else {
-            return Ok(());
-        };
-        let event: Value = serde_json::from_slice(value)?;
+    fn event(&mut self, event: Value) -> Result<()> {
         match event["type"].as_str() {
             Some("message_start") => {
                 ensure!(
@@ -98,8 +82,9 @@ impl SseSummarizer {
 
     /// Resolve usage at EOF and validate any final line without a newline.
     pub fn finish(&mut self) -> Result<ResponseSummary> {
-        let last = std::mem::take(&mut self.partial);
-        self.event(&last)?;
+        let mut lines = std::mem::take(&mut self.lines);
+        lines.finish(|event| self.event(event))?;
+        self.lines = lines;
         self.summary()
     }
 
@@ -139,5 +124,28 @@ impl SseSummarizer {
             usage.extend(update.clone());
         }
         Value::Object(usage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SseSummarizer;
+
+    /// Shared line decoding keeps Claude identity, tool names and merged usage intact.
+    #[test]
+    fn fragmented_claude_sse() {
+        let body = b"data: {\"type\":\"message_start\",\"message\":{\"id\":\"c1\",\"usage\":{\"input_tokens\":6}}}\r\n\r\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"Read\"}}\n\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\ndata: {\"type\":\"message_stop\"}";
+        for size in 1..body.len() {
+            let mut tap = SseSummarizer::default();
+            for part in body.chunks(size) {
+                tap.push(part).unwrap();
+            }
+            let summary = tap.finish().unwrap();
+            assert_eq!(summary.message_id, "c1");
+            assert_eq!(summary.usage["input_tokens"], 6);
+            assert_eq!(summary.usage["output_tokens"], 7);
+            assert_eq!(summary.tool_uses, ["Read"]);
+            assert!(tap.completed().is_some());
+        }
     }
 }

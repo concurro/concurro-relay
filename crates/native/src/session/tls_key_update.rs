@@ -36,6 +36,8 @@ struct ResponseState {
     body: Vec<u8>,
     /// Terminal H2 stream marker was received.
     done: bool,
+    /// A successful SSE response has begun forwarding to the local client.
+    streaming: bool,
     /// Time from request start to the first authenticated response DATA.
     first_data_seconds: Option<f64>,
 }
@@ -48,6 +50,7 @@ impl ResponseState {
             headers: Vec::new(),
             body: Vec::new(),
             done: false,
+            streaming: false,
             first_data_seconds: None,
         }
     }
@@ -75,7 +78,8 @@ async fn deliver<C: AsyncRead + AsyncWrite + Unpin>(
                     .unwrap_or_else(|| "application/octet-stream".to_owned());
                 response.status = Some(status);
                 response.headers = headers;
-                if status == 200 {
+                response.streaming = status == 200 && content_type.contains("text/event-stream");
+                if response.streaming {
                     reply
                         .send(Ok(HttpEvent::Start(status, content_type)))
                         .await
@@ -87,7 +91,7 @@ async fn deliver<C: AsyncRead + AsyncWrite + Unpin>(
                     .first_data_seconds
                     .get_or_insert_with(|| started.elapsed().as_secs_f64());
                 response.body.extend_from_slice(&bytes);
-                if response.status == Some(200) {
+                if response.streaming {
                     reply
                         .send(Ok(HttpEvent::Data(bytes)))
                         .await
@@ -182,7 +186,7 @@ async fn exchange<C: AsyncRead + AsyncWrite + Unpin>(
 
 /// Answers the local CLI's request with the Sponsor's rejection.
 async fn reject(turn: &HttpTurn, error: &anyhow::Error) -> Result<()> {
-    let body = ingress::tls_key_update::rejection(&error.to_string())?;
+    let body = ingress::tls_key_update::rejection(turn.template.provider, &error.to_string())?;
     turn.reply
         .send(Ok(HttpEvent::Start(403, "application/json".into())))
         .await
@@ -205,10 +209,17 @@ pub async fn review_first<C: AsyncRead + AsyncWrite + Unpin>(
     body: &[u8],
     template: &Template,
     compact: bool,
+    account: Option<&str>,
 ) -> Result<()> {
-    let provider = ProviderState::new(template.provider, compact);
+    let provider = ProviderState::new(template.provider, compact, account);
     let prepared = provider.prepare(body, template)?;
-    super::ask_review(peer, 0, &prepared.body, Some(template)).await
+    super::ask_review(
+        peer,
+        0,
+        &template.encoded_body(&prepared.body)?,
+        Some(template),
+    )
+    .await
 }
 
 /// Complete successive HTTP/2 streams without another TLS bootstrap.
@@ -258,7 +269,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
     let provider = result
         .provider
         .context("HTTP provider missing from session")?;
-    let mut provider_state = ProviderState::new(provider, compact);
+    let mut provider_state = ProviderState::new(provider, compact, result.account.as_deref());
     while let Some(turn) = turns.recv().await {
         let outcome = async {
             let mut template = turn.template.clone();
@@ -266,6 +277,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
             let source_bytes = turn.body.len();
             let mut prepared = provider_state.prepare(&turn.body, &template)?;
             loop {
+                let wire_body = template.encoded_body(&prepared.body)?;
                 let started = Instant::now();
                 let proofs_before = link.turn;
                 let proof_time_before = link.proof_time;
@@ -274,8 +286,8 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                     &json!({"event":"request_start", "turn":turn_index,
                     "attempt":request_index, "mode":prepared.mode, "parent":prepared.parent,
                     "decision":prepared.decision, "mismatch":prepared.mismatch,
-                    "cli_body_bytes":source_bytes, "provider_body_bytes":prepared.body.len(),
-                    "provider_body_sha256":hex::encode(helpers::sha256(&prepared.body))}),
+                    "cli_body_bytes":source_bytes, "provider_body_bytes":wire_body.len(), "provider_json_bytes":prepared.body.len(),
+                    "provider_body_sha256":hex::encode(helpers::sha256(&wire_body))}),
                 )
                 .await?;
                 let result = exchange(
@@ -284,7 +296,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                     &mut reader,
                     &turn,
                     &template,
-                    &prepared.body,
+                    &wire_body,
                     request_index == 0,
                     started,
                 )
@@ -315,7 +327,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                     "proof_records":link.turn - proofs_before,
                     "proof_seconds":(link.proof_time - proof_time_before).as_secs_f64(),
                     "response_bytes":response.body.len(),
-                    "error_code":error["error"]["details"]["error_code"]}),
+                    "error_code":provider.error_code(&error)}),
                 )
                 .await?;
                 request_index += 1;
@@ -330,8 +342,8 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                     .unwrap_or_default();
                 if status != 200 || !content_type.contains("text/event-stream") {
                     let evidence = json!({"status":status, "content_type":content_type,
-                        "error_type":error["error"]["type"],
-                        "error_code":error["error"]["details"]["error_code"],
+                        "error_type":provider.error_kind(&error),
+                        "error_code":provider.error_code(&error),
                         "response_sha256":hex::encode(helpers::sha256(&response.body))});
                     tokio::fs::write(
                         runtime
@@ -384,7 +396,7 @@ pub async fn concurro<C: AsyncRead + AsyncWrite + Unpin>(
                     .await?;
                 responses.push(json!({"stream":stream, "message_id":summary.message_id,
                     "usage":summary.usage, "status":status, "cli_body_bytes":source_bytes,
-                    "provider_body_bytes":prepared.body.len(), "mode":prepared.mode,
+                    "provider_body_bytes":wire_body.len(), "provider_json_bytes":prepared.body.len(), "mode":prepared.mode,
                     "parent":prepared.parent, "proof_records":link.turn - proofs_before,
                     "proof_seconds":(link.proof_time - proof_time_before).as_secs_f64(),
                     "provider_tool_uses":summary.tool_uses}));

@@ -5,6 +5,7 @@ use std::{fmt, str::FromStr};
 use anyhow::{Result, bail, ensure};
 use concurro_relay_protocol::route::Route;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::{ResponseSummary, antigravity, claude};
 
@@ -23,7 +24,7 @@ impl HttpProvider {
     pub fn hostname(self) -> &'static str {
         match self {
             Self::Claude => Route::ClaudeSubscription.host(),
-            Self::Antigravity => "daily-cloudcode-pa.googleapis.com",
+            Self::Antigravity => Route::AntigravitySubscription.host(),
         }
     }
 
@@ -35,6 +36,34 @@ impl HttpProvider {
         };
         ensure!(paths.contains(&path), "unsupported {self} request path");
         Ok(())
+    }
+
+    /// Render a local refusal using the provider's error envelope.
+    pub fn error(self, status: u16, message: &str) -> Value {
+        match self {
+            Self::Claude => {
+                json!({"type":"error","error":{"type": if status == 403 { "permission_error" } else { "invalid_request_error" },"message":message}})
+            }
+            Self::Antigravity => {
+                json!({"error":{"code":status,"status":if status == 403 { "PERMISSION_DENIED" } else { "INVALID_ARGUMENT" },"message":message}})
+            }
+        }
+    }
+
+    /// Provider-owned error classification without its potentially sensitive message.
+    pub fn error_kind(self, error: &Value) -> &Value {
+        match self {
+            Self::Claude => &error["error"]["type"],
+            Self::Antigravity => &error["error"]["status"],
+        }
+    }
+
+    /// Provider-owned numeric or symbolic error code for audit evidence.
+    pub fn error_code(self, error: &Value) -> &Value {
+        match self {
+            Self::Claude => &error["error"]["details"]["error_code"],
+            Self::Antigravity => &error["error"]["code"],
+        }
     }
 
     /// Summarize an authenticated provider response with its own codec.

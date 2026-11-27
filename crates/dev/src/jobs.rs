@@ -32,6 +32,7 @@ pub fn is_inference(route: Route, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     match route {
         Route::ClaudeSubscription => path.ends_with("/messages"),
+        Route::AntigravitySubscription => path.ends_with(":streamGenerateContent"),
         Route::ChatgptSubscription => path.ends_with("/responses"),
     }
 }
@@ -69,7 +70,7 @@ pub fn job<'a>(
     }
 
     let path = match route {
-        Route::ClaudeSubscription => path.to_owned(),
+        Route::ClaudeSubscription | Route::AntigravitySubscription => path.to_owned(),
         Route::ChatgptSubscription => format!(
             "/backend-api/codex{}",
             path.strip_prefix("/v1").unwrap_or(path)

@@ -71,6 +71,16 @@ gh workflow run release.yml -f tag=dry-run                  # build and test; pu
 gh workflow run release.yml --ref v0.1.0 -f tag=v0.1.0      # release an existing tag
 ```
 
+## Protocol 6 release
+
+The Antigravity and shared gzip changes require protocol 6 Sponsors. Publish the Sponsor
+bundle and verifier from the same reviewed relay revision. Upgrade devices before enabling
+the verifier; older clients receive the protocol upgrade refusal. Pin Concurro's
+`concurro-relay-hosted-api` dependency to that release, then release the service, launcher
+and Backoffice with their Google migrations. Verify both Claude and Antigravity dispatch
+with the new Sponsor. Google's default destination is
+`daily-cloudcode-pa.googleapis.com:443`.
+
 ## Protocol 5 release
 
 Sponsor 0.1.2 introduced relay protocol 5. To deploy it:

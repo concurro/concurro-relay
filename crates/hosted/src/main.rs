@@ -93,6 +93,12 @@ struct Args {
     /// Seconds one connection of a relay link waits for the other.
     #[arg(long, default_value = "30")]
     half_link_timeout_secs: NonZeroU64,
+    /// Antigravity subscription TCP destination; TLS identity stays provider-bound.
+    #[arg(long, default_value = "daily-cloudcode-pa.googleapis.com")]
+    antigravity_provider_host: String,
+    /// Antigravity subscription TCP port.
+    #[arg(long, default_value_t = 443)]
+    antigravity_provider_port: u16,
     /// Relay connections open at once before their relay is known; more are
     /// closed as they arrive.
     #[arg(long, default_value = "1024")]

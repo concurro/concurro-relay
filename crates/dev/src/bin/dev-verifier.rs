@@ -213,6 +213,12 @@ struct Args {
     /// Claude provider socket port for mixed-route native runs.
     #[arg(long)]
     provider_claude_port: Option<u16>,
+    /// Antigravity test provider TCP host.
+    #[arg(long)]
+    provider_antigravity_host: Option<String>,
+    /// Antigravity test provider TCP port.
+    #[arg(long)]
+    provider_antigravity_port: Option<u16>,
     /// Codex provider socket host for mixed-route native runs.
     #[arg(long)]
     provider_codex_host: Option<String>,
@@ -309,6 +315,10 @@ async fn main() -> Result<()> {
                 let route = args.routes[(number.saturating_sub(1) as usize) % args.routes.len()];
                 next_id += 1;
                 let (host_override, port_override) = match route {
+                    Route::AntigravitySubscription => (
+                        &args.provider_antigravity_host,
+                        args.provider_antigravity_port,
+                    ),
                     Route::ClaudeSubscription => {
                         (&args.provider_claude_host, args.provider_claude_port)
                     }
@@ -382,7 +392,7 @@ async fn main() -> Result<()> {
                 },
                 relay_headers: match route {
                     Route::ChatgptSubscription => vec![CHATGPT_ACCOUNT_HEADER.to_owned()],
-                    Route::ClaudeSubscription => Vec::new(),
+                    Route::ClaudeSubscription | Route::AntigravitySubscription => Vec::new(),
                 },
             };
             let gateway = Gateway::new(
