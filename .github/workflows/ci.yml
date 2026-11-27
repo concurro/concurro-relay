@@ -30,7 +30,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
       - name: Install cargo-nextest
-        run: cargo install --locked cargo-nextest@0.9.145
+        run: cargo install --locked cargo-nextest@0.9.152
       - name: Test
         run: cargo nextest run --workspace --locked
       - name: Check shell scripts

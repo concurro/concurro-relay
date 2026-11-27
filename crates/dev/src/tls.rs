@@ -14,7 +14,9 @@ use tokio_rustls::TlsAcceptor;
 /// certificate as PEM for relays to trust.
 pub fn self_signed(names: Vec<String>) -> Result<(TlsAcceptor, String)> {
     let certified = rcgen::generate_simple_self_signed(names)?;
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()));
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        certified.signing_key.serialize_der(),
+    ));
     let config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
         .with_safe_default_protocol_versions()?
         .with_no_client_auth()

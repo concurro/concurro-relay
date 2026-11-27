@@ -24,23 +24,23 @@ concurro-relay-tls13 = { path = "crates/tls13" }
 tlsn = { path = "upstream/tlsn/crates/tlsn", features = ["mozilla-certs"] }
 tlsn-server-fixture-certs = { path = "upstream/tlsn/crates/server-fixture/certs" }
 
-anyhow = { version = "=1.0.104", default-features = false, features = ["std"] }
-base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
-clap = { version = "=4.6.7", default-features = false, features = ["color", "derive", "env", "error-context", "help", "std", "suggestions", "usage"] }
-dirs = { version = "=6.0.0", default-features = false }
+anyhow = { version = "=1.0.105", default-features = false, features = ["std"] }
+base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
+clap = { version = "=4.6.10", default-features = false, features = ["color", "derive", "env", "error-context", "help", "std", "suggestions", "usage"] }
+dirs = { version = "=7.0.0", default-features = false }
 futures = { version = "=0.3.34", default-features = false, features = ["async-await", "executor", "std"] }
 hex = { version = "=0.4.3", default-features = false, features = ["std"] }
 http-body-util = { version = "=0.1.5", default-features = false }
-hyper = { version = "=1.12.0", default-features = false, features = ["http1", "server", "client"] }
+hyper = { version = "=1.13.0", default-features = false, features = ["http1", "server", "client"] }
 hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio"] }
 httlib-hpack = { version = "=0.1.3", default-features = false }
 libc = { version = "=0.2.191", default-features = false, features = ["std"] }
 mimalloc = { version = "=0.1.52", default-features = false }
-num-bigint = { version = "=0.4.8", default-features = false, features = ["std"] }
+num-bigint = { version = "=0.5.1", default-features = false, features = ["std"] }
 percent-encoding = { version = "=2.3.2", default-features = false, features = ["alloc"] }
-p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic", "ecdsa", "pem", "std"] }
-ratatui = { version = "=0.29.0", default-features = false, features = ["crossterm", "underline-color"] }
-rcgen = { version = "=0.13.2", default-features = false, features = ["crypto", "pem", "ring"] }
+p256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "pem", "std"] }
+ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm", "underline-color"] }
+rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 ring = { version = "=0.17.14", default-features = false, features = ["alloc", "dev_urandom_fallback"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "tls12", "std"] }
 rustls-pemfile = { version = "=2.2.0", default-features = false, features = ["std"] }
@@ -52,10 +52,10 @@ subtle = { version = "=2.6.1", default-features = false }
 time = { version = "=0.3.55", default-features = false, features = ["serde-well-known"] }
 tokio = { version = "=1.54.1", default-features = false, features = ["full"] }
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
-tokio-tungstenite = { version = "=0.26.2", default-features = false, features = ["handshake"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
 tokio-util = { version = "=0.7.20", default-features = false, features = ["compat"] }
 webpki-roots = { version = "=1.0.12", default-features = false }
-zstd = { version = "=0.13.5", default-features = false, features = ["arrays", "legacy", "zdict_builder"] }
+zstd = { version = "=0.14.5", default-features = false, features = ["arrays", "legacy", "zdict_builder"] }
 
 # Proofs are too slow to develop against without optimization.
 [profile.dev]

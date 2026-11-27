@@ -40,6 +40,6 @@ from_crate() {
 }
 
 mkdir -p "$root/upstream"
-from_git tlsn https://github.com/tlsnotary/tlsn ca12b4a9847fa9e7063caafc49ec356203fc35a6
-from_git mpz2 https://github.com/tlsnotary/mpz2 23e2cc08ed11ae86d71f72fb968f1273d70c9e88
+from_git tlsn https://github.com/tlsnotary/tlsn 40a069565a2eaecbb5e691dbc634be20e8498daf
+from_git mpz2 https://github.com/tlsnotary/mpz2 6a1864d0b4425bfc81abdec42ec4b3f5a3ffced2
 from_crate rangeset 0.4.1 6b18f9905582a6a9bbd5ae3106aea9a2a73edb452b30ac844f93f5a5f0eda217

@@ -4,17 +4,36 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mpz-circuits = { path = "../mpz2/crates/circuits", features = ["aes"] }
+mpz-circuits = { workspace = true, features = ["aes"] }
+mpz-common = { workspace = true }
+mpz-core = { workspace = true }
+mpz-hash = { workspace = true, features = ["sha256"], default-features = false }
+mpz-ot = { workspace = true }
+mpz-vm-core = { workspace = true }
+mpz-zk = { workspace = true, features = ["rayon"] }
+anyhow = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
+tokio-util = { workspace = true, features = ["compat"] }
+
+[workspace]
+resolver = "3"
+
+[workspace.dependencies]
+mpz-circuits = { path = "../mpz2/crates/circuits" }
 mpz-common = { path = "../mpz2/crates/common" }
 mpz-core = { path = "../mpz2/crates/core" }
-mpz-hash = { path = "../mpz2/crates/hash", default-features = false, features = ["sha256"] }
+mpz-hash = { path = "../mpz2/crates/hash", default-features = false }
 mpz-ot = { path = "../mpz2/crates/ot" }
 mpz-vm-core = { path = "../mpz2/crates/vm-core" }
-mpz-zk = { path = "../mpz2/crates/zk", features = ["rayon"] }
-anyhow = "1"
-hex = "0.4"
-rand = "0.10"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread"] }
-tokio-util = { version = "0.7", features = ["compat"] }
+mpz-zk = { path = "../mpz2/crates/zk" }
+anyhow = { version = "=1.0.105" }
+hex = { version = "=0.4.3" }
+rand = { version = "=0.10.4" }
+serde = { version = "=1.0.229" }
+serde_json = { version = "=1.0.154" }
+tokio = { version = "=1.54.1" }
+tokio-util = { version = "=0.7.20" }

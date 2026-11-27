@@ -345,8 +345,9 @@ mod tests {
 
     fn tls() -> TlsAcceptor {
         let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let key =
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()));
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certified.signing_key.serialize_der(),
+        ));
         let config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
             .with_safe_default_protocol_versions()
             .unwrap()

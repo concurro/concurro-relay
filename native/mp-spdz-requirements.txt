@@ -1,4 +1,4 @@
-# MP-SPDZ compile.py dependency for native/build_macos_arm64.sh (macOS arm64 wheels and sdist).
+# MP-SPDZ compile.py dependency (macOS arm64, Linux CPython 3.15 amd64, and sdist).
 gmpy2==2.3.2 \
     --hash=sha256:f9b81e4fbe6282b241119664e42c8ab93685b6fc739174a55b012506e91135f6 \
     --hash=sha256:287060194af46c3de0853a62e89e76acec7c211c40ac2c1d9fabb7216432b642 \
@@ -11,4 +11,5 @@ gmpy2==2.3.2 \
     --hash=sha256:4505bef9716404da7ca57814432604d7015b76b3493834f8399cd97e01a8383d \
     --hash=sha256:548ed57a7d99ac59f7145359efbc05e5529428750cfbec7819c68ca6612b29ab \
     --hash=sha256:71b2f43164ff5f3648aee650647bdd7dee3047311aa37071ce5234001fe44971 \
-    --hash=sha256:f20b7e2f8fd16f8d6846bb5b73359c3cc5aa41ec5cf266321d362f547c8fd097
+    --hash=sha256:f20b7e2f8fd16f8d6846bb5b73359c3cc5aa41ec5cf266321d362f547c8fd097 \
+    --hash=sha256:8834a8bf36a83a413438f2b7b7e166aaaea911c81c56dcfeca930225473a45f5

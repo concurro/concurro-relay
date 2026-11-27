@@ -131,7 +131,7 @@ class NoticeTests(unittest.TestCase):
                                 for file in entry['notices']))
             self.assertEqual(crates['tlsn-core']['source'],
                              'git+https://github.com/tlsnotary/tlsn#'
-                             'ca12b4a9847fa9e7063caafc49ec356203fc35a6')
+                             '40a069565a2eaecbb5e691dbc634be20e8498daf')
             self.assertEqual(crates['tlsn-core']['modified_by'], ['patches/tlsn'])
             self.assertNotIn(str(Path.home()), json.dumps(entries))
 
